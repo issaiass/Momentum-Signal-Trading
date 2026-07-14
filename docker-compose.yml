@@ -1,0 +1,50 @@
+services:
+  momentum-signal:
+    build: .
+    container_name: momentum-signal
+    restart: unless-stopped
+    environment:
+      - MOMENTUM_TRADING_ROOT=/app
+      # Cron schedule (Epic 20): standard 5-field cron syntax, evaluated in the
+      # container's TZ (America/New_York, set in the Dockerfile). Changing these only
+      # needs `docker compose up -d` (container recreate), NOT `--build` -- the
+      # entrypoint regenerates /etc/cron.d/momentum-cron from these on every start.
+      # Defaults: daily-runner at 9:35am ET weekdays; risk_monitor hourly 9am-4pm ET weekdays.
+      - DAILY_RUNNER_CRON=${DAILY_RUNNER_CRON:-35 9 * * 1-5}
+      - RISK_MONITOR_CRON=${RISK_MONITOR_CRON:-0 9-16 * * 1-5}
+      # Epic 22: space-separated portfolio names to independently risk-monitor, one
+      # cron entry each -- must match names under config.yaml's portfolios: key.
+      # Defaults to just "portfolio1"; add more (e.g. "portfolio1 portfolio2") if
+      # config.yaml defines additional portfolios you want automated oversight for.
+      - RISK_MONITOR_PORTFOLIOS=${RISK_MONITOR_PORTFOLIOS:-portfolio1}
+      - FMP_API_KEY=${FMP_API_KEY:-}
+      - EODHD_API_KEY=${EODHD_API_KEY:-}
+      # IBKR host: use host.docker.internal on Mac/Windows Docker Desktop;
+      # on Linux, use --network host or the host machine's real IP instead.
+      - IBKR_HOST=${IBKR_HOST:-host.docker.internal}
+      - IBKR_PORT=${IBKR_PORT:-7497}
+      # Email alerting (daily_runner.py) -- all four required for alerts to send;
+      # missing any of them logs the alert instead of failing silently.
+      # SMTP_PROVIDER selects the auth mechanism: "gmail" (SMTP_PASS, default)
+      # or "outlook" (OAuth2 via MS_OAUTH_CLIENT_ID below).
+      - SMTP_PROVIDER=${SMTP_PROVIDER:-gmail}
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASS=${SMTP_PASS:-}
+      - ALERT_TO_EMAIL=${ALERT_TO_EMAIL:-}
+      # Outlook.com/Hotmail/Microsoft 365 only: OAuth2 in place of SMTP_PASS (basic
+      # auth is disabled on those accounts). See docs/DEPLOYMENT.md. The token
+      # cache lives under ./data, which is already volume-mounted below, so the
+      # one-time device-code login survives container restarts/rebuilds.
+      - MS_OAUTH_CLIENT_ID=${MS_OAUTH_CLIENT_ID:-}
+      - MS_OAUTH_TENANT=${MS_OAUTH_TENANT:-consumers}
+      # Email-commanded remote actions (Epic 13) -- opt-in, all four required to activate
+      - IMAP_HOST=${IMAP_HOST:-}
+      - IMAP_USER=${IMAP_USER:-}
+      - IMAP_PASS=${IMAP_PASS:-}
+      - TRUSTED_SENDER_EMAIL=${TRUSTED_SENDER_EMAIL:-}
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data     # live_trades_log*.csv persist here across container restarts/rebuilds
+    # network_mode: host   # uncomment on Linux if connecting to a local TWS/Gateway instance

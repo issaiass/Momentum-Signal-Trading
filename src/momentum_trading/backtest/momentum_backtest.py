@@ -1,0 +1,1038 @@
+"""
+strategy1_reformulated.py
+
+Institutional-style reformulation of the naive equal-weight momentum backtest.
+
+WHAT THIS DOES DIFFERENTLY FROM THE ORIGINAL `run_custom_backtest`
+--------------------------------------------------------------------
+1. Inverse-volatility position sizing instead of naive equal weight (risk parity–lite).
+2. Portfolio-level volatility targeting -> gross exposure is throttled when realized
+   vol runs hot (this is the single biggest defense against momentum crashes).
+3. Trend/regime filter on the benchmark (SPY > 200D SMA) -> de-risks to cash in
+   confirmed downtrends instead of blindly holding through 2008/2020-style routs.
+4. Per-position stop-loss checked daily, not just at rebalance.
+5. Max single-position weight cap (concentration risk control).
+6. Volatility-aware slippage model + explicit cost ledger (commission vs. slippage
+   are tracked separately so cost drag is visible, not hidden in daily P&L).
+7. Seeded RNG -> reproducible, auditable results (an unseeded backtest is not a backtest).
+8. Full tearsheet: CAGR, vol, Sharpe, Sortino, max drawdown, Calmar, win rate,
+   beta/alpha vs SPY, turnover, and total cost drag -- not just cumulative return.
+
+HONEST CAVEAT
+-------------
+No parameter set here "guarantees" profit or guaranteed SPY outperformance.
+Risk controls reduce tail risk and cost drag; they do not remove market risk.
+Always validate with out-of-sample / walk-forward testing before risking capital,
+and treat any single backtest run with healthy skepticism (regime dependence,
+survivorship bias in the ETF universe, and overfitting are the usual killers).
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+from typing import Optional
+
+import numpy as np
+import pandas as pd
+import pandas_market_calendars as mcal
+
+logger = logging.getLogger("momentum_backtest")
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
+    logger.addHandler(handler)
+logger.setLevel(logging.INFO)
+
+
+# --------------------------------------------------------------------------- #
+# CONFIG
+# --------------------------------------------------------------------------- #
+@dataclass
+class BacktestConfig:
+    holding_period: int = 1                 # months between forced rebalances
+    initial_capital: float = 100_000.0
+    commission: float = 0.0                 # flat $ per trade -- BACKTEST-ONLY: only
+                                             # run_risk_managed_backtest()'s simulated cash
+                                             # ledger reads this. Live trading (daily_runner.py)
+                                             # pulls REAL cash/positions from IBKR every run, so
+                                             # there's no simulated balance to deduct a commission
+                                             # from -- real commission is already reflected
+                                             # automatically in the broker's real account state.
+    exchange: str = "NYSE"
+
+    # --- risk management knobs ---
+    vol_lookback_days: int = 63             # ~3 months, used for inverse-vol weights
+    target_portfolio_vol: float = 0.15      # annualized vol target for the book
+    portfolio_vol_lookback: int = 21        # trailing window to estimate realized vol
+    max_gross_exposure: float = 1.0         # never lever above 100% invested
+    min_gross_exposure: float = 0.20        # floor so we don't fully flatline
+    max_position_weight: float = 0.35       # single-name cap
+    stop_loss_pct: float = 0.12             # per-position stop from entry price
+    use_regime_filter: bool = True
+    regime_benchmark: str = "SPY"
+    regime_sma_window: int = 200
+
+    # --- execution realism ---
+    base_slippage_bps: float = 2.0          # baseline slippage in basis points
+    vol_slippage_multiplier: float = 0.5    # extra slippage scaled by annualized vol
+    random_seed: int = 42
+
+    # --- turnover / cost control ---
+    drift_threshold: float = 0.03           # only trade a name if |target_w - current_w| exceeds this
+    min_trade_size: float = 50.0            # skip any trade below this $ notional
+
+    # --- cash flow simulation ---
+    monthly_contribution: float = 0.0       # $ added to cash at each rebalance date (0 = off)
+
+    # --- share granularity ---
+    allow_fractional_shares: bool = False    # True = size positions to 4dp fractional shares
+                                              # (only if your broker/tickers actually support it)
+
+    # --- Epic 28: live order execution, cash-aware buy sizing ---
+    auto_reduce_buys_on_insufficient_cash: bool = False   # LIVE ONLY. place_orders_ibkr()
+        # always submits SELLs first and waits for them to clear before submitting BUYs
+        # (unconditional, not configurable here). This flag controls what happens if BUYs
+        # would still exceed real available cash after sells clear: False (default) = warn
+        # only, submit as computed, let IBKR's own fill/reject be the backstop. True =
+        # proportionally scale down BUY share counts (floored to whole shares) to fit.
+
+    # --- selection: how many top-momentum-ranked tickers to actually hold ---
+    top_n: int = 10   # e.g. 3 = hold only the 3 strongest names this rebalance; clamped to
+                       # len(tickers) if the portfolio's universe is smaller than this
+
+    log_file_path: str = "trades_log.txt"
+
+    # --- stop-loss automation (item 2) ---
+    auto_execute_stop_loss: bool = False     # False = flag only (live_signal path); True = engine auto-sells (backtest already does this)
+
+    # --- correlation-aware sizing (item 10) ---
+    use_correlation_penalty: bool = False
+    correlation_lookback_days: int = 63
+    correlation_penalty_strength: float = 0.5   # 0 = no penalty, 1 = full pairwise-correlation scaling
+
+    # --- aggregate-drift rebalance skip (item 11) ---
+    aggregate_drift_threshold: float = 0.0   # 0 = disabled (always rebalance if scheduled); e.g. 0.02 = skip whole rebalance if <2% aggregate drift
+
+    # --- crash protection: portfolio-level circuit breaker (Epic 1, Story 1.1) ---
+    max_portfolio_drawdown_pct: float = 0.0   # 0 = disabled; e.g. 0.20 = halt new entries at -20% from peak equity
+
+    # --- crash protection: correlation spike detection (Epic 1, Story 1.2) ---
+    use_correlation_spike_regime: bool = False
+    correlation_spike_short_window: int = 7
+    correlation_spike_baseline_window: int = 63
+    correlation_spike_threshold: float = 0.3
+
+    # --- crash protection: liquidity-crisis-aware execution (Epic 1, Story 1.4) ---
+    liquidity_stress_multiplier: float = 1.0   # 1.0 = disabled; e.g. 2.0 = double slippage under stress
+    liquidity_stress_recent_days: int = 5
+    liquidity_stress_vol_ratio: float = 2.0    # recent vol > this multiple of trailing avg -> stress
+    liquidity_stress_reduce_only: bool = False  # True = block new BUYs (not SELLs) during detected stress
+
+    # --- capacity / market-impact check (Epic 2, Story 2.4) ---
+    max_pct_of_adv: float = 0.0   # 0 = disabled; e.g. 0.05 = warn if a position exceeds 5% of average daily volume
+
+    # --- Epic 10: additional execution safety checks ---
+    max_dollar_drawdown: float | None = None       # e.g. 500.0 -- halt if equity drops this many $ from peak, independent of the % breaker
+    max_slippage_tolerance_pct: float | None = None  # e.g. 0.02 -- alert (not un-fill) if actual fill deviates from expected price by more than this
+    max_price_staleness_minutes: int | None = None   # e.g. 30 -- abort the run rather than trade on a price feed older than this
+    max_holding_days: int | None = None              # e.g. 90 -- force-exit a position after N days regardless of price (time-based stop)
+
+    # --- Epic 9, Story 9.1: alternative position-sizing method ---
+    sizing_method: str = "inverse_vol"   # "inverse_vol" (default) or "score_proportional"
+
+    def __post_init__(self):
+        """Fail fast on nonsensical config combinations instead of producing silently wrong sizing."""
+        errors = []
+        if self.min_gross_exposure > self.max_gross_exposure:
+            errors.append(f"min_gross_exposure ({self.min_gross_exposure}) > max_gross_exposure ({self.max_gross_exposure})")
+        if not (0 < self.max_gross_exposure <= 2.0):
+            errors.append(f"max_gross_exposure ({self.max_gross_exposure}) should be in (0, 2.0]")
+        if not (0 <= self.min_gross_exposure <= 1.0):
+            errors.append(f"min_gross_exposure ({self.min_gross_exposure}) should be in [0, 1.0]")
+        if not (0 < self.max_position_weight <= 1.0):
+            errors.append(f"max_position_weight ({self.max_position_weight}) should be in (0, 1.0]")
+        if not (0 < self.stop_loss_pct < 1.0):
+            errors.append(f"stop_loss_pct ({self.stop_loss_pct}) should be in (0, 1.0)")
+        if self.drift_threshold < 0:
+            errors.append(f"drift_threshold ({self.drift_threshold}) must be >= 0")
+        if self.min_trade_size < 0:
+            errors.append(f"min_trade_size ({self.min_trade_size}) must be >= 0")
+        if self.aggregate_drift_threshold < 0:
+            errors.append(f"aggregate_drift_threshold ({self.aggregate_drift_threshold}) must be >= 0")
+        if not (0 <= self.max_portfolio_drawdown_pct < 1.0):
+            errors.append(f"max_portfolio_drawdown_pct ({self.max_portfolio_drawdown_pct}) should be in [0, 1.0)")
+        if self.holding_period < 1:
+            errors.append(f"holding_period ({self.holding_period}) must be >= 1")
+        if self.top_n < 1:
+            errors.append(f"top_n ({self.top_n}) must be >= 1")
+        if self.initial_capital <= 0:
+            errors.append(f"initial_capital ({self.initial_capital}) must be > 0")
+        if self.commission < 0:
+            errors.append(f"commission ({self.commission}) must be >= 0")
+        if self.target_portfolio_vol <= 0:
+            errors.append(f"target_portfolio_vol ({self.target_portfolio_vol}) must be > 0")
+        if not (0 <= self.correlation_penalty_strength <= 1.0):
+            errors.append(f"correlation_penalty_strength ({self.correlation_penalty_strength}) should be in [0, 1.0]")
+        if self.liquidity_stress_multiplier < 1.0:
+            errors.append(f"liquidity_stress_multiplier ({self.liquidity_stress_multiplier}) must be >= 1.0")
+        if self.liquidity_stress_recent_days < 1:
+            errors.append(f"liquidity_stress_recent_days ({self.liquidity_stress_recent_days}) must be >= 1")
+        if self.liquidity_stress_vol_ratio <= 0:
+            errors.append(f"liquidity_stress_vol_ratio ({self.liquidity_stress_vol_ratio}) must be > 0")
+        if not (0 <= self.max_pct_of_adv <= 1.0):
+            errors.append(f"max_pct_of_adv ({self.max_pct_of_adv}) should be in [0, 1.0]")
+        if self.max_dollar_drawdown is not None and self.max_dollar_drawdown <= 0:
+            errors.append(f"max_dollar_drawdown ({self.max_dollar_drawdown}) must be > 0 or None")
+        if self.max_slippage_tolerance_pct is not None and not (0 < self.max_slippage_tolerance_pct <= 1.0):
+            errors.append(f"max_slippage_tolerance_pct ({self.max_slippage_tolerance_pct}) should be in (0, 1.0] or None")
+        if self.max_price_staleness_minutes is not None and self.max_price_staleness_minutes <= 0:
+            errors.append(f"max_price_staleness_minutes ({self.max_price_staleness_minutes}) must be > 0 or None")
+        if self.max_holding_days is not None and self.max_holding_days <= 0:
+            errors.append(f"max_holding_days ({self.max_holding_days}) must be > 0 or None")
+        if self.sizing_method not in ("inverse_vol", "score_proportional"):
+            errors.append(f"sizing_method ({self.sizing_method!r}) must be 'inverse_vol' or 'score_proportional'")
+
+        if errors:
+            raise ValueError("Invalid BacktestConfig:\n  - " + "\n  - ".join(errors))
+
+
+# --------------------------------------------------------------------------- #
+# HELPERS
+# --------------------------------------------------------------------------- #
+def _split_price_panel(daily_prices: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Accepts either:
+      - a plain DataFrame of close prices (columns = tickers), or
+      - a MultiIndex-column DataFrame shaped like daily_prices.xs('open', level=1, axis=1),
+        i.e. columns = (ticker, field) with fields such as 'open'/'close'/'high'/'low'/'volume'.
+
+    Returns (close_prices, open_prices). If no 'open' field exists, open_prices falls
+    back to close_prices (same-bar execution, matching the original naive behavior).
+    """
+    if isinstance(daily_prices.columns, pd.MultiIndex):
+        level1 = {str(x).lower() for x in daily_prices.columns.get_level_values(1)}
+        close_field = "close" if "close" in level1 else ("adj close" if "adj close" in level1 else None)
+        if close_field is None:
+            raise ValueError(
+                "daily_prices has MultiIndex columns but no 'close' field found at level=1."
+            )
+        cols = daily_prices.columns
+        norm = pd.MultiIndex.from_tuples(
+            [(t, str(f).lower()) for t, f in cols], names=cols.names
+        )
+        dp = daily_prices.copy()
+        dp.columns = norm
+        close_prices = dp.xs(close_field, level=1, axis=1)
+        if "open" in level1:
+            open_prices = dp.xs("open", level=1, axis=1)
+        else:
+            logger.info("No 'open' field found in daily_prices; execution will use close prices.")
+            open_prices = close_prices
+        return close_prices, open_prices
+    else:
+        return daily_prices, daily_prices
+
+
+def _round_shares(raw_shares: float, allow_fractional: bool) -> float:
+    """
+    Floor to whole shares by default (matches real market-order fills for most
+    US brokers on ETFs). If allow_fractional_shares=True, round DOWN to 4dp
+    instead -- never round up, since that could overspend available cash.
+    Only set allow_fractional=True if your broker/ticker combo actually
+    supports fractional share orders (IBKR supports it for many, not all,
+    US equities/ETFs -- confirm per-ticker before relying on this).
+    """
+    if allow_fractional:
+        return np.floor(raw_shares * 10_000) / 10_000
+    return np.floor(raw_shares)
+
+
+def detect_correlation_spike(
+    daily_prices: pd.DataFrame, as_of: pd.Timestamp,
+    short_window: int = 7, baseline_window: int = 63, spike_threshold: float = 0.3,
+) -> bool:
+    """
+    Epic 1, Story 1.2: fast-reacting crash indicator, distinct from the
+    sizing-time _correlation_penalty_weights() (which uses a single rolling
+    window and reacts slowly). This compares a SHORT recent window's average
+    pairwise correlation against a longer baseline -- in real crashes,
+    normally-uncorrelated assets often move together in a matter of days
+    ("correlation goes to 1"), which this is built to catch faster than a
+    single ~63-day rolling average would.
+
+    Returns True if short-window average correlation exceeds baseline by more
+    than spike_threshold (e.g. 0.3 = a 30-percentage-point jump).
+    """
+    cols = [c for c in daily_prices.columns if c != daily_prices.index.name]
+    window_all = daily_prices.loc[:as_of].tail(max(short_window, baseline_window) + 1)
+    if len(window_all) < baseline_window + 1:
+        return False  # not enough history to compare
+
+    rets = window_all.pct_change().dropna(how="all")
+    baseline_corr = rets.tail(baseline_window).corr()
+    short_corr = rets.tail(short_window).corr()
+
+    def _avg_offdiag(corr_df):
+        n = len(corr_df)
+        if n < 2:
+            return np.nan
+        return (corr_df.sum().sum() - n) / (n * (n - 1))
+
+    baseline_avg = _avg_offdiag(baseline_corr)
+    short_avg = _avg_offdiag(short_corr)
+    if pd.isna(baseline_avg) or pd.isna(short_avg):
+        return False
+
+    return bool((short_avg - baseline_avg) > spike_threshold)
+
+
+def _correlation_penalty_weights(
+    weights: dict, daily_prices: pd.DataFrame, as_of: pd.Timestamp,
+    lookback_days: int, strength: float,
+) -> dict:
+    """
+    Downweights tickers that are highly correlated with the rest of the current
+    picks, so two near-duplicate exposures (e.g. XLK and QQQ both selected)
+    don't get sized as if they were independent risk sources. strength=0 is a
+    no-op; strength=1 applies the full penalty.
+    """
+    tickers = [t for t in weights if t in daily_prices.columns]
+    if len(tickers) < 2 or strength <= 0:
+        return weights
+
+    window = daily_prices[tickers].loc[:as_of].pct_change().tail(lookback_days)
+    corr = window.corr()
+    if corr.isna().all().all():
+        return weights
+
+    avg_corr = (corr.sum(axis=1) - 1) / max(len(tickers) - 1, 1)  # exclude self-correlation
+    avg_corr = avg_corr.clip(lower=0, upper=1).fillna(0)  # only penalize positive co-movement
+
+    penalized = {t: weights[t] * (1 - strength * avg_corr.get(t, 0.0)) for t in weights}
+    total = sum(penalized.values())
+    if total <= 0:
+        return weights
+    return {t: w / total for t, w in penalized.items()}
+
+
+def _score_proportional_weights(picks: list[str], momentum_scores: pd.Series | None) -> dict:
+    """
+    Epic 9, Story 9.1: weights proportional to each pick's momentum score
+    (higher trailing return -> larger weight), instead of inverse-vol sizing.
+    The theory: if the signal genuinely ranks conviction, the strongest
+    momentum names arguably deserve more capital, not less -- inverse-vol
+    sizing is agnostic to signal STRENGTH, only to volatility.
+
+    Falls back to equal weight if momentum_scores isn't provided or all
+    scores are non-positive (can't meaningfully weight by a negative or zero
+    "strength").
+    """
+    if momentum_scores is None:
+        return {t: 1.0 / len(picks) for t in picks}
+
+    scores = {t: momentum_scores.get(t) for t in picks if t in momentum_scores.index}
+    positive_scores = {t: s for t, s in scores.items() if pd.notna(s) and s > 0}
+
+    if not positive_scores:
+        return {t: 1.0 / len(picks) for t in picks}
+
+    total = sum(positive_scores.values())
+    weights = {t: s / total for t, s in positive_scores.items()}
+    # any pick missing a usable score gets excluded from this method's output;
+    # resolve_target_weights' caller still holds the full picks list, so a
+    # zero-weight here just means "not sized," not "silently dropped from picks"
+    return weights
+
+
+def resolve_target_weights(
+    picks: list[str], daily_prices: pd.DataFrame, as_of: pd.Timestamp, cfg: "BacktestConfig",
+    custom_weights: dict | None = None, momentum_scores: pd.Series | None = None,
+) -> dict:
+    """
+    Single source of truth for turning a pick list into position weights --
+    used by BOTH the backtest engine and live_signal.py, so live sizing can
+    never silently diverge from what was backtested.
+
+    If custom_weights is provided, it's used directly (renormalized to sum to
+    1.0 across the intersection with `picks`) and inverse-vol sizing /
+    correlation penalty are skipped entirely. Position caps still apply.
+
+    If custom_weights is NOT provided, cfg.sizing_method selects between
+    "inverse_vol" (default -- weight inversely to trailing volatility) and
+    "score_proportional" (Epic 9, Story 9.1 -- weight proportional to each
+    pick's momentum score, requires momentum_scores to be passed in; falls
+    back to equal-weight if scores aren't available).
+    """
+    if custom_weights is not None:
+        provided = {t: w for t, w in custom_weights.items() if t in picks and w > 0}
+        if not provided:
+            raise ValueError("custom_weights provided but none of its tickers are in `picks`.")
+        total = sum(provided.values())
+        if total > 1.0 + 1e-6:
+            logger.warning("custom_weights sum to %.4f (>1.0); renormalizing.", total)
+        weights = {t: w / total for t, w in provided.items()}
+    elif cfg.sizing_method == "score_proportional":
+        weights = _score_proportional_weights(picks, momentum_scores)
+        if cfg.use_correlation_penalty:
+            weights = _correlation_penalty_weights(
+                weights, daily_prices, as_of, cfg.correlation_lookback_days, cfg.correlation_penalty_strength
+            )
+    else:
+        weights = _inverse_vol_weights(picks, daily_prices, as_of, cfg.vol_lookback_days)
+        if cfg.use_correlation_penalty:
+            weights = _correlation_penalty_weights(
+                weights, daily_prices, as_of, cfg.correlation_lookback_days, cfg.correlation_penalty_strength
+            )
+
+    return _apply_position_caps(weights, cfg.max_position_weight)
+
+
+def _trading_days(prices: pd.DataFrame, exchange: str) -> pd.DatetimeIndex:
+    cal = mcal.get_calendar(exchange)
+    return cal.schedule(start_date=prices.index.min(), end_date=prices.index.max()).index
+
+
+def _rebalance_dates(monthly_picks: pd.Series, trading_days: pd.DatetimeIndex) -> set:
+    dates = []
+    for signal_date in monthly_picks.index:
+        idx = trading_days.searchsorted(signal_date, side="right")
+        if idx < len(trading_days):
+            dates.append(trading_days[idx])
+    return set(dates)
+
+
+def _inverse_vol_weights(
+    tickers: list[str], daily_prices: pd.DataFrame, as_of: pd.Timestamp, lookback: int
+) -> dict:
+    """Risk-parity-lite: weight inversely proportional to trailing realized vol."""
+    window = daily_prices.loc[:as_of].iloc[-(lookback + 1):]
+    valid = [t for t in tickers if t in window.columns]
+    if not valid:
+        return {}
+    rets = window[valid].pct_change().dropna(how="all")
+    vol = rets.std().replace(0, np.nan)
+    inv_vol = (1.0 / vol).replace([np.inf, -np.inf], np.nan)
+    inv_vol = inv_vol.dropna()
+    if inv_vol.empty:
+        # fallback to equal weight if vol is undefined (e.g. brand-new listing)
+        return {t: 1.0 / len(valid) for t in valid}
+    weights = inv_vol / inv_vol.sum()
+    # fill any dropped tickers with a small equal-weight residual so nothing is orphaned
+    missing = [t for t in valid if t not in weights.index]
+    if missing:
+        residual = max(0.0, 1.0 - weights.sum())
+        for t in missing:
+            weights[t] = residual / len(missing)
+    return weights.to_dict()
+
+
+def _apply_position_caps(weights: dict, max_weight: float) -> dict:
+    """Cap any single position and redistribute the excess proportionally."""
+    weights = dict(weights)
+    for _ in range(10):  # a few passes converges caps without a full LP solve
+        over = {t: w for t, w in weights.items() if w > max_weight}
+        if not over:
+            break
+        excess = sum(w - max_weight for w in over.values())
+        for t in over:
+            weights[t] = max_weight
+        under = {t: w for t, w in weights.items() if w < max_weight}
+        under_sum = sum(under.values())
+        if under_sum <= 0:
+            break
+        for t in under:
+            weights[t] += excess * (weights[t] / under_sum)
+    total = sum(weights.values())
+    if total > 0:
+        weights = {t: w / total for t, w in weights.items()}
+    return weights
+
+
+def _realized_portfolio_vol(portfolio_history: list, lookback: int) -> Optional[float]:
+    if len(portfolio_history) < lookback + 1:
+        return None
+    vals = pd.Series([v for _, v in portfolio_history[-(lookback + 1):]])
+    rets = vals.pct_change().dropna()
+    if rets.empty:
+        return None
+    return float(rets.std() * np.sqrt(252))
+
+
+def _slippage_bps(ticker_returns_window: pd.Series, cfg: BacktestConfig) -> float:
+    """
+    Base slippage scaled by trailing (vol_lookback_days) annualized vol. If
+    liquidity_stress_multiplier > 1.0 (Epic 1, Story 1.4), additionally checks
+    whether the MOST RECENT few days' vol is spiking well above that trailing
+    average -- a proxy for liquidity deteriorating faster than a long rolling
+    window would show, which is exactly when execution quality matters most
+    and behaves least like historical averages.
+    """
+    if ticker_returns_window is None or ticker_returns_window.empty:
+        return cfg.base_slippage_bps
+    ann_vol = ticker_returns_window.std() * np.sqrt(252)
+    if np.isnan(ann_vol):
+        ann_vol = 0.0
+    slippage = cfg.base_slippage_bps + cfg.vol_slippage_multiplier * ann_vol * 10_000 / 100
+
+    if cfg.liquidity_stress_multiplier > 1.0 and len(ticker_returns_window) >= cfg.liquidity_stress_recent_days:
+        recent = ticker_returns_window.tail(cfg.liquidity_stress_recent_days)
+        recent_vol = recent.std() * np.sqrt(252)
+        if pd.notna(recent_vol) and ann_vol > 0 and recent_vol / ann_vol > cfg.liquidity_stress_vol_ratio:
+            slippage *= cfg.liquidity_stress_multiplier
+
+    return slippage
+
+
+# --------------------------------------------------------------------------- #
+# MAIN BACKTEST
+# --------------------------------------------------------------------------- #
+def run_risk_managed_backtest(
+    monthly_picks: pd.Series,
+    daily_prices: pd.DataFrame,
+    config: BacktestConfig = BacktestConfig(),
+    custom_weights_by_date: dict | None = None,
+) -> pd.DataFrame:
+    """
+    Risk-managed momentum backtest with volatility targeting, regime filtering,
+    stop losses, and realistic execution costs.
+
+    Parameters
+    ----------
+    monthly_picks : pd.Series
+        Index = month-end signal dates, values = list of tickers selected that month.
+    daily_prices : pd.DataFrame
+        Daily price panel, columns = tickers (must include the regime benchmark,
+        e.g. 'SPY', if use_regime_filter=True).
+    config : BacktestConfig
+    custom_weights_by_date : dict, optional
+        {signal_date: {ticker: weight}} -- if present for a given rebalance's
+        signal date, those weights are used directly instead of inverse-vol
+        sizing (still subject to max_position_weight capping).
+
+    Returns
+    -------
+    pd.DataFrame
+        Monthly report with portfolio & benchmark returns, cumulative returns,
+        and exposure/cost diagnostics.
+    """
+    if monthly_picks.empty or daily_prices.empty:
+        logger.warning("Empty picks or price data supplied; aborting backtest.")
+        return pd.DataFrame()
+
+    rng = np.random.default_rng(config.random_seed)
+
+    # --- Normalize input: supports plain close-price DataFrames AND MultiIndex
+    #     (ticker, field) panels like daily_prices.xs('open', level=1, axis=1). ---
+    close_full, open_full = _split_price_panel(daily_prices)
+
+    # --- SETUP: align simulation start to the first tradable month after signal ---
+    first_signal_date = monthly_picks.index[0]
+    start_of_first_trade_month = (first_signal_date + pd.DateOffset(months=1)).to_period("M").start_time
+    candidates = close_full.index[close_full.index >= start_of_first_trade_month]
+    if candidates.empty:
+        logger.warning("No trading days found after the first signal date.")
+        return pd.DataFrame()
+    sim_start_date = candidates[0]
+
+    mask = close_full.index >= (sim_start_date - pd.DateOffset(days=1))
+    prices = close_full[mask].copy()          # used for signals, valuation, regime, vol
+    exec_prices = open_full[mask].copy()      # used for trade fills (next-open execution)
+    exec_prices = exec_prices.reindex(columns=prices.columns)
+    exec_prices = exec_prices.fillna(prices)  # fall back to close if open missing
+
+    if config.use_regime_filter and config.regime_benchmark not in prices.columns:
+        logger.warning(
+            "Regime benchmark '%s' not in price panel; disabling regime filter.",
+            config.regime_benchmark,
+        )
+        config.use_regime_filter = False
+
+    # Precompute regime signal (benchmark above its long SMA), on close prices
+    regime_bullish = None
+    if config.use_regime_filter:
+        bench = prices[config.regime_benchmark]
+        sma = bench.rolling(config.regime_sma_window, min_periods=config.regime_sma_window // 2).mean()
+        regime_bullish = (bench >= sma).reindex(prices.index).fillna(False)
+
+    trading_days = _trading_days(prices, config.exchange)
+    rebalance_dates = _rebalance_dates(monthly_picks, trading_days)
+
+    logger.info(
+        "Backtest period: %s to %s | %d rebalance dates.",
+        prices.index.min().strftime("%Y-%m-%d"),
+        prices.index.max().strftime("%Y-%m-%d"),
+        len(rebalance_dates),
+    )
+
+    cash = config.initial_capital
+    holdings: dict[str, float] = {}
+    entry_prices: dict[str, float] = {}
+    entry_dates: dict[str, pd.Timestamp] = {}  # Epic 10, Story 10.4: time-based stops
+    portfolio_history = [(prices.index[0], config.initial_capital)]
+    months_held = 0
+    total_commission_paid = 0.0
+    total_slippage_cost = 0.0
+    turnover_log = []
+    peak_equity = config.initial_capital
+    circuit_breaker_halted = False  # Epic 1, Story 1.1: once tripped, only allow risk-reducing trades
+
+    with open(config.log_file_path, "w") as log_file:
+        log_file.write(
+            f"Backtest Start: {sim_start_date.strftime('%Y-%m-%d')}, "
+            f"Initial Capital: ${config.initial_capital:,.2f}\n"
+            f"Config: vol_target={config.target_portfolio_vol}, "
+            f"max_position={config.max_position_weight}, "
+            f"stop_loss={config.stop_loss_pct}, regime_filter={config.use_regime_filter}\n\n"
+        )
+
+        for today in prices.index[1:]:
+            today_prices = prices.loc[today]        # close, for valuation/signals
+            today_exec = exec_prices.loc[today]      # open, for fills
+
+            # ---------------- STOP-LOSS CHECK (every day, not just rebalance) -------
+            # GAP-RISK LIMITATION (Epic 1, Story 1.3): this checks the drawdown from
+            # entry using DAILY close prices, and fills at that day's open/close
+            # (via today_exec) with the standard slippage model. On a genuine
+            # overnight gap-down (common in real crashes -- e.g. several March 2020
+            # sessions opened well below the prior close), this will UNDERSTATE the
+            # actual loss and OVERSTATE the achievable exit price: the stop "sees"
+            # the drop only after it has already happened, and fills near that
+            # already-dropped price, not at the pre-gap stop level. This is a
+            # structural limitation of daily-bar backtesting and cannot be fully
+            # solved without intraday data. Do not assume stop_loss_pct is a hard
+            # ceiling on realized loss per position during fast, gapping markets.
+            for ticker in list(holdings.keys()):
+                if ticker not in prices.columns or pd.isna(today_prices.get(ticker)):
+                    continue
+                entry = entry_prices.get(ticker)
+                if entry is None or entry <= 0:
+                    continue
+                dd = (today_prices[ticker] - entry) / entry
+                if dd <= -config.stop_loss_pct:
+                    shares = holdings[ticker]
+                    fill_ref = today_exec.get(ticker, today_prices[ticker])
+                    exec_price = fill_ref * (1 - config.base_slippage_bps / 10_000)
+                    proceeds = shares * exec_price - config.commission
+                    cash += proceeds
+                    total_commission_paid += config.commission
+                    del holdings[ticker]
+                    del entry_prices[ticker]
+                    log_file.write(
+                        f"{today.strftime('%Y-%m-%d')} STOP-LOSS: sold {shares:,.0f} {ticker} "
+                        f"@ ${exec_price:,.2f} (drawdown {dd:.1%})\n"
+                    )
+                    entry_dates.pop(ticker, None)
+
+            # ---------------- TIME-BASED STOP (Epic 10, Story 10.4) -----------------
+            # Force-exits a position after max_holding_days regardless of price --
+            # independent of and in addition to the price-based stop-loss above.
+            # Exists to bound exposure duration even when a position is neither
+            # winning nor losing enough to trigger the price stop, but has simply
+            # been held longer than intended (e.g. the signal moved on but the
+            # position never technically breached stop_loss_pct).
+            if config.max_holding_days is not None:
+                for ticker in list(holdings.keys()):
+                    if ticker not in prices.columns or pd.isna(today_prices.get(ticker)):
+                        continue
+                    entry_date = entry_dates.get(ticker)
+                    if entry_date is None:
+                        continue
+                    days_held = (today - entry_date).days
+                    if days_held >= config.max_holding_days:
+                        shares = holdings[ticker]
+                        fill_ref = today_exec.get(ticker, today_prices[ticker])
+                        exec_price = fill_ref * (1 - config.base_slippage_bps / 10_000)
+                        proceeds = shares * exec_price - config.commission
+                        cash += proceeds
+                        total_commission_paid += config.commission
+                        del holdings[ticker]
+                        entry_prices.pop(ticker, None)
+                        entry_dates.pop(ticker, None)
+                        log_file.write(
+                            f"{today.strftime('%Y-%m-%d')} TIME-STOP: sold {shares:,.0f} {ticker} "
+                            f"@ ${exec_price:,.2f} (held {days_held} days >= max_holding_days={config.max_holding_days})\n"
+                        )
+
+            # ---------------------------- REBALANCE ----------------------------------
+            if today in rebalance_dates and (months_held >= config.holding_period or months_held == 0):
+                months_held = 1
+
+                # --- optional periodic cash injection (DCA-style contributions) ---
+                if config.monthly_contribution > 0:
+                    cash += config.monthly_contribution
+                    log_file.write(
+                        f"{today.strftime('%Y-%m-%d')} CONTRIBUTION: +${config.monthly_contribution:,.2f} "
+                        f"(cash now ${cash:,.2f})\n"
+                    )
+
+                market_value = sum(
+                    shares * today_prices[t] for t, shares in holdings.items()
+                    if t in prices.columns and pd.notna(today_prices.get(t))
+                )
+                total_value = cash + market_value
+
+                # --- circuit breaker check (Epic 1, Story 1.1) ---
+                peak_equity = max(peak_equity, total_value)
+                current_drawdown = (total_value - peak_equity) / peak_equity if peak_equity > 0 else 0.0
+                if config.max_portfolio_drawdown_pct > 0:
+                    was_halted = circuit_breaker_halted
+                    circuit_breaker_halted = current_drawdown <= -config.max_portfolio_drawdown_pct
+                    if circuit_breaker_halted and not was_halted:
+                        log_file.write(
+                            f"{today.strftime('%Y-%m-%d')} CIRCUIT BREAKER TRIPPED: drawdown "
+                            f"{current_drawdown:.1%} <= -{config.max_portfolio_drawdown_pct:.1%}. "
+                            f"Halting new entries; existing positions still subject to stop-loss.\n\n"
+                        )
+                    elif was_halted and not circuit_breaker_halted:
+                        log_file.write(
+                            f"{today.strftime('%Y-%m-%d')} CIRCUIT BREAKER CLEARED: drawdown "
+                            f"recovered to {current_drawdown:.1%}. Resuming normal rebalancing.\n\n"
+                        )
+
+                signal_lookup = today - pd.Timedelta(days=1)
+                eligible_signals = monthly_picks.index[monthly_picks.index <= signal_lookup]
+                if len(eligible_signals) == 0:
+                    portfolio_history.append((today, cash + market_value))
+                    continue
+                latest_signal_date = eligible_signals[-1]
+                target_tickers = monthly_picks.get(latest_signal_date, [])
+
+                if target_tickers and not circuit_breaker_halted:
+                    # --- regime filter: scale down gross exposure in a downtrend ---
+                    if config.use_regime_filter and regime_bullish is not None:
+                        bullish = bool(regime_bullish.loc[today]) if today in regime_bullish.index else True
+                        regime_scalar = 1.0 if bullish else config.min_gross_exposure
+                    else:
+                        regime_scalar = 1.0
+
+                    # --- correlation spike: additional fast-reacting risk-off signal (Epic 1, Story 1.2) ---
+                    if config.use_correlation_spike_regime:
+                        spike = detect_correlation_spike(
+                            prices, today,
+                            config.correlation_spike_short_window,
+                            config.correlation_spike_baseline_window,
+                            config.correlation_spike_threshold,
+                        )
+                        if spike:
+                            regime_scalar = min(regime_scalar, config.min_gross_exposure)
+                            log_file.write(
+                                f"{today.strftime('%Y-%m-%d')} CORRELATION SPIKE DETECTED: "
+                                f"reducing exposure to {config.min_gross_exposure:.0%}\n"
+                            )
+
+                    # --- volatility targeting: scale gross exposure to hit target vol ---
+                    realized_vol = _realized_portfolio_vol(portfolio_history, config.portfolio_vol_lookback)
+                    if realized_vol and realized_vol > 0:
+                        vol_scalar = np.clip(
+                            config.target_portfolio_vol / realized_vol,
+                            config.min_gross_exposure,
+                            config.max_gross_exposure,
+                        )
+                    else:
+                        vol_scalar = config.max_gross_exposure
+
+                    gross_exposure = min(config.max_gross_exposure, regime_scalar * vol_scalar)
+
+                    # --- position sizing: custom weights (if provided for this date) or
+                    #     inverse-vol + optional correlation penalty, via the SAME resolver
+                    #     live_signal.py uses -- single source of truth for sizing logic ---
+                    custom_w = None
+                    if custom_weights_by_date is not None:
+                        custom_w = custom_weights_by_date.get(latest_signal_date) or custom_weights_by_date.get(today)
+                    weights = resolve_target_weights(target_tickers, prices, today, config, custom_weights=custom_w)
+
+                    log_file.write(
+                        f"--- Rebalance {today.strftime('%Y-%m-%d')} | Total Value ${total_value:,.2f} "
+                        f"| Gross Exposure {gross_exposure:.1%} (regime={regime_scalar:.2f}, "
+                        f"vol_scalar={vol_scalar:.2f}) ---\n"
+                    )
+
+                    target_dollar = {
+                        t: total_value * gross_exposure * w for t, w in weights.items()
+                    }
+
+                    current_value = {
+                        t: shares * today_prices[t]
+                        for t, shares in holdings.items()
+                        if t in prices.columns and pd.notna(today_prices.get(t))
+                    }
+                    all_tickers = set(holdings.keys()) | set(target_dollar.keys())
+                    raw_trades = {
+                        t: target_dollar.get(t, 0.0) - current_value.get(t, 0.0) for t in all_tickers
+                    }
+
+                    # --- aggregate-drift skip: bypass the ENTIRE rebalance if total portfolio
+                    #     drift is trivial, even if some individual tickers exceed drift_threshold.
+                    #     0 (default) disables this and preserves prior behavior exactly. ---
+                    if config.aggregate_drift_threshold > 0 and total_value > 0:
+                        aggregate_drift = sum(abs(v) for v in raw_trades.values()) / total_value
+                        if aggregate_drift < config.aggregate_drift_threshold:
+                            log_file.write(
+                                f"{today.strftime('%Y-%m-%d')} SKIP REBALANCE: aggregate drift "
+                                f"{aggregate_drift:.2%} < aggregate_drift_threshold "
+                                f"{config.aggregate_drift_threshold:.2%}\n\n"
+                            )
+                            daily_mv = sum(
+                                shares * today_prices[t] for t, shares in holdings.items()
+                                if pd.notna(today_prices.get(t))
+                            )
+                            portfolio_history.append((today, cash + daily_mv))
+                            continue
+
+                    # --- drift threshold + min trade size filtering (turnover/cost control) ---
+                    # A "rebalance-only" trade on an existing position is skipped if the
+                    # drift from target is too small to be worth the cost. New entries and
+                    # full exits still go through (only gated by min_trade_size), since
+                    # those aren't just noise -- they're genuine allocation changes.
+                    trades = {}
+                    for t, trade_value in raw_trades.items():
+                        is_continuing_position = (t in current_value) and (t in target_dollar)
+                        if abs(trade_value) < config.min_trade_size:
+                            continue
+                        if is_continuing_position and total_value > 0:
+                            drift = abs(trade_value) / total_value
+                            if drift < config.drift_threshold:
+                                continue
+                        trades[t] = trade_value
+
+                    period_turnover = sum(abs(v) for v in trades.values())
+                    turnover_log.append((today, period_turnover))
+
+                    # --- sells first ---
+                    for ticker, trade_value in trades.items():
+                        if trade_value < 0 and ticker in prices.columns and pd.notna(today_prices.get(ticker)):
+                            price = today_exec.get(ticker, today_prices[ticker])
+                            window = prices[ticker].loc[:today].pct_change().tail(config.vol_lookback_days)
+                            slip_bps = _slippage_bps(window, config)
+                            jitter = rng.uniform(-0.25, 0.25) * slip_bps  # +/-25% noise on the cost estimate
+                            exec_price = price * (1 - (slip_bps + jitter) / 10_000)
+                            shares_to_sell = min(
+                                _round_shares(abs(trade_value) / exec_price, config.allow_fractional_shares),
+                                holdings.get(ticker, 0)
+                            )
+                            if shares_to_sell > 0:
+                                holdings[ticker] -= shares_to_sell
+                                if holdings[ticker] < 1e-6:
+                                    del holdings[ticker]
+                                    entry_prices.pop(ticker, None)
+                                    entry_dates.pop(ticker, None)
+                                proceeds = shares_to_sell * exec_price - config.commission
+                                cash += proceeds
+                                total_commission_paid += config.commission
+                                total_slippage_cost += shares_to_sell * price * (slip_bps / 10_000)
+                                log_file.write(
+                                    f"SELL: {shares_to_sell:,.4f} {ticker} @ ${exec_price:,.2f} "
+                                    f"(slip {slip_bps:.1f}bps)\n"
+                                )
+
+                    # --- buys second, capped by available cash ---
+                    for ticker, trade_value in sorted(trades.items()):
+                        if trade_value > 0 and ticker in prices.columns and pd.notna(today_prices.get(ticker)):
+                            price = today_exec.get(ticker, today_prices[ticker])
+                            window = prices[ticker].loc[:today].pct_change().tail(config.vol_lookback_days)
+
+                            # --- reduce-only: block new BUYs during detected per-ticker liquidity stress ---
+                            if config.liquidity_stress_reduce_only and len(window) >= config.liquidity_stress_recent_days:
+                                recent_vol = window.tail(config.liquidity_stress_recent_days).std() * np.sqrt(252)
+                                baseline_vol = window.std() * np.sqrt(252)
+                                if pd.notna(recent_vol) and baseline_vol > 0 and recent_vol / baseline_vol > config.liquidity_stress_vol_ratio:
+                                    log_file.write(
+                                        f"{today.strftime('%Y-%m-%d')} REDUCE-ONLY: skipping BUY of {ticker} "
+                                        f"(recent/baseline vol ratio {recent_vol/baseline_vol:.2f} > "
+                                        f"{config.liquidity_stress_vol_ratio:.2f})\n"
+                                    )
+                                    continue
+
+                            slip_bps = _slippage_bps(window, config)
+                            jitter = rng.uniform(-0.25, 0.25) * slip_bps
+                            exec_price = price * (1 + (slip_bps + jitter) / 10_000)
+
+                            affordable = _round_shares((cash - config.commission) / exec_price, config.allow_fractional_shares) if cash > config.commission else 0
+                            target_shares = _round_shares(trade_value / exec_price, config.allow_fractional_shares)
+                            shares_to_buy = min(target_shares, affordable)
+
+                            if shares_to_buy > 0:
+                                prev_shares = holdings.get(ticker, 0)
+                                new_shares = prev_shares + shares_to_buy
+                                # volume-weighted entry price for stop-loss reference
+                                entry_prices[ticker] = (
+                                    (entry_prices.get(ticker, price) * prev_shares + exec_price * shares_to_buy)
+                                    / new_shares
+                                )
+                                if ticker not in entry_dates:
+                                    # only set on a genuinely NEW position -- a top-up to an
+                                    # existing holding shouldn't reset the time-based stop clock
+                                    entry_dates[ticker] = today
+                                holdings[ticker] = new_shares
+                                cash -= (shares_to_buy * exec_price) + config.commission
+                                total_commission_paid += config.commission
+                                total_slippage_cost += shares_to_buy * price * (slip_bps / 10_000)
+                                log_file.write(
+                                    f"BUY:  {shares_to_buy:,.4f} {ticker} @ ${exec_price:,.2f} "
+                                    f"(slip {slip_bps:.1f}bps)\n"
+                                )
+                    log_file.write("\n")
+            elif today in rebalance_dates:
+                months_held += 1
+
+            # ---------------------------- DAILY VALUATION -----------------------------
+            daily_mv = sum(
+                shares * today_prices[t] for t, shares in holdings.items()
+                if pd.notna(today_prices.get(t))
+            )
+            portfolio_history.append((today, cash + daily_mv))
+
+    logger.info(
+        "Backtest complete. Total commission: $%.2f | Total slippage cost (est.): $%.2f",
+        total_commission_paid, total_slippage_cost,
+    )
+
+    return _build_report(portfolio_history, prices, config, total_commission_paid, total_slippage_cost, turnover_log)
+
+
+# --------------------------------------------------------------------------- #
+# REPORTING / TEARSHEET
+# --------------------------------------------------------------------------- #
+def _build_report(
+    portfolio_history: list,
+    prices: pd.DataFrame,
+    config: BacktestConfig,
+    total_commission: float,
+    total_slippage: float,
+    turnover_log: list,
+) -> pd.DataFrame:
+    daily = pd.DataFrame(portfolio_history, columns=["Date", "Portfolio_Value"]).set_index("Date")
+    daily = daily[~daily.index.duplicated(keep="last")]
+    monthly = daily.resample("ME").last()
+
+    report = pd.DataFrame(index=monthly.index)
+    report["Month End Portfolio Value"] = monthly["Portfolio_Value"]
+    report["Month Beginning Portfolio Value"] = report["Month End Portfolio Value"].shift(1).fillna(
+        config.initial_capital
+    )
+    report["Portfolio Monthly Return"] = report["Month End Portfolio Value"].pct_change()
+
+    bench = config.regime_benchmark if config.regime_benchmark in prices.columns else None
+    if bench:
+        bench_monthly = prices[bench].resample("ME").last()
+        report[f"{bench} Monthly Return"] = bench_monthly.pct_change()
+
+    report["Portfolio Cumulative Return"] = (1 + report["Portfolio Monthly Return"]).cumprod()
+    if bench:
+        report[f"{bench} Cumulative Return"] = (1 + report[f"{bench} Monthly Return"]).cumprod()
+
+    report = report.dropna(subset=["Portfolio Monthly Return"])
+
+    # --- risk/return diagnostics (printed, not just returned) ---
+    monthly_ret = report["Portfolio Monthly Return"].dropna()
+    if not monthly_ret.empty:
+        n_months = len(monthly_ret)
+        cagr = (1 + monthly_ret).prod() ** (12 / n_months) - 1
+        ann_vol = monthly_ret.std() * np.sqrt(12)
+        sharpe = (monthly_ret.mean() * 12) / ann_vol if ann_vol > 0 else np.nan
+        downside = monthly_ret[monthly_ret < 0]
+        sortino = (monthly_ret.mean() * 12) / (downside.std() * np.sqrt(12)) if len(downside) > 1 else np.nan
+        cum = (1 + monthly_ret).cumprod()
+        running_max = cum.cummax()
+        max_dd = (cum / running_max - 1).min()
+        calmar = cagr / abs(max_dd) if max_dd != 0 else np.nan
+        win_rate = (monthly_ret > 0).mean()
+
+        beta = alpha = np.nan
+        if bench and f"{bench} Monthly Return" in report.columns:
+            bret = report[f"{bench} Monthly Return"].reindex(monthly_ret.index).dropna()
+            aligned = monthly_ret.reindex(bret.index)
+            if len(bret) > 2 and bret.var() > 0:
+                cov = np.cov(aligned, bret)[0, 1]
+                beta = cov / bret.var()
+                alpha = (aligned.mean() - beta * bret.mean()) * 12
+
+        total_turnover = sum(v for _, v in turnover_log)
+
+        logger.info("=" * 60)
+        logger.info("TEARSHEET")
+        logger.info("CAGR:                 %.2f%%", cagr * 100)
+        logger.info("Annualized Vol:       %.2f%%", ann_vol * 100)
+        logger.info("Sharpe Ratio:         %.2f", sharpe)
+        logger.info("Sortino Ratio:        %.2f", sortino)
+        logger.info("Max Drawdown:         %.2f%%", max_dd * 100)
+        logger.info("Calmar Ratio:         %.2f", calmar)
+        logger.info("Monthly Win Rate:     %.1f%%", win_rate * 100)
+        if bench:
+            logger.info("Beta vs %s:          %.2f", bench, beta)
+            logger.info("Annualized Alpha:     %.2f%%", alpha * 100)
+        logger.info("Total Commission:     $%.2f", total_commission)
+        logger.info("Total Est. Slippage:  $%.2f", total_slippage)
+        logger.info("Total Turnover ($):   $%.2f", total_turnover)
+        logger.info("=" * 60)
+
+        report.attrs["tearsheet"] = {
+            "CAGR": cagr, "AnnVol": ann_vol, "Sharpe": sharpe, "Sortino": sortino,
+            "MaxDrawdown": max_dd, "Calmar": calmar, "WinRate": win_rate,
+            "Beta": beta, "Alpha": alpha, "TotalCommission": total_commission,
+            "TotalSlippage": total_slippage, "TotalTurnover": total_turnover,
+        }
+
+    return report
+
+
+# --------------------------------------------------------------------------- #
+# DROP-IN COMPATIBILITY WRAPPER
+# --------------------------------------------------------------------------- #
+def run_custom_backtest(
+    monthly_picks: pd.Series,
+    daily_prices: pd.DataFrame,
+    holding_period: int = 1,
+    initial_capital: float = 100_000.0,
+    commission: float = 0.0,
+    exchange: str = "NYSE",
+    **risk_overrides,
+) -> pd.DataFrame:
+    """
+    Drop-in replacement for the original run_custom_backtest(...) signature, so
+    existing notebook cells keep working unchanged:
+
+        backtest_df = run_custom_backtest(top_etfs_monthly, daily_prices,
+                                           holding_period=1, commission=0,
+                                           initial_capital=1000.00)
+        display(backtest_df.head())
+
+    `daily_prices` may be either:
+      - a plain DataFrame of close prices (ticker columns), or
+      - a MultiIndex-column panel with (ticker, field) columns, e.g. the object
+        you'd call daily_prices.xs('open', level=1, axis=1) on. In that case this
+        function automatically uses 'close' for signals/valuation and 'open' for
+        trade execution (fills happen the trading day after the signal, at that
+        day's open -- avoids same-bar look-ahead on execution price).
+
+    Any BacktestConfig field (e.g. target_portfolio_vol=0.20, stop_loss_pct=0.10,
+    use_regime_filter=False) can be passed as an extra keyword to override the
+    default risk-management settings without touching the config class directly.
+    """
+    custom_weights_by_date = risk_overrides.pop("custom_weights_by_date", None)
+
+    cfg_kwargs = dict(
+        holding_period=holding_period,
+        initial_capital=initial_capital,
+        commission=commission,
+        exchange=exchange,
+    )
+    for key, val in risk_overrides.items():
+        if key in BacktestConfig.__dataclass_fields__:
+            cfg_kwargs[key] = val
+        else:
+            logger.warning("Ignoring unknown BacktestConfig override: %s=%r", key, val)
+
+    # Construct once (not via post-hoc setattr) so __post_init__ validation actually runs
+    # against the final, complete set of values -- setattr after construction would bypass it.
+    cfg = BacktestConfig(**cfg_kwargs)
+
+    return run_risk_managed_backtest(monthly_picks, daily_prices, cfg, custom_weights_by_date=custom_weights_by_date)
+
+
+if __name__ == "__main__":
+    logger.info(
+        "This module exposes run_risk_managed_backtest(monthly_picks, daily_prices, config). "
+        "Import it and call it with your ETF momentum signal series and daily price panel."
+    )

@@ -1,0 +1,130 @@
+# config.example.yaml
+# Copy to config.yaml and edit. config.yaml should NOT be committed to version
+# control if it ever contains anything sensitive -- keep secrets (API keys,
+# SMTP credentials) in environment variables (.env for Docker, User env vars
+# on native Windows) as documented in DEPLOYMENT.md, not in this file.
+
+# Epic 2, Story 2.3: required before --live runs (not enforced in dry-run) --
+# a lightweight paper trail that a human reviewed and approved this exact
+# config before it was used to trade real money.
+metadata:
+  version: "1.0.0"
+  approved_by: null      # e.g. "your name" -- must be non-null for --live
+  approved_date: null    # e.g. "2026-07-11" -- must be non-null for --live
+
+# Epic 12: email notification categories. CRITICAL (stop-loss executions,
+# circuit-breaker trips, the Epic 26 capital-allocation error that aborts a run) is ALWAYS
+# sent and cannot be disabled here -- only STANDARD, PERIODIC, and WARNING are filterable.
+# Requires SMTP env vars set (see DEPLOYMENT.md).
+notifications:
+  send_standard: true             # routine rebalance BUY/SELL/HOLD summaries
+  send_periodic: true             # monthly performance report
+  monthly_report_day_of_month: 1  # null/omit to disable the monthly report entirely
+  send_warning: true              # Epic 27: multi-portfolio capital-safety warnings (fixed
+                                   # allocations exceeding the real account, ticker overlap
+                                   # across portfolios). Gates the EMAIL only -- the detailed
+                                   # log line for each of these always fires regardless of
+                                   # this setting, so the risk is never fully invisible even
+                                   # with this set to false. Must be true/false, not a string
+                                   # -- validated at load time.
+
+# Epic 13: email-commanded remote actions (PAUSE/RESUME/SKIP_NEXT_REBALANCE
+# auto-applied; LIQUIDATE/ADJUST_PARAM parsed+validated but require manual
+# follow-through). Opt-in -- entirely inactive unless the IMAP_HOST, IMAP_USER,
+# IMAP_PASS, TRUSTED_SENDER_EMAIL env vars are all set. See EMAIL_COMMANDS.md.
+# Nothing to configure here in config.yaml itself -- env vars only, kept out
+# of this file so the trusted sender address isn't committed anywhere.
+
+# Every field below is a BacktestConfig field (src/momentum_trading/backtest/momentum_backtest.py)
+# -- config.yaml's default_risk/risk_overrides pass straight through to it, so any field defined
+# there is automatically accepted here too; this is a curated subset of the ones most worth
+# tuning, not an exhaustive list of every BacktestConfig field.
+default_risk:
+  holding_period: 1               # months between forced rebalances
+  commission: 0.0                 # flat $ commission charged per trade -- BACKTEST-ONLY,
+                                   # has no effect on --live (real commission is already
+                                   # reflected in your broker's real account balance)
+  drift_threshold: 0.03           # only trade a name if |target_weight - current_weight| exceeds this
+                                   # (skips trivial rebalances that aren't worth the trading cost)
+  min_trade_size: 25.0            # skip any single trade below this $ notional
+  use_regime_filter: true         # true = skip new entries when regime_benchmark is below its SMA
+  regime_benchmark: SPY           # benchmark ticker the regime filter checks against
+  regime_sma_window: 150          # trading days in the regime filter's moving average
+  max_position_weight: 0.35       # single-name cap, e.g. 0.35 = no position over 35% of the book
+  stop_loss_pct: 0.12             # per-position stop-loss, as a fraction below entry price
+  auto_execute_stop_loss: false   # true = auto-sell on stop-loss trigger; false = flag + email only
+  use_correlation_penalty: false  # true = downweight sizing for positions correlated with other
+                                   # current picks (distinct from use_correlation_spike_regime below)
+  aggregate_drift_threshold: 0.0  # 0 = disabled (always rebalance if scheduled);
+                                   # e.g. 0.02 = skip the WHOLE rebalance if aggregate drift is <2%
+                                   # (Epic 25: applies to both backtest and --live, same formula)
+
+  # Share granularity
+  allow_fractional_shares: false   # true = size positions to 4dp fractional shares
+                                    # (only if your broker/tickers actually support it)
+
+  # Epic 28: LIVE ONLY. place_orders_ibkr() always submits SELLs first and waits for them
+  # to clear before submitting BUYs (not configurable -- there's no valid reason to skip
+  # this). This field controls what happens if BUYs would still exceed real available cash
+  # AFTER sells clear: false (default) = warn (always logged) and submit as computed, IBKR's
+  # own fill/reject is the backstop. true = proportionally scale down BUY share counts
+  # (floored to whole shares) to fit. Matters most on a CASH (non-margin) IBKR account,
+  # where a BUY racing ahead of its funding SELL can be rejected or trigger a cash-account
+  # violation; on margin it silently relies on buying power instead. See docs/RUNNING.md.
+  auto_reduce_buys_on_insufficient_cash: false
+
+  # Selection: how many top-momentum-ranked tickers to actually hold each rebalance
+  # (clamped to the portfolio's own tickers list if that's smaller -- e.g. top_n: 10 with
+  # only 6 tickers in that portfolio just holds all 6, no error). See STRATEGY_THEORY.md.
+  # Overridable per portfolio via risk_overrides, same as every field on this page.
+  top_n: 10
+
+  # Epic 1: crash protection
+  max_portfolio_drawdown_pct: 0.0     # 0 = disabled; e.g. 0.20 = halt NEW entries at -20% from peak
+                                       # equity (does not force-liquidate existing positions)
+  use_correlation_spike_regime: false # true = detect a market-wide correlation spike across
+                                       # holdings and react defensively (crash protection --
+                                       # distinct from use_correlation_penalty above). Epic 25:
+                                       # applies to both backtest and --live.
+
+  # Epic 9: alternative sizing
+  sizing_method: inverse_vol          # "inverse_vol" (default, underweights noisier names) or
+                                       # "score_proportional" (stronger momentum gets more capital)
+
+  # Epic 10: additional execution safety checks
+  max_dollar_drawdown: null           # e.g. 500.0 -- independent $ breaker alongside the % one above
+  max_slippage_tolerance_pct: null    # e.g. 0.02 -- alert (not un-fill) on excess fill deviation
+  max_price_staleness_minutes: null   # e.g. 30 -- abort a run rather than trade on frozen data
+  max_holding_days: null              # e.g. 90 -- force-exit a position after N days regardless
+                                       # of price. Epic 25: applies to both backtest and --live
+                                       # (live derives "days held" from the trade log); respects
+                                       # auto_execute_stop_loss (flag-only vs. auto-exit) in live.
+
+portfolios:
+  portfolio1:
+    tickers: [SPY, QQQ, XLK, XLF, XLE, XLY, XLP, XLU, GLD, TLT, BIL]
+    custom_weights: null          # null = algorithmic inverse-vol sizing
+    total_value: null             # null = this portfolio gets the REMAINDER of the real IBKR
+                                   # account value after every OTHER portfolio's fixed
+                                   # total_value is subtracted (--live only; dry-run uses a flat
+                                   # $1000 placeholder instead). At most ONE portfolio across
+                                   # this whole file may be null -- validated at load time,
+                                   # since "remainder" is ambiguous with more than one. (Epic 26)
+    # risk_overrides:              # optional: override any default_risk field for THIS
+    #   stop_loss_pct: 0.10         # portfolio only -- e.g. a tighter stop, or (see
+    #   top_n: 5                    # portfolio2 below) a different top_n than the default
+
+  portfolio2:
+    tickers: [XLF, XLE, GLD, TLT]
+    custom_weights:
+      XLF: 0.4
+      XLE: 0.3
+      GLD: 0.2
+      TLT: 0.1
+    total_value: 2500.0
+    risk_overrides:
+      use_correlation_penalty: true
+      top_n: 3    # e.g. this portfolio holds only its top 3 of 4 tickers each rebalance
+                  # (whichever of custom_weights' 4 entries didn't make the cut is
+                  # dropped and the rest renormalize to sum to 1.0) -- independent of
+                  # default_risk.top_n or any other portfolio's override

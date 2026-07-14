@@ -1,0 +1,3 @@
+# Generated export of pyproject.toml's [project.optional-dependencies.dev]
+-r requirements.txt
+pytest>=7.4

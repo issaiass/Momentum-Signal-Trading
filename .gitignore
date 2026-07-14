@@ -1,0 +1,47 @@
+# Real config with your actual portfolios/risk settings -- never commit
+config.yaml
+
+# Secrets: API keys, SMTP/OAuth credentials -- never commit
+.env
+
+# Runtime state: trade logs, snapshots, lock/flag files, dedup tracking
+data/
+logs/
+*.log
+trades_log.txt
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+wheels/
+.pytest_cache/
+*.pkl
+*.csv
+
+
+# Virtual environments
+.venv
+
+
+
+# Virtual environments
+.venv/
+venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+
+# Claude
+*.stackdump

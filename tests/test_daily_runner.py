@@ -1,0 +1,647 @@
+"""
+tests/test_daily_runner.py
+
+Covers the CLI/operational layer: config.yaml schema validation, idempotent
+same-day rebalance locking, email alert fallback behavior, and the
+portfolio-level circuit breaker's persistence-across-runs logic.
+
+Run with: pytest tests/test_daily_runner.py -v
+See TESTING.md for fixture explanations and how to interpret a failure.
+"""
+import csv
+import os
+import pandas as pd
+import yaml
+import pytest
+
+import momentum_trading.daily_runner as daily_runner
+from momentum_trading.backtest.momentum_backtest import BacktestConfig
+from momentum_trading.daily_runner import (
+    load_config, validate_config_schema, already_ran_today, mark_ran_today, send_alert_email,
+    check_and_handle_time_stops, check_and_handle_stop_losses, resolve_total_values, check_ticker_overlap,
+)
+from momentum_trading.core.audit_log import read_recent_alerts
+
+
+class TestConfigSchemaValidation:
+    """
+    validate_config_schema() exists specifically to catch a bad config.yaml
+    BEFORE it's used to build a BacktestConfig deep inside the rebalance loop
+    -- these tests confirm each specific mistake (empty tickers, a
+    custom_weights key that doesn't match the ticker list, weights summing
+    over 1.0, a negative dollar value) produces a clear, field-specific error
+    naming the offending portfolio, rather than a generic crash or -- worse
+    -- a silently-wrong sizing decision.
+    """
+
+    def test_valid_config_passes(self, sample_config_dict):
+        validate_config_schema(sample_config_dict, "test.yaml")  # should not raise
+
+    def test_missing_portfolios_key_raises(self):
+        with pytest.raises(ValueError, match="portfolios"):
+            validate_config_schema({}, "test.yaml")
+
+    def test_empty_tickers_raises(self):
+        bad = {"portfolios": {"p1": {"tickers": []}}}
+        with pytest.raises(ValueError, match="tickers"):
+            validate_config_schema(bad, "test.yaml")
+
+    def test_custom_weight_for_unknown_ticker_raises(self):
+        # A stale custom_weights entry (referencing a ticker no longer in the
+        # portfolio) would otherwise be silently ignored -- this forces the
+        # mismatch to be caught and fixed rather than quietly producing a
+        # different allocation than intended.
+        bad = {"portfolios": {"p1": {"tickers": ["SPY"], "custom_weights": {"QQQ": 0.5}}}}
+        with pytest.raises(ValueError, match="not in this portfolio"):
+            validate_config_schema(bad, "test.yaml")
+
+    def test_custom_weights_over_one_raises(self):
+        # Weights summing above 1.0 would imply leverage the user probably
+        # didn't intend to configure explicitly.
+        bad = {"portfolios": {"p1": {"tickers": ["SPY", "QQQ"],
+                                       "custom_weights": {"SPY": 0.8, "QQQ": 0.8}}}}
+        with pytest.raises(ValueError, match="sum to"):
+            validate_config_schema(bad, "test.yaml")
+
+    def test_negative_total_value_raises(self):
+        bad = {"portfolios": {"p1": {"tickers": ["SPY"], "total_value": -100}}}
+        with pytest.raises(ValueError, match="total_value"):
+            validate_config_schema(bad, "test.yaml")
+
+    def test_two_null_total_values_raises(self):
+        # Epic 26, Story 26.1: total_value: null means "account remainder", which is
+        # ambiguous with more than one candidate -- must fail at load time, not
+        # silently double-count real capital across portfolios sharing an account.
+        bad = {"portfolios": {
+            "p1": {"tickers": ["SPY"], "total_value": None},
+            "p2": {"tickers": ["QQQ"], "total_value": None},
+        }}
+        with pytest.raises(ValueError, match="p1.*p2|p2.*p1"):
+            validate_config_schema(bad, "test.yaml")
+
+    def test_single_null_total_value_is_valid(self):
+        ok = {"portfolios": {
+            "p1": {"tickers": ["SPY"], "total_value": None},
+            "p2": {"tickers": ["QQQ"], "total_value": 500.0},
+        }}
+        validate_config_schema(ok, "test.yaml")  # should not raise
+
+    def test_non_bool_send_warning_raises(self):
+        # Epic 27, Story 27.2: send_warning: "false" is a truthy non-empty string in
+        # Python -- would otherwise silently mean "send" via default truthiness, the
+        # opposite of what someone writing that value almost certainly intended. This
+        # field gates whether a real capital-safety risk reaches you by email at all,
+        # so a bad value here must fail loudly, not silently do the wrong thing.
+        bad = {"portfolios": {"p1": {"tickers": ["SPY"]}}, "notifications": {"send_warning": "false"}}
+        with pytest.raises(ValueError, match="send_warning"):
+            validate_config_schema(bad, "test.yaml")
+
+    def test_bool_send_warning_is_valid(self):
+        ok_true = {"portfolios": {"p1": {"tickers": ["SPY"]}}, "notifications": {"send_warning": True}}
+        ok_false = {"portfolios": {"p1": {"tickers": ["SPY"]}}, "notifications": {"send_warning": False}}
+        validate_config_schema(ok_true, "test.yaml")   # should not raise
+        validate_config_schema(ok_false, "test.yaml")  # should not raise
+
+    def test_missing_notifications_section_is_valid(self):
+        ok = {"portfolios": {"p1": {"tickers": ["SPY"]}}}
+        validate_config_schema(ok, "test.yaml")  # should not raise
+
+
+class TestLoadConfig:
+    """
+    load_config() is the full pipeline: read YAML -> schema-validate ->
+    build a BacktestConfig per portfolio. These tests confirm the happy path
+    works end-to-end from a real file on disk (not just an in-memory dict,
+    which TestConfigSchemaValidation covers), and that an invalid
+    risk_override surfaces the PORTFOLIO NAME in the error -- with multiple
+    portfolios in one config.yaml, a generic "invalid config" error would be
+    much harder to act on than one that says which portfolio is broken.
+    """
+
+    def test_load_valid_yaml_file(self, tmp_path, sample_config_dict):
+        path = tmp_path / "config.yaml"
+        with open(path, "w") as f:
+            yaml.safe_dump(sample_config_dict, f)
+
+        result = load_config(str(path))
+        assert "portfolio1" in result["portfolios_resolved"]
+        assert result["portfolios_resolved"]["portfolio1"]["tickers"] == ["SPY", "QQQ", "XLK"]
+
+    def test_missing_file_raises(self, tmp_path):
+        with pytest.raises(FileNotFoundError):
+            load_config(str(tmp_path / "nonexistent.yaml"))
+
+    def test_invalid_risk_override_raises_with_portfolio_name(self, tmp_path):
+        bad = {
+            "portfolios": {"p1": {"tickers": ["SPY"], "risk_overrides": {"stop_loss_pct": 5.0}}}
+        }
+        path = tmp_path / "config.yaml"
+        with open(path, "w") as f:
+            yaml.safe_dump(bad, f)
+        with pytest.raises(ValueError, match="p1"):
+            load_config(str(path))
+
+    def test_top_n_independent_per_portfolio(self, tmp_path):
+        # Epic 23: confirms top_n is genuinely per-portfolio, not a single value
+        # shared across a config.yaml with several portfolios -- four portfolios,
+        # four different top_n values, each resolved independently via
+        # risk_overrides on top of one shared default_risk.top_n.
+        cfg = {
+            "default_risk": {"holding_period": 1, "top_n": 3},   # portfolio1 uses this as-is
+            "portfolios": {
+                # Epic 26: explicit total_value on every portfolio here -- unrelated to what
+                # this test checks (top_n independence), but required since Epic 26 forbids
+                # more than one portfolio with total_value: null (unset defaults to null) in
+                # the same config.yaml.
+                "portfolio1": {"tickers": ["SPY", "QQQ", "XLK"], "total_value": 1000.0},
+                "portfolio2": {"tickers": ["XLF", "XLE", "GLD", "TLT"], "total_value": 1000.0,
+                               "risk_overrides": {"top_n": 10}},
+                "portfolio3": {"tickers": ["SPY", "QQQ", "XLK", "XLF", "XLE"], "total_value": 1000.0,
+                               "risk_overrides": {"top_n": 40}},
+                "portfolio4": {"tickers": ["GLD", "TLT", "BIL"], "total_value": 1000.0,
+                               "risk_overrides": {"top_n": 5}},
+            },
+        }
+        path = tmp_path / "config.yaml"
+        with open(path, "w") as f:
+            yaml.safe_dump(cfg, f)
+
+        resolved = load_config(str(path))["portfolios_resolved"]
+        expected = {"portfolio1": 3, "portfolio2": 10, "portfolio3": 40, "portfolio4": 5}
+        for name, expected_top_n in expected.items():
+            assert resolved[name]["cfg"].top_n == expected_top_n, (
+                f"{name}: expected top_n={expected_top_n}, got {resolved[name]['cfg'].top_n}"
+            )
+
+
+class TestIdempotency:
+    """
+    Guards against a duplicate same-day rebalance (e.g. a cron retry firing
+    twice, or a manual run overlapping a scheduled one) -- without this,
+    the system could place the same intended trade twice.
+    """
+
+    def test_lock_lifecycle(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        import momentum_trading.daily_runner as daily_runner
+        import momentum_trading.risk.circuit_breaker as circuit_breaker
+        monkeypatch.setattr(circuit_breaker, "LOCK_DIR", tmp_path / "data")
+        monkeypatch.setattr(daily_runner, "LOCK_DIR", tmp_path / "data")
+
+        tag = "test_portfolio"
+        assert already_ran_today(tag) is False
+        mark_ran_today(tag)
+        assert already_ran_today(tag) is True
+
+
+class TestAlertFallback:
+    """
+    If SMTP isn't configured, an alert must still be VISIBLE (as an ERROR log
+    line) rather than silently disappearing -- a failed unattended run with
+    no notification at all is the worst-case outcome this test guards against.
+    """
+
+    def test_unconfigured_smtp_does_not_raise(self, monkeypatch):
+        for var in ["SMTP_HOST", "SMTP_USER", "SMTP_PASS", "ALERT_TO_EMAIL"]:
+            monkeypatch.delenv(var, raising=False)
+        send_alert_email("Test", "body")  # should log an error, not raise
+
+
+class TestCircuitBreaker:
+    """
+    The circuit breaker's most important, least obvious behavioral
+    requirement is that it does NOT auto-resume after a drawdown recovers --
+    a human must explicitly clear it. This is deliberate: a brief recovery
+    during a volatile period shouldn't silently re-enable trading without
+    review. test_trips_on_drawdown_and_persists_despite_recovery is the test
+    that would catch a regression of exactly that behavior.
+    """
+
+    def test_trips_on_drawdown_and_persists_despite_recovery(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        import momentum_trading.daily_runner as daily_runner
+        import momentum_trading.risk.circuit_breaker as circuit_breaker
+        monkeypatch.setattr(circuit_breaker, "LOCK_DIR", tmp_path / "data")
+        monkeypatch.setattr(daily_runner, "LOCK_DIR", tmp_path / "data")
+        from momentum_trading.daily_runner import check_circuit_breaker, resume_trading
+        from momentum_trading.backtest.momentum_backtest import BacktestConfig
+
+        cfg = BacktestConfig(max_portfolio_drawdown_pct=0.20)
+        assert check_circuit_breaker("p", 1000.0, cfg) is False
+        assert check_circuit_breaker("p", 1200.0, cfg) is False  # new peak
+        assert check_circuit_breaker("p", 950.0, cfg) is True    # -20.8% from peak, trips
+        assert check_circuit_breaker("p", 1300.0, cfg) is True   # still halted despite recovery
+        resume_trading("p")
+        assert check_circuit_breaker("p", 1300.0, cfg) is False  # cleared after explicit resume
+
+    def test_disabled_by_default(self, tmp_path, monkeypatch):
+        # Confirms max_portfolio_drawdown_pct=0.0 (the default) genuinely
+        # disables the feature -- an existing config.yaml without this field
+        # set should NOT unexpectedly start halting trades.
+        monkeypatch.chdir(tmp_path)
+        import momentum_trading.daily_runner as daily_runner
+        import momentum_trading.risk.circuit_breaker as circuit_breaker
+        monkeypatch.setattr(circuit_breaker, "LOCK_DIR", tmp_path / "data")
+        monkeypatch.setattr(daily_runner, "LOCK_DIR", tmp_path / "data")
+        from momentum_trading.daily_runner import check_circuit_breaker
+        from momentum_trading.backtest.momentum_backtest import BacktestConfig
+
+        cfg = BacktestConfig()  # max_portfolio_drawdown_pct=0.0 by default
+        assert check_circuit_breaker("p", 100.0, cfg) is False  # -90% drawdown, but disabled
+
+
+class TestMaxDrawdownEmailOverride:
+    """
+    Epic 14, Story 14.2: SET_MAX_DRAWDOWN's core safety property -- the
+    override can only TIGHTEN the effective breaker threshold, never loosen
+    it, enforced at the point of USE (get_effective_max_drawdown_pct), not
+    at email-parse time. A regression here would mean a malformed or
+    misconfigured override could accidentally make the bot LESS safe, which
+    would defeat the entire point of this feature.
+    """
+
+    def test_no_override_uses_configured_value(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        import momentum_trading.daily_runner as daily_runner
+        import momentum_trading.risk.circuit_breaker as circuit_breaker
+        monkeypatch.setattr(circuit_breaker, "LOCK_DIR", tmp_path / "data")
+        monkeypatch.setattr(daily_runner, "LOCK_DIR", tmp_path / "data")
+        from momentum_trading.daily_runner import get_effective_max_drawdown_pct
+
+        assert get_effective_max_drawdown_pct("p", 0.20) == 0.20
+
+    def test_tighter_override_takes_effect(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        import momentum_trading.daily_runner as daily_runner
+        import momentum_trading.risk.circuit_breaker as circuit_breaker
+        monkeypatch.setattr(circuit_breaker, "LOCK_DIR", tmp_path / "data")
+        monkeypatch.setattr(daily_runner, "LOCK_DIR", tmp_path / "data")
+        from momentum_trading.daily_runner import get_effective_max_drawdown_pct, _max_drawdown_override_path
+
+        (tmp_path / "data").mkdir(exist_ok=True)
+        _max_drawdown_override_path("p").write_text("0.10")
+        assert get_effective_max_drawdown_pct("p", 0.20) == 0.10
+
+    def test_looser_override_is_ignored(self, tmp_path, monkeypatch):
+        # THE critical test: an override requesting a LOOSER threshold than
+        # config must be ignored -- the configured (tighter) value wins.
+        monkeypatch.chdir(tmp_path)
+        import momentum_trading.daily_runner as daily_runner
+        import momentum_trading.risk.circuit_breaker as circuit_breaker
+        monkeypatch.setattr(circuit_breaker, "LOCK_DIR", tmp_path / "data")
+        monkeypatch.setattr(daily_runner, "LOCK_DIR", tmp_path / "data")
+        from momentum_trading.daily_runner import get_effective_max_drawdown_pct, _max_drawdown_override_path
+
+        (tmp_path / "data").mkdir(exist_ok=True)
+        _max_drawdown_override_path("p").write_text("0.50")  # looser than config
+        assert get_effective_max_drawdown_pct("p", 0.20) == 0.20  # config wins, not 0.50
+
+    def test_tighter_override_trips_breaker_earlier_than_loose_config(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        import momentum_trading.daily_runner as daily_runner
+        import momentum_trading.risk.circuit_breaker as circuit_breaker
+        monkeypatch.setattr(circuit_breaker, "LOCK_DIR", tmp_path / "data")
+        monkeypatch.setattr(daily_runner, "LOCK_DIR", tmp_path / "data")
+        from momentum_trading.daily_runner import check_circuit_breaker, _max_drawdown_override_path
+        from momentum_trading.backtest.momentum_backtest import BacktestConfig
+
+        (tmp_path / "data").mkdir(exist_ok=True)
+        _max_drawdown_override_path("p").write_text("0.05")  # very tight override
+        cfg = BacktestConfig(max_portfolio_drawdown_pct=0.50)  # loose config
+
+        assert check_circuit_breaker("p", 1000.0, cfg) is False  # sets peak
+        # -6% breaches the tight 5% override, even though config allows up to 50%
+        assert check_circuit_breaker("p", 940.0, cfg) is True
+
+
+class TestTimeStops:
+    """
+    Epic 25, Story 25.2: live-trading equivalent of the backtest's
+    max_holding_days -- independent of and in addition to the price-based
+    stop-loss (check_and_handle_stop_losses), sharing its auto_execute_stop_loss
+    flag rather than a second config field.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolate_alerts_log(self, tmp_path, monkeypatch):
+        # Epic 29, Story 29.3: check_and_handle_time_stops() now also calls
+        # log_alert(), which resolves its path via the module-global LOCK_DIR
+        # (same pattern as every other daily_runner.py path) -- without this,
+        # these tests would write TIME_STOP_TRIGGERED rows into the real
+        # project's data/alerts_log.csv instead of tmp_path.
+        monkeypatch.setattr(daily_runner, "LOCK_DIR", tmp_path / "data")
+
+    def _write_log(self, tmp_path, rows):
+        path = tmp_path / "trade_log.csv"
+        with open(path, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["timestamp", "ticker", "action", "shares"])
+            w.writerows(rows)
+        return str(path)
+
+    def test_disabled_when_max_holding_days_is_none(self, tmp_path):
+        trade_log = self._write_log(tmp_path, [["2020-01-01T09:35:00", "XLK", "BUY", 10]])
+        cfg = BacktestConfig(max_holding_days=None)
+        flagged = check_and_handle_time_stops(
+            tickers=["XLK"], current_positions={"XLK": {"shares": 10}},
+            latest_prices={"XLK": 100.0}, cfg=cfg, dry_run=True, ibkr_port=7497,
+            log_path=str(tmp_path / "out.csv"), trade_log_path=trade_log,
+        )
+        assert flagged == []
+
+    def test_not_flagged_when_held_less_than_max_holding_days(self, tmp_path):
+        recent = pd.Timestamp.now() - pd.Timedelta(days=5)
+        trade_log = self._write_log(tmp_path, [[recent.isoformat(), "XLK", "BUY", 10]])
+        cfg = BacktestConfig(max_holding_days=30)
+        flagged = check_and_handle_time_stops(
+            tickers=["XLK"], current_positions={"XLK": {"shares": 10}},
+            latest_prices={"XLK": 100.0}, cfg=cfg, dry_run=True, ibkr_port=7497,
+            log_path=str(tmp_path / "out.csv"), trade_log_path=trade_log,
+        )
+        assert flagged == []
+
+    def test_flagged_only_when_auto_execute_disabled(self, tmp_path):
+        old = pd.Timestamp.now() - pd.Timedelta(days=40)
+        trade_log = self._write_log(tmp_path, [[old.isoformat(), "XLK", "BUY", 10]])
+        out_path = tmp_path / "out.csv"
+        cfg = BacktestConfig(max_holding_days=30, auto_execute_stop_loss=False)
+        flagged = check_and_handle_time_stops(
+            tickers=["XLK"], current_positions={"XLK": {"shares": 10}},
+            latest_prices={"XLK": 100.0}, cfg=cfg, dry_run=True, ibkr_port=7497,
+            log_path=str(out_path), trade_log_path=trade_log,
+        )
+        assert flagged == ["XLK"]
+        assert not out_path.exists()  # flag-only: no exit order was logged
+
+    def test_auto_executed_when_enabled(self, tmp_path):
+        old = pd.Timestamp.now() - pd.Timedelta(days=40)
+        trade_log = self._write_log(tmp_path, [[old.isoformat(), "XLK", "BUY", 10]])
+        out_path = tmp_path / "out.csv"
+        cfg = BacktestConfig(max_holding_days=30, auto_execute_stop_loss=True)
+        flagged = check_and_handle_time_stops(
+            tickers=["XLK"], current_positions={"XLK": {"shares": 10}},
+            latest_prices={"XLK": 100.0}, cfg=cfg, dry_run=True, ibkr_port=7497,
+            log_path=str(out_path), trade_log_path=trade_log, portfolio="p1",
+        )
+        assert flagged == ["XLK"]
+        logged = pd.read_csv(out_path)
+        assert logged.iloc[0]["action"] == "SELL"
+        assert logged.iloc[0]["ticker"] == "XLK"
+
+        # Epic 29, Story 29.3: TIME_STOP_TRIGGERED must land in the alert log,
+        # tagged with the portfolio it actually fired for.
+        rows = read_recent_alerts(portfolio="p1", log_path=str(tmp_path / "data" / "alerts_log.csv"))
+        assert len(rows) == 1
+        assert rows[0]["alert_type"] == "TIME_STOP_TRIGGERED"
+        assert rows[0]["severity"] == "CRITICAL"
+
+    def test_flat_position_not_flagged(self, tmp_path):
+        # A ticker with shares=0 in current_positions (fully exited) must never
+        # be flagged, regardless of what the trade log says about its history.
+        old = pd.Timestamp.now() - pd.Timedelta(days=40)
+        trade_log = self._write_log(tmp_path, [
+            [old.isoformat(), "XLK", "BUY", 10],
+            [(old + pd.Timedelta(days=1)).isoformat(), "XLK", "SELL", 10],
+        ])
+        cfg = BacktestConfig(max_holding_days=30)
+        flagged = check_and_handle_time_stops(
+            tickers=["XLK"], current_positions={"XLK": {"shares": 0}},
+            latest_prices={"XLK": 100.0}, cfg=cfg, dry_run=True, ibkr_port=7497,
+            log_path=str(tmp_path / "out.csv"), trade_log_path=trade_log,
+        )
+        assert flagged == []
+
+
+class TestStopLossCheck:
+    """
+    Epic 29, Story 29.6: check_and_handle_stop_losses() had no dedicated test
+    at all before this epic (only exercised indirectly). Added alongside the
+    Story 29.3 log_alert() wiring to confirm STOP_LOSS_TRIGGERED actually
+    lands in the alert log with the right portfolio tag -- not just that the
+    ticker gets flagged.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolate_alerts_log(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(daily_runner, "LOCK_DIR", tmp_path / "data")
+
+    def test_triggered_position_is_flagged_and_alert_logged(self, tmp_path):
+        cfg = BacktestConfig(stop_loss_pct=0.10)
+        flagged = check_and_handle_stop_losses(
+            tickers=["XLK"],
+            current_positions={"XLK": {"shares": 10, "avg_entry_price": 100.0}},
+            latest_prices={"XLK": 85.0}, cfg=cfg, dry_run=True, ibkr_port=7497,
+            log_path=str(tmp_path / "out.csv"), portfolio="p1",
+        )
+        assert flagged == ["XLK"]
+        rows = read_recent_alerts(portfolio="p1", log_path=str(tmp_path / "data" / "alerts_log.csv"))
+        assert len(rows) == 1
+        assert rows[0]["alert_type"] == "STOP_LOSS_TRIGGERED"
+        assert rows[0]["severity"] == "CRITICAL"
+
+    def test_not_flagged_within_tolerance(self, tmp_path):
+        cfg = BacktestConfig(stop_loss_pct=0.10)
+        flagged = check_and_handle_stop_losses(
+            tickers=["XLK"],
+            current_positions={"XLK": {"shares": 10, "avg_entry_price": 100.0}},
+            latest_prices={"XLK": 95.0}, cfg=cfg, dry_run=True, ibkr_port=7497,
+            log_path=str(tmp_path / "out.csv"), portfolio="p1",
+        )
+        assert flagged == []
+        assert read_recent_alerts(portfolio="p1", log_path=str(tmp_path / "data" / "alerts_log.csv")) == []
+
+
+class TestAlertsReportEmailCommand:
+    """
+    Epic 29, Story 29.5: ALERTS_REPORT is handled specially in
+    check_and_apply_email_commands() -- BEFORE the normal per-portfolio
+    targets loop, since PORTFOLIO here means "filter to this portfolio's
+    alerts" (a query), not "apply this action to these portfolios" like every
+    other command. These tests exercise the full path: a canned parsed
+    command (poll_and_process_commands mocked out, no real IMAP) ->
+    read_recent_alerts() -> send_alert_email() reply body.
+    """
+
+    def _configure_email_env(self, monkeypatch):
+        monkeypatch.setenv("IMAP_HOST", "imap.example.com")
+        monkeypatch.setenv("IMAP_USER", "bot@example.com")
+        monkeypatch.setenv("IMAP_PASS", "secret")
+        monkeypatch.setenv("TRUSTED_SENDER_EMAIL", "trader@example.com")
+
+    def _parsed(self, body):
+        from momentum_trading.interfaces.email_commands import parse_command
+        result = parse_command("trader@example.com", "trader@example.com", body)
+        assert result.success is True
+        return result
+
+    def test_alerts_report_replies_with_matching_rows_only(self, tmp_path, monkeypatch):
+        self._configure_email_env(monkeypatch)
+        monkeypatch.setattr(daily_runner, "LOCK_DIR", tmp_path / "data")
+        from momentum_trading.core.audit_log import log_alert
+        alerts_path = str(tmp_path / "data" / "alerts_log.csv")
+        log_alert("p1", "STOP_LOSS_TRIGGERED", "CRITICAL", "SPY down 12%", log_path=alerts_path)
+        log_alert("p2", "TIME_STOP_TRIGGERED", "CRITICAL", "QQQ held too long", log_path=alerts_path)
+
+        parsed = self._parsed("ACTION: ALERTS_REPORT\nPORTFOLIO: p1")
+        monkeypatch.setattr(daily_runner, "poll_and_process_commands", lambda *a, **k: [parsed])
+        sent = []
+        monkeypatch.setattr(daily_runner, "send_alert_email",
+                             lambda subject, body: sent.append((subject, body)))
+
+        daily_runner.check_and_apply_email_commands(["p1", "p2"], ibkr_port=7497, dry_run=True)
+
+        assert len(sent) == 1
+        subject, body = sent[0]
+        assert "ALERTS_REPORT" in subject
+        assert "STOP_LOSS_TRIGGERED" in body
+        assert "TIME_STOP_TRIGGERED" not in body  # filtered to p1 only
+
+    def test_alerts_report_all_includes_every_portfolio(self, tmp_path, monkeypatch):
+        self._configure_email_env(monkeypatch)
+        monkeypatch.setattr(daily_runner, "LOCK_DIR", tmp_path / "data")
+        from momentum_trading.core.audit_log import log_alert
+        alerts_path = str(tmp_path / "data" / "alerts_log.csv")
+        log_alert("p1", "STOP_LOSS_TRIGGERED", "CRITICAL", "SPY down 12%", log_path=alerts_path)
+        log_alert("p2", "TIME_STOP_TRIGGERED", "CRITICAL", "QQQ held too long", log_path=alerts_path)
+
+        parsed = self._parsed("ACTION: ALERTS_REPORT\nPORTFOLIO: ALL")
+        monkeypatch.setattr(daily_runner, "poll_and_process_commands", lambda *a, **k: [parsed])
+        sent = []
+        monkeypatch.setattr(daily_runner, "send_alert_email",
+                             lambda subject, body: sent.append((subject, body)))
+
+        daily_runner.check_and_apply_email_commands(["p1", "p2"], ibkr_port=7497, dry_run=True)
+
+        assert len(sent) == 1
+        _, body = sent[0]
+        assert "STOP_LOSS_TRIGGERED" in body
+        assert "TIME_STOP_TRIGGERED" in body
+
+    def test_alerts_report_no_alerts_replies_gracefully(self, tmp_path, monkeypatch):
+        self._configure_email_env(monkeypatch)
+        monkeypatch.setattr(daily_runner, "LOCK_DIR", tmp_path / "data")
+
+        parsed = self._parsed("ACTION: ALERTS_REPORT\nPORTFOLIO: p1")
+        monkeypatch.setattr(daily_runner, "poll_and_process_commands", lambda *a, **k: [parsed])
+        sent = []
+        monkeypatch.setattr(daily_runner, "send_alert_email",
+                             lambda subject, body: sent.append((subject, body)))
+
+        daily_runner.check_and_apply_email_commands(["p1"], ibkr_port=7497, dry_run=True)
+
+        assert len(sent) == 1
+        _, body = sent[0]
+        assert "No alerts recorded" in body
+
+    def test_unknown_portfolio_skipped_without_reply(self, tmp_path, monkeypatch):
+        self._configure_email_env(monkeypatch)
+        monkeypatch.setattr(daily_runner, "LOCK_DIR", tmp_path / "data")
+
+        parsed = self._parsed("ACTION: ALERTS_REPORT\nPORTFOLIO: nonexistent")
+        monkeypatch.setattr(daily_runner, "poll_and_process_commands", lambda *a, **k: [parsed])
+        sent = []
+        monkeypatch.setattr(daily_runner, "send_alert_email",
+                             lambda subject, body: sent.append((subject, body)))
+
+        daily_runner.check_and_apply_email_commands(["p1"], ibkr_port=7497, dry_run=True)
+
+        assert sent == []
+
+
+class TestResolveTotalValues:
+    """
+    Epic 26, Story 26.2: total_value: null must mean "account value minus every
+    OTHER portfolio's fixed total_value" -- the OLD behavior (each null portfolio
+    independently pulling the FULL account value) silently double/triple-counted the
+    same real capital across portfolios sharing one IBKR account. These tests use an
+    injected account_value_fn so no real IBKR connection is needed.
+    """
+
+    def test_live_remainder_matches_hand_calculation(self):
+        # $10,000 account, portfolio2 fixed at $2,500 -> portfolio1 (null) should
+        # get exactly $7,500, not the full $10,000.
+        portfolios = {
+            "portfolio1": {"total_value": None, "tickers": ["SPY"]},
+            "portfolio2": {"total_value": 2500.0, "tickers": ["XLF"]},
+        }
+        resolved = resolve_total_values(portfolios, dry_run=False, account_value_fn=lambda: 10000.0)
+        assert resolved == {"portfolio2": 2500.0, "portfolio1": 7500.0}
+
+    def test_live_remainder_at_or_below_zero_raises(self):
+        # Fixed portfolios already consume the whole (or more than the) account --
+        # proceeding with zero/negative real capital must never happen silently.
+        portfolios = {
+            "portfolio1": {"total_value": None, "tickers": ["SPY"]},
+            "portfolio2": {"total_value": 10000.0, "tickers": ["XLF"]},
+        }
+        with pytest.raises(ValueError, match="portfolio1"):
+            resolve_total_values(portfolios, dry_run=False, account_value_fn=lambda: 10000.0)
+
+    def test_no_null_portfolio_leaves_fixed_values_untouched(self):
+        portfolios = {
+            "p1": {"total_value": 100.0, "tickers": ["SPY"]},
+            "p2": {"total_value": 200.0, "tickers": ["QQQ"]},
+        }
+        resolved = resolve_total_values(portfolios, dry_run=False, account_value_fn=lambda: 999999.0)
+        assert resolved == {"p1": 100.0, "p2": 200.0}
+
+    def test_dry_run_null_portfolio_gets_flat_placeholder_not_a_real_remainder(self):
+        # Dry-run tests signal/order-generation LOGIC, not real capital math -- the
+        # null portfolio must get a simple flat placeholder, NOT reduced by other
+        # portfolios' fixed total_value, so dry-run testing a config that's perfectly
+        # valid live (e.g. a fixed portfolio bigger than $1000) doesn't spuriously fail.
+        portfolios = {
+            "portfolio1": {"total_value": None, "tickers": ["SPY"]},
+            "portfolio2": {"total_value": 2500.0, "tickers": ["XLF"]},  # > the $1000 placeholder
+        }
+        resolved = resolve_total_values(portfolios, dry_run=True)
+        assert resolved == {"portfolio2": 2500.0, "portfolio1": 1000.0}
+
+    def test_dry_run_never_calls_account_value_fn(self):
+        def boom():
+            raise AssertionError("account_value_fn must not be called in dry-run")
+        portfolios = {"p1": {"total_value": None, "tickers": ["SPY"]}}
+        resolved = resolve_total_values(portfolios, dry_run=True, account_value_fn=boom)
+        assert resolved == {"p1": 1000.0}
+
+
+class TestCheckTickerOverlap:
+    """
+    Epic 26, Story 26.4: portfolios sharing a ticker on the same real IBKR account
+    would each independently compute and submit orders against the same position --
+    this is surfaced as a warning (not blocking, per explicit product decision), so
+    it must correctly identify exactly which tickers and portfolios are involved.
+    """
+
+    def test_detects_overlap_and_names_portfolios(self):
+        portfolios = {
+            "p1": {"tickers": ["SPY", "XLF"]},
+            "p2": {"tickers": ["XLF", "GLD"]},
+        }
+        overlap = check_ticker_overlap(portfolios)
+        assert overlap == {"XLF": ["p1", "p2"]}
+
+    def test_no_overlap_returns_empty(self):
+        portfolios = {"p1": {"tickers": ["SPY"]}, "p2": {"tickers": ["QQQ"]}}
+        assert check_ticker_overlap(portfolios) == {}
+
+    def test_three_way_overlap_names_all_portfolios(self):
+        portfolios = {
+            "p1": {"tickers": ["GLD"]},
+            "p2": {"tickers": ["GLD"]},
+            "p3": {"tickers": ["GLD"]},
+        }
+        overlap = check_ticker_overlap(portfolios)
+        assert overlap == {"GLD": ["p1", "p2", "p3"]}
+
+    def test_matches_real_config_yaml_overlap(self):
+        # Regression guard for the exact scenario found in the real config.yaml:
+        # portfolio1 and portfolio2 share XLF/XLE/GLD/TLT.
+        portfolios = {
+            "portfolio1": {"tickers": ["SPY", "QQQ", "XLK", "XLF", "XLE", "XLY", "XLP", "XLU", "GLD", "TLT", "BIL"]},
+            "portfolio2": {"tickers": ["XLF", "XLE", "GLD", "TLT"]},
+        }
+        overlap = check_ticker_overlap(portfolios)
+        assert set(overlap.keys()) == {"XLF", "XLE", "GLD", "TLT"}
+        for names in overlap.values():
+            assert set(names) == {"portfolio1", "portfolio2"}

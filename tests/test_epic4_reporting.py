@@ -33,8 +33,9 @@ class TestPortfolioSnapshot:
 
     def test_first_snapshot_has_no_period_return(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        write_portfolio_snapshot("p1", {}, {}, total_value=1000.0, cash=1000.0, benchmark_ticker="SPY")
-        latest = get_latest_snapshot("p1")
+        write_portfolio_snapshot("p1", {}, {}, total_value=1000.0, cash=1000.0, benchmark_ticker="SPY",
+                                  snapshot_dir=str(tmp_path))
+        latest = get_latest_snapshot("p1", snapshot_dir=str(tmp_path))
         assert latest["total_value"] == 1000.0
         assert latest["portfolio_period_return"] == "" or pd_isna(latest["portfolio_period_return"])
 
@@ -42,17 +43,17 @@ class TestPortfolioSnapshot:
         monkeypatch.chdir(tmp_path)
         write_portfolio_snapshot("p1", {"XLK": {"shares": 5, "avg_entry_price": 200.0}},
                                   {"XLK": 200.0, "SPY": 550.0}, total_value=1000.0, cash=0.0,
-                                  benchmark_ticker="SPY")
+                                  benchmark_ticker="SPY", snapshot_dir=str(tmp_path))
         write_portfolio_snapshot("p1", {"XLK": {"shares": 5, "avg_entry_price": 200.0}},
                                   {"XLK": 220.0, "SPY": 561.0}, total_value=1100.0, cash=0.0,
-                                  benchmark_ticker="SPY")
-        latest = get_latest_snapshot("p1")
+                                  benchmark_ticker="SPY", snapshot_dir=str(tmp_path))
+        latest = get_latest_snapshot("p1", snapshot_dir=str(tmp_path))
         assert latest["portfolio_period_return"] == pytest.approx(0.10, abs=1e-4)
         assert latest["benchmark_period_return"] == pytest.approx(0.02, abs=1e-4)
 
     def test_get_latest_snapshot_returns_none_if_no_file(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        assert get_latest_snapshot("nonexistent") is None
+        assert get_latest_snapshot("nonexistent", snapshot_dir=str(tmp_path)) is None
 
 
 class TestSignalContextInOrders:
@@ -122,16 +123,19 @@ class TestBenchmarkComparison:
     """
     def test_no_file_returns_error_dict(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        result = fnx.compare_to_benchmark("nonexistent")
+        result = fnx.compare_to_benchmark("nonexistent", snapshot_dir=str(tmp_path))
         assert "error" in result
 
     def test_cumulative_return_math(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        write_portfolio_snapshot("p1", {}, {"SPY": 500.0}, total_value=1000.0, cash=1000.0, benchmark_ticker="SPY")
-        write_portfolio_snapshot("p1", {}, {"SPY": 510.0}, total_value=1050.0, cash=1050.0, benchmark_ticker="SPY")
-        write_portfolio_snapshot("p1", {}, {"SPY": 520.0}, total_value=1100.0, cash=1100.0, benchmark_ticker="SPY")
+        write_portfolio_snapshot("p1", {}, {"SPY": 500.0}, total_value=1000.0, cash=1000.0, benchmark_ticker="SPY",
+                                  snapshot_dir=str(tmp_path))
+        write_portfolio_snapshot("p1", {}, {"SPY": 510.0}, total_value=1050.0, cash=1050.0, benchmark_ticker="SPY",
+                                  snapshot_dir=str(tmp_path))
+        write_portfolio_snapshot("p1", {}, {"SPY": 520.0}, total_value=1100.0, cash=1100.0, benchmark_ticker="SPY",
+                                  snapshot_dir=str(tmp_path))
 
-        result = fnx.compare_to_benchmark("p1")
+        result = fnx.compare_to_benchmark("p1", snapshot_dir=str(tmp_path))
         # portfolio: (1050/1000)*(1100/1050) - 1 = 0.10 exactly
         assert result["portfolio_cumulative_return"] == pytest.approx(0.10, abs=1e-4)
         assert result["n_periods"] == 2

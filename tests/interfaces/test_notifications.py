@@ -90,6 +90,58 @@ class TestHTMLGeneration:
         html = build_rebalance_summary_html("portfolio1", {})
         assert "portfolio1" in html  # doesn't crash, still identifies the portfolio
 
+    def test_rebalance_summary_dry_run_shows_no_order_sent(self):
+        # dry_run=True (no --live): a BUY/SELL order was decided but never sent to a
+        # broker, so the new column should say so rather than imply a real outcome.
+        orders = {"SPY": {"action": "BUY", "shares": 2, "reason": "drift"}}
+        html = build_rebalance_summary_html("portfolio1", orders, dry_run=True)
+        assert "Dry-run" in html
+
+    def test_rebalance_summary_hold_shows_no_outcome(self):
+        # HOLD never reaches place_orders_ibkr() at all -- the outcome column should
+        # be a neutral placeholder, not "no order sent" (which implies one was intended).
+        orders = {"QQQ": {"action": "HOLD", "shares": 0, "reason": "no drift"}}
+        html = build_rebalance_summary_html("portfolio1", orders, dry_run=False)
+        assert "—" in html
+
+    def test_rebalance_summary_shows_real_fill(self):
+        # execution/live_signal.py's run() merges fill_status/fill_price/fill_shares
+        # onto each order after a live place_orders_ibkr() call -- confirm the email
+        # surfaces the REAL fill, not just the intended action.
+        orders = {"SPY": {"action": "BUY", "shares": 2, "reason": "drift",
+                           "fill_status": "Filled", "fill_price": 601.23, "fill_shares": 2.0}}
+        html = build_rebalance_summary_html("portfolio1", orders, dry_run=False)
+        assert "Filled 2 @ $601.23" in html
+
+    def test_rebalance_summary_shows_dropped_fractional_order(self):
+        # place_orders_ibkr() now tracks orders dropped for flooring to 0 whole shares
+        # (IBKR has no fractional equity API support) separately via dropped_orders,
+        # since they never get a real IBKR orderId -- confirm that surfaces here too.
+        orders = {"GLD": {"action": "BUY", "shares": 0.4, "reason": "drift",
+                           "fill_status": "DROPPED_FRACTIONAL", "fill_price": 0.0, "fill_shares": 0.0}}
+        html = build_rebalance_summary_html("portfolio1", orders, dry_run=False)
+        assert "Dropped" in html and "0 whole shares" in html
+
+    def test_rebalance_summary_shows_dropped_insufficient_cash(self):
+        orders = {"XLK": {"action": "BUY", "shares": 5, "reason": "drift",
+                           "fill_status": "DROPPED_INSUFFICIENT_CASH", "fill_price": 0.0, "fill_shares": 0.0}}
+        html = build_rebalance_summary_html("portfolio1", orders, dry_run=False)
+        assert "insufficient cash" in html
+
+    def test_rebalance_summary_shows_rejected_order(self):
+        orders = {"XLE": {"action": "BUY", "shares": 3, "reason": "drift",
+                           "fill_status": "ERROR: Order rejected", "fill_price": 0.0, "fill_shares": 0.0}}
+        html = build_rebalance_summary_html("portfolio1", orders, dry_run=False)
+        assert "Rejected" in html and "Order rejected" in html
+
+    def test_rebalance_summary_shows_still_open_order(self):
+        # fill_poll_timeout expired before a terminal status arrived -- e.g. a limit
+        # order still working outside RTH. Should read as "still open", not "filled".
+        orders = {"XLF": {"action": "BUY", "shares": 4, "reason": "drift",
+                           "fill_status": "PreSubmitted", "fill_price": 0.0, "fill_shares": 0.0}}
+        html = build_rebalance_summary_html("portfolio1", orders, dry_run=False)
+        assert "Still open" in html and "PreSubmitted" in html
+
     def test_monthly_report_includes_comparison_when_available(self):
         snap = pd.DataFrame({
             "date": pd.date_range("2026-01-01", periods=3, freq="ME"),
@@ -115,3 +167,25 @@ class TestHTMLGeneration:
         html, chart = build_monthly_report_html("portfolio1", pd.DataFrame(), {"error": "no data"})
         assert "portfolio1" in html
         assert chart is None  # can't chart with no data, should be None not an exception
+
+    def test_monthly_report_includes_real_pnl_when_provided(self):
+        # real_pnl comes from execution/live_signal.py's measure_live_performance() --
+        # distinct from the snapshot-based unrealized_pnl already in the report.
+        snap = pd.DataFrame({
+            "date": pd.date_range("2026-01-01", periods=1, freq="ME"),
+            "total_value": [1000], "cash": [1000], "unrealized_pnl": [0],
+        })
+        real_pnl = {"realized_pnl": 40.0, "unrealized_pnl": 90.0, "total_pnl": 130.0,
+                    "trade_count": 2, "total_return_pct": 0.13}
+        html, _ = build_monthly_report_html("portfolio1", snap, {"error": "no data"}, real_pnl)
+        assert "Actual P&L" in html
+        assert "130.00" in html
+        assert "+13.00%" in html
+
+    def test_monthly_report_omits_real_pnl_section_when_not_provided(self):
+        snap = pd.DataFrame({
+            "date": pd.date_range("2026-01-01", periods=1, freq="ME"),
+            "total_value": [1000], "cash": [1000], "unrealized_pnl": [0],
+        })
+        html, _ = build_monthly_report_html("portfolio1", snap, {"error": "no data"})
+        assert "Actual P&L" not in html

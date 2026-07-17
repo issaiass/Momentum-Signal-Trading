@@ -10,9 +10,13 @@ package at `src/momentum_trading/`, console script `daily-runner`. See `README.m
 file inventory and folder structure — don't re-derive it, it's kept current there.
 
 **This is unvalidated-strategy software with well-tested infrastructure** — the code mechanics
-(circuit breakers, idempotency, audit logging) are solid, but the momentum strategy itself has
-never been run against real data or a real broker connection (`README.md`'s "Are You Ready?"
-table). Keep that distinction in mind: a passing test suite says nothing about strategy edge.
+(circuit breakers, idempotency, audit logging) are solid, and a real IBKR paper connection has
+now confirmed the execution mechanics work end-to-end (real BUY and SELL fills, verified
+directly in TWS — see `README.md`'s "Project Maturity & Safety" section for exactly what has
+and hasn't been exercised, including the live/real-money port). But the momentum *strategy*
+itself — whether it has real economic edge — has never been run against real historical
+out-of-sample data. Keep that distinction in mind: a passing test suite, or even a confirmed
+real fill, says nothing about strategy edge.
 
 ## Commands
 
@@ -61,7 +65,22 @@ that tests enforce — don't casually violate these when editing:
   execution, specifically so the two paths can't silently diverge.
 - **`execution/live_signal.py`** — live signal/order generation, IBKR integration (`ibapi`
   `EClient`/`EWrapper`, not a third-party wrapper), multi-portfolio orchestration, FIFO P&L,
-  hash-chained audit log.
+  hash-chained audit log. IBKR routes informational notices (data-farm status, an auto-set TIF,
+  etc.) through the *same* `EWrapper.error()` callback as real errors — `IBKR_INFORMATIONAL_CODES`
+  is the single source of truth for which codes are safe to log at `INFO` and, critically, must
+  never be allowed to overwrite a tracked order's status to `"ERROR: ..."` (that mistake once
+  made a real, filled order get reported as rejected — see `DEPLOYMENT.md`'s IBKR troubleshooting
+  sections before adding a new code here or touching `place_orders_ibkr()`'s `error()` callback).
+  Also: IBKR's API has no fractional equity/ETF order support at all, ever (not an `ibapi`
+  version issue) — `place_orders_ibkr()` floors to whole shares at submission time; don't
+  reintroduce `cashQty` for `STK` contracts, it doesn't work (confirmed empirically). Orders
+  dropped before ever reaching IBKR (flooring to 0 shares, or cash-scaling to 0 shares) never
+  get a real orderId, so `_collect_results()` alone would silently omit them — they're tracked
+  separately in a `dropped_orders` dict (`DROPPED_FRACTIONAL`/`DROPPED_INSUFFICIENT_CASH`) and
+  merged into the returned results, since `interfaces/notifications.py`'s rebalance summary
+  email's "What Actually Happened" column depends on every ticker having *some* recorded
+  outcome. Any new drop path added to `place_orders_ibkr()` should record into `dropped_orders`
+  the same way, not just `continue`.
 - **`risk/circuit_breaker.py`** — extracted from `daily_runner.py` with alerting
   dependency-injected (`alert_fn` param) specifically so `risk/` has zero import dependency on
   `interfaces/` — enforced by an AST-based test

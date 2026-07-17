@@ -11,7 +11,16 @@ specific environment variables (below).
 ## Security model (the important part)
 
 - **Single trusted sender.** Only emails from the exact address in `TRUSTED_SENDER_EMAIL` are
-  ever parsed. Every other sender is ignored before the message body is even inspected.
+  ever parsed. This is enforced twice: the IMAP search itself only fetches mail `FROM` that
+  address (so unrelated inbox mail is never touched, logged, replied to, or marked read), and
+  `parse_command()` re-checks the sender again before parsing.
+- **Self-generated emails are never treated as commands.** Every alert/reply/report this system
+  sends carries an `X-Momentum-Trading-Bot` header; the poller skips anything carrying it,
+  regardless of sender. This matters if `TRUSTED_SENDER_EMAIL` is the same address as
+  `ALERT_TO_EMAIL`/`IMAP_USER` (see "Strongly recommended" note below) — without this check, the
+  bot's own alert emails would land back in its own inbox as new mail "from" the trusted sender,
+  get rejected as unrecognized commands, and trigger another reply, forever (each round's
+  subject doubling `Re: Re:`).
 - **No open-ended parameter changes.** `ADJUST_PARAM` can only touch a small, hard-coded
   allowlist (`stop_loss_pct`, `max_position_weight`, `top_n`), each with hard numeric bounds.
   Nothing else is settable this way — everything else requires editing `config.yaml` directly,
@@ -41,7 +50,11 @@ TRUSTED_SENDER_EMAIL=trader@yourdomain.com
 
 **Strongly recommended:** use a dedicated inbox for `IMAP_USER`, not your primary email. This
 inbox's password grants read access to whatever commands arrive there — treat it like any
-other credential with write-adjacent power over the bot.
+other credential with write-adjacent power over the bot. Using the same address for everything
+(`IMAP_USER`/`TRUSTED_SENDER_EMAIL`/`SMTP_USER`/`ALERT_TO_EMAIL`) works too — the self-generated-
+email check above keeps that safe — but a dedicated inbox stays cleaner if that address also
+receives unrelated personal mail, since only messages `FROM` the trusted sender are ever fetched
+in the first place.
 
 ## Command syntax
 
@@ -110,18 +123,19 @@ still wins) — this can never be used to accidentally make the bot riskier.
   liquidating trades yourself, or edit `config.yaml`'s `risk_overrides` with the validated
   value).
 - **ALERTS_REPORT** (Epic 29) — read-only, replies immediately (even in dry-run) with the most
-  recent `LIMIT` rows (default 10, capped at 50) from `data/alerts_log.csv`, filtered to the
+  recent `LIMIT` rows (default 10, capped at 50) from `logs/alerts_log.csv`, filtered to the
   requested portfolio (or every portfolio, for `ALL`). See `docs/ALERT_LOG.md`.
 
 ## Audit logging and duplicate protection
 
 - **Every parsed attempt** (accepted or rejected) is logged to a dedicated, hash-chained audit
-  trail at `data/email_commands_log.csv` — same tamper-evident pattern as the trade log
+  trail at `logs/email_commands_log.csv` — same tamper-evident pattern as the trade log
   (`live_signal.py`'s `log_orders()`), verifiable with `verify_log_integrity()`.
 - **Message-ID deduplication**: each processed email's RFC `Message-ID` is recorded to
   `data/processed_command_ids.txt` and skipped on future polls — protects against the same
   command being applied twice if the IMAP server's `\Seen` flag doesn't persist correctly
-  between poll cycles.
+  between poll cycles. (This one stays in `data/`, not `logs/` — it's dedup state the app reads
+  back, not a human-readable audit log.)
 
 ## Testing before relying on this
 

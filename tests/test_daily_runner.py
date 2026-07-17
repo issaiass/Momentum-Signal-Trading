@@ -223,6 +223,10 @@ class TestCircuitBreaker:
         import momentum_trading.risk.circuit_breaker as circuit_breaker
         monkeypatch.setattr(circuit_breaker, "LOCK_DIR", tmp_path / "data")
         monkeypatch.setattr(daily_runner, "LOCK_DIR", tmp_path / "data")
+        # Tripping/resuming the breaker also calls log_alert(), which resolves via
+        # the module-global ALERTS_LOG_PATH -- isolate it so this test doesn't
+        # write into the real project's logs/alerts_log.csv.
+        monkeypatch.setattr(circuit_breaker, "ALERTS_LOG_PATH", str(tmp_path / "data" / "alerts_log.csv"))
         from momentum_trading.daily_runner import check_circuit_breaker, resume_trading
         from momentum_trading.backtest.momentum_backtest import BacktestConfig
 
@@ -302,6 +306,8 @@ class TestMaxDrawdownEmailOverride:
         import momentum_trading.risk.circuit_breaker as circuit_breaker
         monkeypatch.setattr(circuit_breaker, "LOCK_DIR", tmp_path / "data")
         monkeypatch.setattr(daily_runner, "LOCK_DIR", tmp_path / "data")
+        # Tripping the breaker also calls log_alert() -- isolate ALERTS_LOG_PATH too.
+        monkeypatch.setattr(circuit_breaker, "ALERTS_LOG_PATH", str(tmp_path / "data" / "alerts_log.csv"))
         from momentum_trading.daily_runner import check_circuit_breaker, _max_drawdown_override_path
         from momentum_trading.backtest.momentum_backtest import BacktestConfig
 
@@ -325,11 +331,14 @@ class TestTimeStops:
     @pytest.fixture(autouse=True)
     def _isolate_alerts_log(self, tmp_path, monkeypatch):
         # Epic 29, Story 29.3: check_and_handle_time_stops() now also calls
-        # log_alert(), which resolves its path via the module-global LOCK_DIR
-        # (same pattern as every other daily_runner.py path) -- without this,
-        # these tests would write TIME_STOP_TRIGGERED rows into the real
-        # project's data/alerts_log.csv instead of tmp_path.
+        # log_alert(), which resolves its path via the module-global
+        # ALERTS_LOG_PATH (imported from core.audit_log, resolved once at
+        # import time into logs_dir()/alerts_log.csv, same pattern as every
+        # other daily_runner.py path constant) -- without patching it, these
+        # tests would write TIME_STOP_TRIGGERED rows into the real project's
+        # logs/alerts_log.csv instead of tmp_path.
         monkeypatch.setattr(daily_runner, "LOCK_DIR", tmp_path / "data")
+        monkeypatch.setattr(daily_runner, "ALERTS_LOG_PATH", str(tmp_path / "data" / "alerts_log.csv"))
 
     def _write_log(self, tmp_path, rows):
         path = tmp_path / "trade_log.csv"
@@ -424,6 +433,7 @@ class TestStopLossCheck:
     @pytest.fixture(autouse=True)
     def _isolate_alerts_log(self, tmp_path, monkeypatch):
         monkeypatch.setattr(daily_runner, "LOCK_DIR", tmp_path / "data")
+        monkeypatch.setattr(daily_runner, "ALERTS_LOG_PATH", str(tmp_path / "data" / "alerts_log.csv"))
 
     def test_triggered_position_is_flagged_and_alert_logged(self, tmp_path):
         cfg = BacktestConfig(stop_loss_pct=0.10)
@@ -462,6 +472,16 @@ class TestAlertsReportEmailCommand:
     read_recent_alerts() -> send_alert_email() reply body.
     """
 
+    @pytest.fixture(autouse=True)
+    def _isolate_alerts_log(self, tmp_path, monkeypatch):
+        # Without this, check_and_apply_email_commands()'s ALERTS_REPORT handler
+        # would read the REAL project's logs/alerts_log.csv (via the module-global
+        # ALERTS_LOG_PATH) instead of an empty tmp path -- e.g. test_alerts_report_
+        # no_alerts_replies_gracefully asserts "No alerts recorded", which only
+        # holds if this is genuinely isolated from whatever real alerts exist.
+        monkeypatch.setattr(daily_runner, "LOCK_DIR", tmp_path / "data")
+        monkeypatch.setattr(daily_runner, "ALERTS_LOG_PATH", str(tmp_path / "data" / "alerts_log.csv"))
+
     def _configure_email_env(self, monkeypatch):
         monkeypatch.setenv("IMAP_HOST", "imap.example.com")
         monkeypatch.setenv("IMAP_USER", "bot@example.com")
@@ -476,7 +496,6 @@ class TestAlertsReportEmailCommand:
 
     def test_alerts_report_replies_with_matching_rows_only(self, tmp_path, monkeypatch):
         self._configure_email_env(monkeypatch)
-        monkeypatch.setattr(daily_runner, "LOCK_DIR", tmp_path / "data")
         from momentum_trading.core.audit_log import log_alert
         alerts_path = str(tmp_path / "data" / "alerts_log.csv")
         log_alert("p1", "STOP_LOSS_TRIGGERED", "CRITICAL", "SPY down 12%", log_path=alerts_path)
@@ -498,7 +517,6 @@ class TestAlertsReportEmailCommand:
 
     def test_alerts_report_all_includes_every_portfolio(self, tmp_path, monkeypatch):
         self._configure_email_env(monkeypatch)
-        monkeypatch.setattr(daily_runner, "LOCK_DIR", tmp_path / "data")
         from momentum_trading.core.audit_log import log_alert
         alerts_path = str(tmp_path / "data" / "alerts_log.csv")
         log_alert("p1", "STOP_LOSS_TRIGGERED", "CRITICAL", "SPY down 12%", log_path=alerts_path)
@@ -519,7 +537,6 @@ class TestAlertsReportEmailCommand:
 
     def test_alerts_report_no_alerts_replies_gracefully(self, tmp_path, monkeypatch):
         self._configure_email_env(monkeypatch)
-        monkeypatch.setattr(daily_runner, "LOCK_DIR", tmp_path / "data")
 
         parsed = self._parsed("ACTION: ALERTS_REPORT\nPORTFOLIO: p1")
         monkeypatch.setattr(daily_runner, "poll_and_process_commands", lambda *a, **k: [parsed])
@@ -535,7 +552,6 @@ class TestAlertsReportEmailCommand:
 
     def test_unknown_portfolio_skipped_without_reply(self, tmp_path, monkeypatch):
         self._configure_email_env(monkeypatch)
-        monkeypatch.setattr(daily_runner, "LOCK_DIR", tmp_path / "data")
 
         parsed = self._parsed("ACTION: ALERTS_REPORT\nPORTFOLIO: nonexistent")
         monkeypatch.setattr(daily_runner, "poll_and_process_commands", lambda *a, **k: [parsed])

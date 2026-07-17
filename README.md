@@ -28,7 +28,10 @@ so on purpose.
 - Risk-managed backtest engine — correlation-spike detection, liquidity-stress-aware slippage,
   time-based stops, VaR/CVaR, scenario shocks, capacity checks
 - Live execution against IBKR (`ibapi`) — connection retry, fill confirmation, sells-before-buys
-  sequencing, cash-aware buy sizing, slippage-tolerance checks
+  sequencing, cash-aware buy sizing, slippage-tolerance checks, whole-share flooring at
+  submission time (IBKR's API has no fractional equity/ETF order support at all — see
+  `docs/DEPLOYMENT.md`), optional extended-hours (pre-market/after-hours) trading via
+  `allow_extended_hours` (switches to LMT + `outsideRth`, since MKT never works outside RTH)
 - Multi-portfolio orchestration on one shared IBKR account, with capital-allocation and
   ticker-overlap safety checks
 - Portfolio-level circuit breaker (% and $ drawdown), idempotent daily scheduling, config-approval
@@ -36,10 +39,13 @@ so on purpose.
 - Hash-chained, tamper-evident audit logs for trades, email commands, and alerts — three
   separate logs, kept deliberately apart
 - Categorized email notifications (CRITICAL/STANDARD/PERIODIC/WARNING) and pydantic-validated,
-  fail-safe email-commanded remote actions (pause/resume/liquidate/adjust risk params/report)
+  fail-safe email-commanded remote actions (pause/resume/liquidate/adjust risk params/report) —
+  the rebalance summary email includes a "What Actually Happened" column showing the real fill
+  outcome per ticker (filled, dropped, rejected, still open, dry-run), not just the intended
+  signal action
 - Dockerized, self-scheduling deployment (`docker compose up -d`, internal cron, no manual
   triggering needed for normal operation)
-- 230-test pytest suite covering code mechanics — order sizing, config validation, audit-log
+- 251-test pytest suite covering code mechanics — order sizing, config validation, audit-log
   integrity, multi-portfolio capital math — entirely on synthetic/mocked data, no live broker
   required to run it
 
@@ -101,7 +107,7 @@ momentum-trading/
 │   │   ├── smtp_auth.py             shared SMTP auth for email sending -- password-based
 │   │   │                             (Gmail) or XOAUTH2 (Outlook/Microsoft 365)
 │   │   └── audit_log.py             shared hash-chain append helper + the alert log
-│   │                                 (data/alerts_log.csv) -- every alert/warning event,
+│   │                                 (logs/alerts_log.csv) -- every alert/warning event,
 │   │                                 kept separate from the trade log and email command log
 │   │
 │   ├── backtest/
@@ -133,7 +139,7 @@ momentum-trading/
 │                                     TRIGGER_REPORT/ADJUST_PARAM/STATUS/SET_MAX_DRAWDOWN/
 │                                     ALERTS_REPORT)
 │
-└── tests/                         pytest suite (230 tests), mirrors src/ layout where a
+└── tests/                         pytest suite (251 tests), mirrors src/ layout where a
     ├── conftest.py                  test's primary subject is a single sub-package;
     ├── test_architecture.py         cross-cutting/integration tests stay at tests/ root
     ├── test_daily_runner.py
@@ -168,8 +174,8 @@ not been answered at all yet**:
 | Does the code have circuit breakers, idempotency, alerting, audit logging? | ✅ Yes, tested |
 | Has the strategy shown a positive out-of-sample (holdout) return on real data? | ❌ Never run on real data |
 | Has it been validated against real 2008/2020/2022 history? | ❌ Never — only synthetic crash-shaped test data |
-| Has it connected to a real broker even once? | ❌ Never — no live TWS/Gateway connection tested |
-| Has real live-vs-backtest divergence been measured? | ❌ No real trades exist yet |
+| Has it connected to a real broker even once? | ✅ Yes — paper (port 7497) connection, account summary, position fetch, and **confirmed real BUY and SELL order fills** (verified directly in TWS's own execution log across two portfolios, real prices, matching quantities). Getting here surfaced and fixed three real bugs (every order silently rejected while the run logged success; a misleadingly-short fill-confirmation poll window; an informational per-order notice mistaken for a rejection, causing an already-filled order to be logged as failed) and one hard IBKR platform limitation worked around (no fractional equity orders via API, ever — floored to whole shares). The live/real-money port (7496) is still unexercised |
+| Has real live-vs-backtest divergence been measured? | ❌ Real trades now exist (paper), but no divergence analysis has been run yet — see `notebooks/operational/live_vs_backtest_reconciliation.ipynb` |
 
 **Do not treat a well-tested codebase as a validated strategy.** See `docs/RUNNING.md`'s staged
 rollout plan (Historical Validation → Paper → Small Live → Full Live) before allocating real
@@ -209,9 +215,40 @@ answer whether the strategy actually works.
 - **No capacity/market-impact validation on real order books** — the capacity check
   (`max_pct_of_adv`) is advisory and based on historical average volume, not real-time
   order-book depth.
-- **IBKR integration untested against a live connection** — `get_ibkr_positions()`,
-  `get_ibkr_account_value()`, `place_orders_ibkr()`'s fill polling have only been unit-tested
-  with mocked responses.
+- **IBKR's API has no fractional equity/ETF order support, period** — not an `ibapi` version
+  issue, not fixable by this codebase. Confirmed both empirically (setting `cashQty` alongside
+  `totalQuantity`, exactly per IBKR's own official sample code, still failed with `error 10243`
+  for `STK` contracts — `cashQty` only works for forex/CASH-pair orders) and by direct API
+  community confirmation. `place_orders_ibkr()` floors fractional share counts to whole shares
+  immediately before submission (dropping the order, with a warning, if it floors to 0) — the
+  only way a live rebalance can place ETF orders at all. `allow_fractional_shares: true` still
+  fully applies to backtest sizing and live drift/order-generation math; only the final IBKR
+  submission is forced whole. See `DEPLOYMENT.md`'s "Troubleshooting: IBKR order placement".
+- **Real paper fills now confirmed (BUY and SELL), but only very recently and only in this
+  narrow path** — `get_ibkr_positions()`, `get_ibkr_account_value()`, and `place_orders_ibkr()`
+  have all been exercised against a real paper (port 7497) connection, and rebalance orders on
+  both portfolios were verified to actually fill (confirmed directly in TWS's own execution log
+  — both BUYs and SELLs, real prices, matching quantities). Getting here took four fixes, in
+  order: every order was first silently rejected (`error 10268`, an `ibapi`/TWS version
+  incompatibility); then every fractional-share order was still rejected (`error 10243`, the
+  platform limitation above) until whole-share flooring landed; then real fills were
+  misreported as unconfirmed because `place_orders_ibkr()`'s fill-poll window (15s) was shorter
+  than actual paper-fill latency (now 60s, configurable via `fill_poll_timeout`); then an
+  informational per-order notice (`error 10349`, "Order TIF was set to DAY based on order
+  preset") was found to be incorrectly overwriting a real, filled order's tracked status to
+  `"ERROR: ..."`, making the poll loop give up watching it — confirmed against a real case where
+  the order had genuinely filled in TWS despite being logged as failed. This has been confirmed
+  for `--force-rebalance` runs on one paper account, a handful of times — the real-money port,
+  sustained/scheduled (non-forced) operation, and behavior across many cycles are all still
+  unexercised.
+- **Multi-portfolio ticker leakage on a shared account is not just theoretical** — observed
+  directly: portfolio2 (tickers `XLF`/`XLE`/`GLD`/`TLT`) inherited a stray `BIL` position from
+  portfolio1 via `reqPositions()` (which returns every position on the shared IBKR account, not
+  filtered per portfolio), and correctly refused to trade it blind (`HOLD, no live price
+  available`, since portfolio2 never fetches prices outside its own ticker universe) — but this
+  also means it can never reconcile or exit that position on its own. This is the real-world
+  shape of the `TICKER OVERLAP` warning every run already prints when portfolios share tickers;
+  worth understanding before running multiple portfolios against one real account.
 
 ### Who should allocate capital here
 

@@ -30,17 +30,17 @@ That's a deliberate scope boundary; see "What this suite does NOT tell you" belo
 | `conftest.py` | Shared fixtures (see below) — no tests of its own |
 | `test_architecture.py` | Package-restructure regressions: import boundaries, cross-directory path resolution (subprocess-based), the circuit-breaker extraction's decoupling, console-script installability |
 | `backtest/test_momentum_backtest.py` | Core backtest engine: `BacktestConfig` validation (including `allow_fractional_shares`, `top_n`), the shared `resolve_target_weights()` sizing path, crash-protection mechanisms (circuit breaker, correlation spike detection, liquidity stress) |
-| `execution/test_live_signal.py` | Live order generation (BUY/SELL/HOLD sizing), real FIFO P&L math, multi-portfolio orchestration, `get_top_etfs()`'s `top_n` selection behavior, (Epic 25) the live-trading equivalents of backtest-only risk fields: `compute_aggregate_drift()`, `derive_entry_date()`, correlation-spike exposure scaling, (Epic 28) `place_orders_ibkr()`'s sells-before-buys sequencing and cash-aware buy sizing (mocked IBKR, no real broker needed), and (Epic 29) that each wired alert point actually appends the right row to the alert log |
+| `execution/test_live_signal.py` | Live order generation (BUY/SELL/HOLD sizing), real FIFO P&L math, multi-portfolio orchestration, `get_top_etfs()`'s `top_n` selection behavior, (Epic 25) the live-trading equivalents of backtest-only risk fields: `compute_aggregate_drift()`, `derive_entry_date()`, correlation-spike exposure scaling, (Epic 28) `place_orders_ibkr()`'s sells-before-buys sequencing, cash-aware buy sizing, whole-share flooring for fractional orders (IBKR has no fractional equity API support), that orders dropped before ever reaching IBKR (flooring to 0 shares, cash-scaling to 0 shares) are still recorded in the returned results as `DROPPED_FRACTIONAL`/`DROPPED_INSUFFICIENT_CASH` rather than silently omitted, and that informational IBKR order-status codes never corrupt a real order's tracked status (mocked IBKR, no real broker needed), and (Epic 29) that each wired alert point actually appends the right row to the alert log |
 | `test_daily_runner.py` | CLI/operational layer: `config.yaml` schema validation, idempotent rebalance locking, alert fallback, circuit-breaker persistence-across-runs, (Epic 25) the live time-based stop (`check_and_handle_time_stops`) and price-based stop-loss (`check_and_handle_stop_losses`), (Epic 26) multi-portfolio capital safety on a shared IBKR account (`resolve_total_values()`'s remainder math, `check_ticker_overlap()`), (Epic 27) `send_warning` config-type validation, and (Epic 29) the `ALERTS_REPORT` email command's end-to-end read-and-reply path |
 | `test_docker_entrypoint.py` | `docker-entrypoint.sh`'s crontab generation, run as a real subprocess: configurable schedule times, per-portfolio `risk_monitor.py` coverage (Epic 22) |
 | `test_epic2_governance.py` | Institutional governance: VaR/CVaR, scenario shocks, capacity checks, tamper-evident hash-chained audit log, independent `risk_monitor.py` (including its `config.yaml` capital fallback, Epic 19), config-approval gate |
 | `test_epic4_reporting.py` | Investor-facing reporting: portfolio snapshots, rank/signal-score trade context, benchmark comparison, external-holdings correlation check, multi-lookback signal blending |
 | `test_epic8_10_safety.py` | Broker resilience follow-ups + additional execution safety: dollar drawdown breaker, slippage tolerance, stale price feed protection, time-based stops |
-| `interfaces/test_notifications.py` | Categorized email notifications: CRITICAL cannot be filtered, STANDARD/PERIODIC/WARNING (Epic 27) respect config, HTML/chart generation degrades gracefully |
+| `interfaces/test_notifications.py` | Categorized email notifications: CRITICAL cannot be filtered, STANDARD/PERIODIC/WARNING (Epic 27) respect config, HTML/chart generation degrades gracefully, the rebalance summary's "What Actually Happened" column correctly reflects real fills, dropped orders, rejections, still-open orders, and dry-run mode |
 | `interfaces/test_email_commands.py` | Email-commanded remote actions: sender authentication, `ADJUST_PARAM` allowlist including `top_n` (Epic 29, security-critical), `LIQUIDATE` confirmation phrase, `ALERTS_REPORT` parsing (Epic 29), fail-safe behavior on malformed input |
 | `core/test_audit_log.py` (Epic 29) | The shared hash-chain helper (`append_hash_chained_row()`) every new alert-log write goes through, `log_alert()`'s schema, and `read_recent_alerts()`'s filtering/limit/ordering behavior backing the `ALERTS_REPORT` email command |
 
-Current count: **230 tests**, all passing. Every test file and class has a docstring explaining
+Current count: **251 tests**, all passing. Every test file and class has a docstring explaining
 *why* that group of tests exists, not just what it checks — read those docstrings first if a
 test's purpose isn't obvious from its name.
 
@@ -56,8 +56,8 @@ test's purpose isn't obvious from its name.
 does validation catch bad input, does the audit log survive tampering. They do **not** test
 *strategy validity* — nothing here tells you whether momentum as a strategy makes money. That
 question requires running the actual walk-forward/holdout tooling (Notebook 1) against real
-market data, which is a separate, not-yet-completed step (see `../README.md`'s "Are You Ready?"
-section).
+market data, which is a separate, not-yet-completed step (see `../README.md`'s "Project
+Maturity & Safety" section).
 
 ## How to interpret a failure
 
@@ -96,8 +96,9 @@ unintentionally (fix the code).
 
 ## What this suite does NOT tell you
 
-Worth repeating because it's easy to forget once a suite is green: **230 passing tests confirm
+Worth repeating because it's easy to forget once a suite is green: **251 passing tests confirm
 the code does what it's supposed to do, mechanically. They do not confirm the momentum
-strategy itself is profitable, safe in a real crash, or will behave as expected against a real
-broker connection.** See `../README.md`'s "Are You Ready?" and "Known Gaps" sections for what
-remains unvalidated.
+strategy itself is profitable or safe in a real crash** — that's a separate question from
+execution mechanics, which have now been confirmed against a real (paper) broker connection.
+See `../README.md`'s "Project Maturity & Safety" and "Known Gaps" sections for what remains
+unvalidated.

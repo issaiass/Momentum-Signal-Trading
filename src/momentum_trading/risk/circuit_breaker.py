@@ -19,7 +19,7 @@ from pathlib import Path
 
 from ..backtest.momentum_backtest import BacktestConfig
 from ..core.paths import data_dir
-from ..core.audit_log import log_alert
+from ..core.audit_log import log_alert, ALERTS_LOG_PATH
 
 logger = logging.getLogger("circuit_breaker")
 
@@ -119,7 +119,7 @@ def check_circuit_breaker(name: str, total_value: float, cfg: BacktestConfig, al
         logger.warning("[%s] CIRCUIT BREAKER TRIPPED: %s. Halting rebalances.", name, reason_str)
         log_alert(name, "CIRCUIT_BREAKER_TRIPPED", "CRITICAL",
                   f"{reason_str}. Peak equity ${new_peak:,.2f}, current ${total_value:,.2f}.",
-                  log_path=str(LOCK_DIR / "alerts_log.csv"))
+                  log_path=ALERTS_LOG_PATH)
         if alert_fn:
             alert_fn(
                 f"CIRCUIT BREAKER TRIPPED: {name}",
@@ -142,7 +142,7 @@ def resume_trading(name: str, alert_fn=None) -> None:
         logger.info("[%s] Circuit breaker RESUMED by explicit operator action.", name)
         log_alert(name, "CIRCUIT_BREAKER_RESUMED", "INFO",
                   "Circuit breaker manually cleared by explicit operator action.",
-                  log_path=str(LOCK_DIR / "alerts_log.csv"))
+                  log_path=ALERTS_LOG_PATH)
         if alert_fn:
             alert_fn(f"Trading resumed: {name}", f"Circuit breaker for '{name}' was manually cleared.")
     else:

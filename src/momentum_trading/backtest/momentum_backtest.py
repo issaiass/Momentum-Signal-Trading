@@ -43,6 +43,10 @@ if not logger.handlers:
     handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
     logger.addHandler(handler)
 logger.setLevel(logging.INFO)
+# See execution/live_signal.py's identical comment -- without this, every message here
+# would double-print when this module is imported into daily_runner.py's process (which
+# also configures the ROOT logger via logging.basicConfig()).
+logger.propagate = False
 
 
 # --------------------------------------------------------------------------- #
@@ -96,6 +100,22 @@ class BacktestConfig:
         # would still exceed real available cash after sells clear: False (default) = warn
         # only, submit as computed, let IBKR's own fill/reject be the backstop. True =
         # proportionally scale down BUY share counts (floored to whole shares) to fit.
+
+    # --- live extended-hours (pre-market/after-hours) trading ---
+    allow_extended_hours: bool = False   # LIVE ONLY, no effect on the backtest (daily-close
+        # based). place_orders_ibkr() submits plain MKT orders by default, which IBKR/exchanges
+        # only accept during regular trading hours (9:30am-4:00pm ET) -- a rebalance running
+        # right at or after the close gets "Order rejected - reason:Exchange is closed" (IBKR
+        # error 201), same as everyone else's plain MKT order. True switches those orders to
+        # LMT with outsideRth=True instead -- IBKR does not accept MKT orders outside RTH at
+        # all, only LMT (confirmed against IBKR's own TWS API docs), so this is a real order-type
+        # change, not just a flag. The limit price is the last known price +/- a small buffer
+        # (favors getting filled over exact price). Covers NASDAQ's standard extended sessions:
+        # pre-market 4:00-9:30am ET, after-hours 4:00-8:00pm ET. Thinner ETH liquidity means a
+        # real chance of no fill, a partial fill, or a worse price than a similar RTH order --
+        # this is a real economic trade-off, not just a technical toggle. Ticker/price
+        # availability still applies: if no reference price exists for a ticker that run, the
+        # order silently falls back to a regular MKT (RTH-only) order instead of failing.
 
     # --- selection: how many top-momentum-ranked tickers to actually hold ---
     top_n: int = 10   # e.g. 3 = hold only the 3 strongest names this rebalance; clamped to

@@ -111,6 +111,7 @@ def send_action_email(
     msg["Subject"] = f"[{category.value.upper()}] {subject}"
     msg["From"] = smtp["user"]
     msg["To"] = smtp["to"]
+    msg["X-Momentum-Trading-Bot"] = "1"
     if plain_text_fallback:
         msg.attach(MIMEText(plain_text_fallback, "plain"))
     msg.attach(MIMEText(full_html, "html"))
@@ -138,16 +139,62 @@ def send_standard_action(subject: str, body_html: str, notification_config: dict
                               plain_text_fallback)
 
 
-def build_rebalance_summary_html(portfolio_name: str, orders: dict) -> str:
-    """Standard-category HTML table summarizing a rebalance's BUY/SELL/HOLD decisions."""
+def _describe_fill_outcome(order: dict, dry_run: bool) -> tuple[str, str]:
+    """
+    Returns (display_text, color) describing what actually happened to a single order,
+    as distinct from what the signal *intended* (order['action']/order['reason']).
+
+    Reads the fill_status/fill_price/fill_shares fields that execution/live_signal.py's
+    run() merges back onto each order after place_orders_ibkr() returns (live mode only) --
+    including the "dropped before ever reaching IBKR" statuses (DROPPED_FRACTIONAL,
+    DROPPED_INSUFFICIENT_CASH) that place_orders_ibkr() now tracks separately since those
+    tickers never get a real IBKR orderId and would otherwise be silently missing here.
+    """
+    if order["action"] == "HOLD":
+        return "—", "#7f8c8d"
+
+    status = order.get("fill_status")
+    if status is None:
+        if dry_run:
+            return "Dry-run — no order sent", "#7f8c8d"
+        return "No order sent", "#7f8c8d"
+
+    if status == "Filled":
+        filled = order.get("fill_shares", 0)
+        filled_str = str(int(filled)) if filled == int(filled) else f"{filled:.4f}"
+        price = order.get("fill_price", 0.0)
+        return f"Filled {filled_str} @ ${price:.2f}", "#27ae60"
+    if status == "DROPPED_FRACTIONAL":
+        return "Dropped — rounds to 0 whole shares", "#e67e22"
+    if status == "DROPPED_INSUFFICIENT_CASH":
+        return "Dropped — insufficient cash", "#e67e22"
+    if status.startswith("ERROR"):
+        return f"Rejected — {status[len('ERROR: '):]}", "#c0392b"
+    if status in ("Cancelled", "Inactive"):
+        return f"{status} — not filled", "#c0392b"
+    return f"Still open — status {status}", "#e67e22"
+
+
+def build_rebalance_summary_html(portfolio_name: str, orders: dict, dry_run: bool = False) -> str:
+    """
+    Standard-category HTML table summarizing a rebalance's BUY/SELL/HOLD decisions, plus
+    a "What Actually Happened" column showing the REAL execution outcome per ticker (filled,
+    dropped, still open, rejected, dry-run, ...) -- distinct from the signal's intended
+    action/reason, since a live order can be intended but never actually fill.
+
+    dry_run should be True whenever this rebalance ran without --live (no orders were ever
+    sent to IBKR), so the new column reads correctly as "Dry-run" rather than "No order sent".
+    """
     rows = ""
     for ticker, order in orders.items():
         action_color = {"BUY": "#27ae60", "SELL": "#c0392b", "HOLD": "#7f8c8d"}.get(order["action"], "#333")
+        outcome_text, outcome_color = _describe_fill_outcome(order, dry_run)
         rows += (
             f"<tr><td style='padding:4px 8px;'>{ticker}</td>"
             f"<td style='padding:4px 8px; color:{action_color}; font-weight:bold;'>{order['action']}</td>"
             f"<td style='padding:4px 8px;'>{order.get('shares', 0)}</td>"
-            f"<td style='padding:4px 8px;'>{order.get('reason', '')}</td></tr>"
+            f"<td style='padding:4px 8px;'>{order.get('reason', '')}</td>"
+            f"<td style='padding:4px 8px; color:{outcome_color};'>{outcome_text}</td></tr>"
         )
     return f"""
     <h3>Rebalance Summary: {portfolio_name}</h3>
@@ -155,13 +202,15 @@ def build_rebalance_summary_html(portfolio_name: str, orders: dict) -> str:
       <tr style="background:#f4f4f4;"><th style='padding:4px 8px; text-align:left;'>Ticker</th>
           <th style='padding:4px 8px; text-align:left;'>Action</th>
           <th style='padding:4px 8px; text-align:left;'>Shares</th>
-          <th style='padding:4px 8px; text-align:left;'>Reason</th></tr>
+          <th style='padding:4px 8px; text-align:left;'>Reason</th>
+          <th style='padding:4px 8px; text-align:left;'>What Actually Happened</th></tr>
       {rows}
     </table>
     """
 
 
-def build_monthly_report_html(portfolio_name: str, snapshot_df: pd.DataFrame, comparison: dict) -> tuple[str, bytes | None]:
+def build_monthly_report_html(portfolio_name: str, snapshot_df: pd.DataFrame, comparison: dict,
+                               real_pnl: dict | None = None) -> tuple[str, bytes | None]:
     """
     Builds the monthly report's HTML body plus an embedded chart (as PNG bytes
     to attach inline). Returns (html_body, chart_png_bytes_or_None).
@@ -169,6 +218,14 @@ def build_monthly_report_html(portfolio_name: str, snapshot_df: pd.DataFrame, co
     chart_png_bytes is None if matplotlib isn't available or snapshot_df is
     too short to chart -- the HTML report still renders without the chart in
     that case, degrading gracefully rather than failing the whole report.
+
+    real_pnl : dict, optional
+        Output of execution/live_signal.py's measure_live_performance() --
+        REAL realized+unrealized P&L from FIFO-matched trade log rows, distinct
+        from "Current Position"'s unrealized_pnl below (which only marks
+        currently-open positions from the latest snapshot, not cumulative
+        realized gains from trades that have since closed). Omitted from the
+        report if not provided (e.g. no trade log exists yet this month).
     """
     chart_bytes = None
     try:
@@ -207,6 +264,20 @@ def build_monthly_report_html(portfolio_name: str, snapshot_df: pd.DataFrame, co
         <tr><td style='padding:4px 8px;'>Outperformance</td><td style='padding:4px 8px;'>{comparison['outperformance']:+.2%}</td></tr>
         """
 
+    real_pnl_rows = ""
+    if real_pnl is not None:
+        real_pnl_rows = f"""
+        <tr><td style='padding:4px 8px;'>Realized P&L</td><td style='padding:4px 8px;'>${real_pnl['realized_pnl']:,.2f}</td></tr>
+        <tr><td style='padding:4px 8px;'>Unrealized P&L</td><td style='padding:4px 8px;'>${real_pnl['unrealized_pnl']:,.2f}</td></tr>
+        <tr><td style='padding:4px 8px;'>Total P&L</td><td style='padding:4px 8px;'>${real_pnl['total_pnl']:,.2f}</td></tr>
+        <tr><td style='padding:4px 8px;'>Trade Count</td><td style='padding:4px 8px;'>{real_pnl['trade_count']}</td></tr>
+        {"<tr><td style='padding:4px 8px;'>Total Return</td><td style='padding:4px 8px;'>" + f"{real_pnl['total_return_pct']:+.2%}" + "</td></tr>" if "total_return_pct" in real_pnl else ""}
+        """
+    real_pnl_html = f"""
+    <h3>Actual P&L (from trade log, FIFO)</h3>
+    <table style="border-collapse: collapse;">{real_pnl_rows}</table>
+    """ if real_pnl is not None else ""
+
     chart_html = '<img src="cid:portfolio_chart" style="max-width:100%;">' if chart_bytes else ""
 
     html = f"""
@@ -215,6 +286,7 @@ def build_monthly_report_html(portfolio_name: str, snapshot_df: pd.DataFrame, co
     {chart_html}
     <h3>Current Position</h3>
     <table style="border-collapse: collapse;">{summary_rows}</table>
+    {real_pnl_html}
     <h3>Performance vs. Benchmark</h3>
     <table style="border-collapse: collapse;">{comparison_rows}</table>
     <p style="color:#999; font-size:11px;">This report reflects backtested/paper/live results as configured --
@@ -224,9 +296,9 @@ def build_monthly_report_html(portfolio_name: str, snapshot_df: pd.DataFrame, co
 
 
 def send_monthly_report(portfolio_name: str, snapshot_df: pd.DataFrame, comparison: dict,
-                         notification_config: dict) -> bool:
+                         notification_config: dict, real_pnl: dict | None = None) -> bool:
     """PERIODIC category -- filterable, but distinct from CRITICAL/STANDARD filtering."""
-    html, chart_bytes = build_monthly_report_html(portfolio_name, snapshot_df, comparison)
+    html, chart_bytes = build_monthly_report_html(portfolio_name, snapshot_df, comparison, real_pnl)
 
     if not should_send(NotificationCategory.PERIODIC, notification_config):
         logger.info("Monthly report filtered by config: %s", portfolio_name)
@@ -241,6 +313,7 @@ def send_monthly_report(portfolio_name: str, snapshot_df: pd.DataFrame, comparis
     msg["Subject"] = f"[PERIODIC] Monthly Report: {portfolio_name}"
     msg["From"] = smtp["user"]
     msg["To"] = smtp["to"]
+    msg["X-Momentum-Trading-Bot"] = "1"
     msg.attach(MIMEText(html, "html"))
     if chart_bytes:
         img = MIMEImage(chart_bytes)

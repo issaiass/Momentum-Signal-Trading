@@ -144,6 +144,7 @@ class TestCircuitBreakerExtraction:
         from momentum_trading.backtest.momentum_backtest import BacktestConfig
 
         monkeypatch.setattr(cb, "LOCK_DIR", tmp_path / "data")
+        monkeypatch.setattr(cb, "ALERTS_LOG_PATH", str(tmp_path / "data" / "alerts_log.csv"))
         cfg = BacktestConfig(max_portfolio_drawdown_pct=0.20)
 
         # no alert_fn passed at all -- must not raise even when it trips
@@ -155,6 +156,7 @@ class TestCircuitBreakerExtraction:
         from momentum_trading.backtest.momentum_backtest import BacktestConfig
 
         monkeypatch.setattr(cb, "LOCK_DIR", tmp_path / "data")
+        monkeypatch.setattr(cb, "ALERTS_LOG_PATH", str(tmp_path / "data" / "alerts_log.csv"))
         cfg = BacktestConfig(max_portfolio_drawdown_pct=0.20)
 
         calls = []

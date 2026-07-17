@@ -40,7 +40,12 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
+from ..core.paths import data_dir, logs_dir
+
 logger = logging.getLogger("email_commands")
+
+EMAIL_COMMANDS_LOG_PATH = str(logs_dir() / "email_commands_log.csv")
+PROCESSED_COMMAND_IDS_PATH = str(data_dir() / "processed_command_ids.txt")
 
 
 # --------------------------------------------------------------------------- #
@@ -268,7 +273,7 @@ def parse_command(sender: str, trusted_sender: str, body: str) -> ParsedCommandR
 
 
 def log_command_attempt(
-    sender: str, result: ParsedCommandResult, log_path: str = "data/email_commands_log.csv",
+    sender: str, result: ParsedCommandResult, log_path: str = EMAIL_COMMANDS_LOG_PATH,
 ) -> None:
     """
     Epic 14, Story 14.4: every parsed attempt -- accepted or rejected -- is
@@ -364,7 +369,7 @@ def _mark_processed(path: str, message_id: str) -> None:
 def poll_and_process_commands(
     imap_host: str, imap_user: str, imap_password: str, trusted_sender: str,
     send_reply_fn=None, dry_run: bool = False,
-    processed_ids_path: str = "data/processed_command_ids.txt",
+    processed_ids_path: str = PROCESSED_COMMAND_IDS_PATH,
 ) -> list[ParsedCommandResult]:
     """
     Connects to IMAP, fetches unread emails, parses any from trusted_sender
@@ -405,7 +410,13 @@ def poll_and_process_commands(
         conn.login(imap_user, imap_password)
         conn.select("INBOX")
 
-        status, message_ids = conn.search(None, "UNSEEN")
+        # Filtered server-side to trusted_sender, not just "UNSEEN" -- an unfiltered search
+        # would fetch, log, auto-reply to, and mark-as-read EVERY unread email in the inbox
+        # (newsletters, notifications, anything), not just command attempts. parse_command()
+        # below still re-checks the sender itself as the real security boundary (IMAP FROM
+        # search is a header substring match, not cryptographic) -- this is a defense-in-depth
+        # / noise-reduction prefilter, not a replacement for it.
+        status, message_ids = conn.search(None, "UNSEEN", "FROM", f'"{trusted_sender}"')
         if status != "OK":
             logger.error("IMAP search failed: %s", status)
             return results
@@ -416,6 +427,16 @@ def poll_and_process_commands(
                 continue
             msg = email_lib.message_from_bytes(msg_data[0][1])
             sender = email_lib.utils.parseaddr(msg.get("From", ""))[1]
+
+            # Self-generated alerts/replies (send_alert_email, notifications.py, risk_monitor.py
+            # all set this header) must never be treated as command attempts. When trusted_sender
+            # is the SAME mailbox that receives alerts (a common setup, including for this bot's
+            # own tests), every outbound alert lands back in this inbox as new unread mail FROM
+            # the trusted sender -- without this check, the bot replies to its own reply forever,
+            # doubling "Re: Re:" in the subject each round.
+            if msg.get("X-Momentum-Trading-Bot"):
+                conn.store(msg_id, "+FLAGS", "\\Seen")
+                continue
 
             rfc_message_id = msg.get("Message-ID", "").strip()
             if rfc_message_id and rfc_message_id in processed_ids:

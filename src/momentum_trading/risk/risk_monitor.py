@@ -111,6 +111,7 @@ def send_monitor_alert(subject: str, body: str) -> None:
     msg["Subject"] = f"[risk_monitor] {subject}"
     msg["From"] = user
     msg["To"] = to_addr
+    msg["X-Momentum-Trading-Bot"] = "1"
     try:
         with smtplib.SMTP(host, port, timeout=15) as server:
             server.starttls()

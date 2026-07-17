@@ -30,10 +30,11 @@ from .execution.live_signal import (
     is_rebalance_day, run, run_multi_portfolio,
     get_ibkr_positions, get_ibkr_account_value, with_retry,
     place_orders_ibkr, log_orders, write_portfolio_snapshot, get_latest_snapshot,
-    derive_entry_date,
+    derive_entry_date, measure_live_performance,
 )
 from .core.smtp_auth import authenticate as authenticate_smtp, smtp_ready
-from .core.audit_log import log_alert, read_recent_alerts
+from .core.audit_log import log_alert, read_recent_alerts, ALERTS_LOG_PATH
+from .core.paths import data_dir, logs_dir
 from .backtest.momentum_backtest import BacktestConfig
 from .risk.circuit_breaker import (
     LOCK_DIR, check_circuit_breaker, resume_trading, get_effective_max_drawdown_pct,
@@ -87,6 +88,7 @@ def send_alert_email(subject: str, body: str) -> None:
     msg["Subject"] = f"[momentum-trading] {subject}"
     msg["From"] = user
     msg["To"] = to_addr
+    msg["X-Momentum-Trading-Bot"] = "1"
 
     try:
         with smtplib.SMTP(host, port, timeout=15) as server:
@@ -251,7 +253,7 @@ def check_and_handle_stop_losses(
                             ticker, drawdown * 100, entry_price, latest_prices[ticker])
             log_alert(portfolio, "STOP_LOSS_TRIGGERED", "CRITICAL",
                       f"{ticker} down {drawdown:.1%} from entry (${entry_price:.2f} -> ${latest_prices[ticker]:.2f})",
-                      log_path=str(LOCK_DIR / "alerts_log.csv"))
+                      log_path=ALERTS_LOG_PATH)
             flagged.append(ticker)
 
     if not flagged:
@@ -275,7 +277,8 @@ def check_and_handle_stop_losses(
     else:
         logger.warning("AUTO-EXECUTING stop-loss exits via IBKR: %s", flagged)
         fill_results = place_orders_ibkr(exit_orders, port=ibkr_port, portfolio=portfolio,
-                                          alerts_log_path=str(LOCK_DIR / "alerts_log.csv"))
+                                          expected_prices=latest_prices, alerts_log_path=ALERTS_LOG_PATH,
+                                          allow_extended_hours=cfg.allow_extended_hours)
         send_alert_email("Stop-loss(es) AUTO-EXECUTED",
                           f"Tickers exited: {flagged}\nFill results: {fill_results}")
     return flagged
@@ -309,7 +312,7 @@ def check_and_handle_time_stops(
                             ticker, days_held, cfg.max_holding_days)
             log_alert(portfolio, "TIME_STOP_TRIGGERED", "CRITICAL",
                       f"{ticker} held {days_held} days >= max_holding_days={cfg.max_holding_days}",
-                      log_path=str(LOCK_DIR / "alerts_log.csv"))
+                      log_path=ALERTS_LOG_PATH)
             flagged.append(ticker)
 
     if not flagged:
@@ -333,7 +336,8 @@ def check_and_handle_time_stops(
     else:
         logger.warning("AUTO-EXECUTING time-stop exits via IBKR: %s", flagged)
         fill_results = place_orders_ibkr(exit_orders, port=ibkr_port, portfolio=portfolio,
-                                          alerts_log_path=str(LOCK_DIR / "alerts_log.csv"))
+                                          expected_prices=latest_prices, alerts_log_path=ALERTS_LOG_PATH,
+                                          allow_extended_hours=cfg.allow_extended_hours)
         send_alert_email("Time-stop(s) AUTO-EXECUTED",
                           f"Tickers exited: {flagged}\nFill results: {fill_results}")
     return flagged
@@ -399,7 +403,7 @@ def check_and_apply_email_commands(portfolio_names: list[str], ibkr_port: int, d
                 logger.warning("ALERTS_REPORT referenced unknown portfolio %r -- skipped.", cmd.portfolio)
                 continue
             rows = read_recent_alerts(portfolio=cmd.portfolio, limit=cmd.limit,
-                                       log_path=str(LOCK_DIR / "alerts_log.csv"))
+                                       log_path=ALERTS_LOG_PATH)
             if rows:
                 lines = [f"{r['timestamp']} | {r['portfolio']} | {r['severity']} | "
                          f"{r['alert_type']} | {r['message']}" for r in rows]
@@ -643,7 +647,7 @@ def main():
             logger.warning("TICKER OVERLAP across portfolios (independent, uncoordinated orders "
                             "against the same real position if they share an account): %s", overlap_desc)
             log_alert("ALL", "TICKER_OVERLAP", "WARNING", overlap_desc,
-                      log_path=str(LOCK_DIR / "alerts_log.csv"))
+                      log_path=ALERTS_LOG_PATH)
             overlap_text = (
                 f"The following tickers appear in more than one portfolio in this run:\n"
                 f"{overlap_desc}\n\nEach portfolio computes and submits orders independently -- "
@@ -668,7 +672,7 @@ def main():
     except ValueError as e:
         logger.error("Refusing to run: %s", e)
         log_alert("ALL", "CAPITAL_ALLOCATION_ERROR", "CRITICAL", str(e),
-                  log_path=str(LOCK_DIR / "alerts_log.csv"))
+                  log_path=ALERTS_LOG_PATH)
         send_alert_email("daily_runner: capital allocation error", str(e))
         sys.exit(1)
 
@@ -685,7 +689,7 @@ def main():
                             "value ($%.2f) by $%.2f.", sum_of_fixed, account_value, shortfall)
             log_alert("ALL", "OVER_ALLOCATION", "WARNING",
                       f"Fixed total_value ${sum_of_fixed:,.2f} exceeds account value ${account_value:,.2f} "
-                      f"by ${shortfall:,.2f}.", log_path=str(LOCK_DIR / "alerts_log.csv"))
+                      f"by ${shortfall:,.2f}.", log_path=ALERTS_LOG_PATH)
             overallocation_text = (
                 f"Sum of all portfolios' fixed total_value: ${sum_of_fixed:,.2f}\n"
                 f"Real account NetLiquidation: ${account_value:,.2f}\n"
@@ -709,6 +713,7 @@ def main():
         for name, spec in portfolios.items():
             cfg = spec["cfg"]
             tickers = spec["tickers"]
+            trade_log_path = str(logs_dir() / f"live_trades_log_{name}.csv")
 
             # --- item 1: real positions from IBKR, never local memory. total_value comes
             #     from resolved_total_values (Epic 26), resolved once above the loop. ---
@@ -737,7 +742,7 @@ def main():
                     log_alert(name, "STALE_PRICE_FEED", "CRITICAL",
                               f"Latest data {staleness['staleness_days']} days old "
                               f"(expected {staleness['most_recent_expected_trading_day']}). Run skipped.",
-                              log_path=str(LOCK_DIR / "alerts_log.csv"))
+                              log_path=ALERTS_LOG_PATH)
                     send_alert_email(
                         f"Stale price feed detected: {name}",
                         f"Latest available price date: {staleness['latest_available_date']}\n"
@@ -748,7 +753,6 @@ def main():
 
             # --- ALWAYS runs: daily stop-loss check ---
             if current_positions:
-                trade_log_path = f"data/live_trades_log_{name}.csv"
                 check_and_handle_stop_losses(
                     tickers, current_positions, latest_prices, cfg,
                     dry_run=not args.live, ibkr_port=args.port,
@@ -803,10 +807,10 @@ def main():
                     top_n=min(cfg.top_n, len(tickers)),
                     dry_run=not args.live,
                     ibkr_port=args.port,
-                    log_path=f"data/live_trades_log_{name}.csv",
+                    log_path=trade_log_path,
                     custom_weights=spec["custom_weights"],
                     portfolio=name,
-                    alerts_log_path=str(LOCK_DIR / "alerts_log.csv"),
+                    alerts_log_path=ALERTS_LOG_PATH,
                 )
                 mark_ran_today(f"rebalance_{name}")
 
@@ -815,18 +819,33 @@ def main():
                 if orders_result:
                     send_standard_action(
                         f"Rebalance executed: {name}",
-                        build_rebalance_summary_html(name, orders_result),
+                        build_rebalance_summary_html(name, orders_result, dry_run=not args.live),
                         notification_cfg,
                     )
 
                 # --- Epic 12, Story 12.4: monthly report, on the configured day of month ---
                 report_day = notification_cfg.get("monthly_report_day_of_month")
                 if report_day and datetime.today().day == report_day:
-                    snapshot_path = f"data/portfolio_snapshot_{name}.csv"
+                    snapshot_path = str(data_dir() / f"portfolio_snapshot_{name}.csv")
                     if os.path.isfile(snapshot_path):
                         snapshot_df = pd.read_csv(snapshot_path, parse_dates=["date"])
                         comparison = fnx.compare_to_benchmark(name)
-                        send_monthly_report(name, snapshot_df, comparison, notification_cfg)
+                        # --- Epic 4b: REAL realized+unrealized P&L from the trade log (FIFO),
+                        #     distinct from the snapshot-based unrealized_pnl already in the
+                        #     report -- this covers cumulative gains from trades that have since
+                        #     closed, not just currently-open positions. dry_run=not args.live
+                        #     filters out any dry-run rows sharing this same log file. ---
+                        try:
+                            real_pnl = measure_live_performance(
+                                "1970-01-01", datetime.today().strftime("%Y-%m-%d"),
+                                latest_prices=latest_prices,
+                                log_path=trade_log_path,
+                                initial_capital=total_value,
+                                dry_run=not args.live,
+                            )
+                        except FileNotFoundError:
+                            real_pnl = None
+                        send_monthly_report(name, snapshot_df, comparison, notification_cfg, real_pnl)
             else:
                 logger.info("[%s] Not a rebalance day -- stop-loss check complete only.", name)
 

@@ -5,7 +5,7 @@
 A persistent, tamper-evident, queryable record of every alert/warning-worthy event the bot
 encounters -- stop-loss and time-stop triggers, circuit-breaker trips, ticker overlap, capital
 allocation errors, insufficient cash, slippage exceeded, correlation spikes, aggregate-drift
-skips, and stale price feeds. Written to `data/alerts_log.csv`.
+skips, and stale price feeds. Written to `logs/alerts_log.csv`.
 
 **Why this exists:** before Epic 29, all of these events were only ever `logger.warning()`/
 `logger.error()` console lines. That's fine if stdout happens to be redirected to a file (the
@@ -20,9 +20,9 @@ This project now has three separate, purpose-built logs. Do not confuse them:
 
 | Log | File | What it records |
 |---|---|---|
-| Trade log | `data/live_trades_log_<portfolio>.csv` | BUY/SELL/HOLD order decisions, one file per portfolio |
-| Email command log | `data/email_commands_log.csv` | Every parsed email command attempt (accepted or rejected) |
-| **Alert log** | `data/alerts_log.csv` | Every alert/warning-worthy event, across all portfolios in one shared file |
+| Trade log | `logs/live_trades_log_<portfolio>.csv` | BUY/SELL/HOLD order decisions, one file per portfolio |
+| Email command log | `logs/email_commands_log.csv` | Every parsed email command attempt (accepted or rejected) |
+| **Alert log** | `logs/alerts_log.csv` | Every alert/warning-worthy event, across all portfolios in one shared file |
 
 The alert log is a single shared file (like the email command log), not one per portfolio (like
 the trade log) -- a unified timeline across portfolios is more useful for "what happened this
@@ -67,9 +67,16 @@ timestamp, portfolio, alert_type, severity, message, row_hash
 | `STALE_PRICE_FEED` | CRITICAL | `daily_runner.py` (main loop) | Latest price data is older than `max_price_staleness_minutes` allows; that portfolio's run was skipped |
 | `SLIPPAGE_TOLERANCE_EXCEEDED` | WARNING | `execution/live_signal.py::place_orders_ibkr()` | A fill's price deviated from the expected price by more than `max_slippage_tolerance_pct` -- the fill already executed, this is informational only |
 
+**`TICKER_OVERLAP` is not just a theoretical warning** -- observed directly in a real paper run:
+a portfolio inherited a stray position in a ticker *outside its own configured universe*
+(`reqPositions()` returns every position on the shared IBKR account, not filtered per
+portfolio), and correctly refused to trade it blind (logged as a `HOLD`, since it had no price
+for a ticker it never fetches) -- but that also means it can never reconcile or exit that
+position on its own. If you run multiple portfolios against one real account, expect this.
+
 ## Reading it
 
-- **Directly**: it's a plain CSV at `data/alerts_log.csv` -- open it, `pandas.read_csv()` it, or
+- **Directly**: it's a plain CSV at `logs/alerts_log.csv` -- open it, `pandas.read_csv()` it, or
   `grep` it like any other log.
 - **Via email** (Epic 29, Story 29.5): send `ACTION: ALERTS_REPORT` / `PORTFOLIO: <name or ALL>`
   / optional `LIMIT:` (default 10, capped at 50) to get the most recent matching rows emailed

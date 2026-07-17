@@ -36,6 +36,9 @@ class TestDollarDrawdownBreaker:
         import momentum_trading.risk.circuit_breaker as circuit_breaker
         monkeypatch.setattr(circuit_breaker, "LOCK_DIR", tmp_path / "data")
         monkeypatch.setattr(daily_runner, "LOCK_DIR", tmp_path / "data")
+        # Tripping the breaker also calls log_alert() -- isolate ALERTS_LOG_PATH too,
+        # so this test doesn't write into the real project's logs/alerts_log.csv.
+        monkeypatch.setattr(circuit_breaker, "ALERTS_LOG_PATH", str(tmp_path / "data" / "alerts_log.csv"))
         from momentum_trading.daily_runner import check_circuit_breaker
 
         # % breaker disabled (0.0), only the dollar breaker active

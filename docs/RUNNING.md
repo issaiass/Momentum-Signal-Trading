@@ -43,7 +43,7 @@ can verify the signal/sizing/order output without waiting for a real rebalance d
 ## 2. Multiple portfolios with different capital
 
 Add more entries under `portfolios:`. Each portfolio has its own signal, sizing, orders, and
-trade log (`data/live_trades_log_<name>.csv`) -- but if two or more portfolios trade through
+trade log (`logs/live_trades_log_<name>.csv`) -- but if two or more portfolios trade through
 the **same real IBKR account** (the normal case: one `--port`, one TWS/Gateway login), their
 capital and positions are NOT automatically kept independent. Epic 26 makes this safe rather
 than silently wrong; see the capital and ticker-overlap notes below before running more than
@@ -122,12 +122,35 @@ add `--force-rebalance` to test immediately instead of waiting for a real rebala
 
 **After running, check:**
 - Console/log output for each portfolio's picks, weights, and order actions.
-- `data/live_trades_log_<portfolio>.csv` — the audit trail, written before any broker call.
+- `logs/live_trades_log_<portfolio>.csv` — the audit trail, written before any broker call.
 - TWS's own order/execution log — confirms fills actually happened as intended.
 - Email inbox (if SMTP configured) — should be silent unless something failed.
 
 **Recommended:** run for at least 2-3 real rebalance cycles on paper, verifying every fill
 matches the intended order, before moving to Section 4.
+
+**Connection errors, unfamiliar `IBKR error` log lines, or orders that don't fill?** See
+`DEPLOYMENT.md`'s "Troubleshooting: IBKR connection" and "Troubleshooting: IBKR order placement"
+sections — a `502 Couldn't connect` error that persists across every port you try (Docker only),
+the `2104`/`2106`/`2158`-style "data farm connection is OK" lines that show up on every
+successful connect, and `IBKR error 10268: The 'EtradeOnly' order attribute is not supported`
+firing on every order (a real, now-fixed bug — every affected order was silently rejected
+despite the run logging success) are all covered there. `IBKR error 10243: Fractional-sized
+order cannot be placed via API` is a separate, **unfixable-in-code IBKR platform limitation**
+(fractional equity/ETF orders can never be placed via the API, full stop) — `place_orders_ibkr()`
+now floors fractional share counts to whole shares before submission so a rebalance can still
+execute; see DEPLOYMENT.md for details. Separately, `Order for TICKER did not confirm as Filled
+(status=SUBMITTED)` does **not** necessarily mean the order failed — real paper-account fills
+have been observed taking longer than the (now-fixed, previously 15s, now 60s default)
+`fill_poll_timeout` window. Same goes for `(status=ERROR: Order TIF was set to DAY based on
+order preset.)` — `error 10349` is informational (IBKR auto-filled a TIF we never set), not a
+rejection; this was a real, now-fixed bug where a genuinely-filled order got permanently marked
+failed because of it. **Always check TWS's own execution log before assuming a "did not
+confirm" warning means nothing traded.**
+
+**If you ran `--live` before the `10268` fix landed, verify in TWS's own execution log whether
+any of those orders actually filled** — don't assume the trade log's "logged" row means the
+order went through.
 
 ---
 
@@ -263,7 +286,7 @@ up to Stage 4 — all of these, not just one:
 - [ ] No unexplained circuit-breaker trips (any trip should be traceable to a real, understood
       market move, not a bug)
 - [ ] `risk_monitor.py` has run independently for the full period with no missed cycles
-- [ ] You've personally reviewed every `data/live_trades_log_*.csv` row at least once
+- [ ] You've personally reviewed every `logs/live_trades_log_*.csv` row at least once
 
 ```yaml
 # config.yaml — Stage 3 example: same strategy, 10% of eventual target capital
@@ -312,7 +335,7 @@ momentum's edge, such as it is, depends partly on not second-guessing the signal
 exactly the moments it feels most uncomfortable to follow it.
 
 If you do permit overrides, define the conditions in advance (not in the moment) and log every
-override decision with reasoning — extend `data/live_trades_log_<name>.csv`'s convention
+override decision with reasoning — extend `logs/live_trades_log_<name>.csv`'s convention
 manually if needed, e.g. a `manual_override_log.csv` with the same date/reason/decision-maker
 fields, so the decision is auditable later.
 
@@ -380,6 +403,27 @@ fresh from IBKR after the sells settle):
 This is LIVE-only -- dry-run never calls `place_orders_ibkr()` at all, so there's nothing to
 configure or observe here until you actually run `--live`.
 
+## 4.14. Extended-hours (pre-market/after-hours) trading
+
+A rebalance running at or right after market close submits plain MKT orders, which IBKR/
+exchanges reject outright: `IBKR error 201: Order rejected - reason:Exchange is closed`. This is
+**normal, expected behavior, not a bug** -- MKT orders only work during regular trading hours
+(9:30am-4:00pm ET), full stop, confirmed against IBKR's own TWS API docs.
+
+To actually place orders in NASDAQ's standard extended sessions (pre-market 4:00-9:30am ET,
+after-hours 4:00-8:00pm ET), set `default_risk.allow_extended_hours: true`. This is a **real
+order-type change**, not just a flag: IBKR only accepts LMT (limit) orders outside RTH, never
+MKT, so enabling this switches every live order to LMT with `outsideRth=True`, using the last
+known price plus/minus a small buffer (favors getting filled over exact price). If no reference
+price is available for a ticker that run, it silently falls back to a regular MKT (RTH-only)
+order instead of submitting unpriced.
+
+**This is a genuine economic trade-off, not just a technical toggle** -- extended-hours
+liquidity is thinner than regular hours, so expect a real chance of no fill, a partial fill, or
+a materially worse price than the same order would get during RTH. Off (`false`) by default;
+LIVE-only, no effect on the backtest (which is daily-close based and has no concept of session
+timing).
+
 ## 5. Quick reference
 
 If you're running natively (or inside the container's own shell), use the command as-is. If
@@ -401,9 +445,10 @@ Container name assumes `docker-compose.yml`'s default (`container_name: momentum
 | Follow container logs live | n/a | `docker logs -f momentum-signal` |
 
 **Note on `--live`/paper/live trading inside Docker:** the container's own cron schedule
-already runs `daily-runner` automatically (dry-run by default, per `Dockerfile`/
-`docker-entrypoint.sh` — see `DEPLOYMENT.md`'s "Going live for real" section to change what
-the *scheduled* job does). The `docker exec ... daily-runner --live ...` forms above are for
+already runs `daily-runner` automatically (dry-run by default, per `docker-entrypoint.sh`,
+which has a commented example line for going live — see `DEPLOYMENT.md`'s "Going live for
+real" section to change what the *scheduled* job does). The `docker exec ... daily-runner
+--live ...` forms above are for
 manually triggering a one-off run outside that schedule; they also require `IBKR_HOST`/
 `IBKR_PORT` to actually reach your TWS/Gateway from inside the container (see `DEPLOYMENT.md`).
 

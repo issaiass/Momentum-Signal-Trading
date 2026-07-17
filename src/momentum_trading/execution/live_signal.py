@@ -54,6 +54,7 @@ import pandas_market_calendars as mcal
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ..core import functions as fn
 from ..core.audit_log import log_alert, ALERTS_LOG_PATH
+from ..core.paths import data_dir, logs_dir
 from ..backtest.momentum_backtest import (
     BacktestConfig,
     resolve_target_weights,
@@ -66,8 +67,44 @@ if not logger.handlers:
     handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
     logger.addHandler(handler)
 logger.setLevel(logging.INFO)
+# daily_runner.py's logging.basicConfig() attaches its own handler to the ROOT logger --
+# without this, every message here would print twice: once via this logger's own handler
+# (needed so this module still prints when run standalone, e.g. its own __main__ block),
+# once via propagation up to root's handler when imported into daily_runner.py's process.
+logger.propagate = False
 
-TRADE_LOG_PATH = "live_trades_log.csv"
+TRADE_LOG_PATH = str(logs_dir() / "live_trades_log.csv")
+
+# IBKR_HOST: docker-compose.yml already sets this to host.docker.internal (Mac/Windows Docker
+# Desktop) so the container can reach TWS/Gateway running on the host machine. Inside a container,
+# "127.0.0.1" is the container itself -- never where TWS/Gateway listens -- so that can't be the
+# unconditional default. Falls back to "127.0.0.1" for non-Docker (bare-metal/venv) usage, where
+# TWS/Gateway genuinely does run on localhost relative to the script.
+IBKR_HOST = os.environ.get("IBKR_HOST", "127.0.0.1")
+
+# IBKR routes purely informational/status notices through the SAME EWrapper.error() callback
+# as real errors (a quirk of the TWS API, not this codebase) -- these specific codes are
+# IBKR's own "System"/"Warning" classification (see their API docs), not failures: 2104/2106/2108
+# fire on every successful connect ("data farm connection is OK"), 2107/2158 are similar
+# farm-status notices, 2119 is a market-data-type notice, 2137 is a warning, not an error.
+# Logging these at ERROR severity on every single successful run (as this used to do) buries
+# real errors (like a 502 "couldn't connect") in noise and can trip naive log/alert greps.
+# 10349 is the same pattern for a per-ORDER notice: "Order TIF was set to DAY based on order
+# preset" fires because place_orders_ibkr() never sets order.tif explicitly, so IBKR fills in
+# its own account-level default and tells you -- confirmed non-fatal empirically (orders
+# carrying this exact code have gone on to fill seconds later with a real execDetails/
+# commissionReport). Distinct from the codes above in one way: it DOES carry a real orderId
+# (reqId), so place_orders_ibkr()'s error() callback below must not let it overwrite that
+# order's tracked status to "ERROR: ..." -- doing so falsely marks a still-pending (or already
+# filled) order as terminally failed and makes the poll loop stop watching it too early.
+IBKR_INFORMATIONAL_CODES = {2104, 2106, 2107, 2108, 2119, 2137, 2158, 10349}
+
+
+def _log_ibkr_message(reqId: int, errorCode: int, errorString: str) -> None:
+    if errorCode in IBKR_INFORMATIONAL_CODES:
+        logger.info("IBKR status %s: %s", errorCode, errorString)
+    else:
+        logger.error("IBKR error %s: %s", errorCode, errorString)
 
 
 def is_rebalance_day(holding_period_months: int = 1, exchange: str = "NYSE",
@@ -421,7 +458,7 @@ def log_orders(orders: dict, latest_prices: dict, dry_run: bool, path: str = TRA
 # --------------------------------------------------------------------------- #
 def write_portfolio_snapshot(
     name: str, current_positions: dict, latest_prices: dict, total_value: float, cash: float,
-    benchmark_ticker: str | None = None, snapshot_dir: str = "data",
+    benchmark_ticker: str | None = None, snapshot_dir: str = str(data_dir()),
 ) -> str:
     """
     Writes a single summary row capturing "where things stand today" -- distinct
@@ -506,7 +543,7 @@ def write_portfolio_snapshot(
     return path
 
 
-def get_latest_snapshot(name: str, snapshot_dir: str = "data") -> dict | None:
+def get_latest_snapshot(name: str, snapshot_dir: str = str(data_dir())) -> dict | None:
     """Fast 'where do things stand today' read -- last row only, no full-log replay."""
     path = os.path.join(snapshot_dir, f"portfolio_snapshot_{name}.csv")
     if not os.path.isfile(path):
@@ -522,6 +559,7 @@ def measure_live_performance(
     latest_prices: dict | None = None,
     log_path: str = TRADE_LOG_PATH,
     initial_capital: float | None = None,
+    dry_run: bool | None = None,
 ) -> dict:
     """
     Computes REAL realized + unrealized P&L from the actual order log written
@@ -533,13 +571,18 @@ def measure_live_performance(
     ----------
     start_date, end_date : str, 'YYYY-MM-DD'
         Window to measure. Only rows with dry_run matching your actual live
-        mode are meaningful for a real account -- filter the log accordingly
-        before calling this if you mix dry-run and live runs in one file.
+        mode are meaningful for a real account -- pass `dry_run` (below) to
+        filter, since log_orders() writes both modes to the same file.
     latest_prices : dict, optional
         {ticker: price} for marking open positions to market as of `end_date`.
         If omitted, unrealized P&L on still-open positions is left as NaN.
     initial_capital : float, optional
         If provided, also returns total_return_pct.
+    dry_run : bool, optional
+        If set, only rows whose logged `dry_run` column matches are used --
+        a dry-run test run and a real --live run share the same log file, so
+        without this a report could silently mix simulated and real fills.
+        None (default) uses every row regardless of mode.
 
     Returns
     -------
@@ -551,6 +594,8 @@ def measure_live_performance(
 
     log = pd.read_csv(log_path, parse_dates=["timestamp"])
     log = log[(log["timestamp"] >= start_date) & (log["timestamp"] <= end_date)]
+    if dry_run is not None:
+        log = log[log["dry_run"] == dry_run]
     log = log[log["action"].isin(["BUY", "SELL"])].sort_values("timestamp")
 
     realized_pnl = 0.0
@@ -754,7 +799,7 @@ def with_retry(fn_callable, max_attempts: int = 3, backoff_seconds: float = 2.0,
     raise last_exc
 
 
-def get_ibkr_positions(port: int, client_id: int = 8, timeout: float = 5.0) -> dict:
+def get_ibkr_positions(port: int, client_id: int = 8, timeout: float = 5.0, host: str = IBKR_HOST) -> dict:
     """
     Real broker positions -- {ticker: {'shares': float, 'avg_entry_price': float}} --
     via IBKR's reqPositions(). This is the source of truth for current_holdings;
@@ -782,11 +827,11 @@ def get_ibkr_positions(port: int, client_id: int = 8, timeout: float = 5.0) -> d
             self.done = True
 
         def error(self, reqId, errorCode, errorString, advancedOrderRejectJson=""):
-            logger.error("IBKR error %s: %s", errorCode, errorString)
+            _log_ibkr_message(reqId, errorCode, errorString)
 
     import threading, time
     app = PositionsApp()
-    app.connect("127.0.0.1", port, clientId=client_id)
+    app.connect(host, port, clientId=client_id)
     thread = threading.Thread(target=app.run, daemon=True)
     thread.start()
     time.sleep(1.0)
@@ -804,7 +849,7 @@ def get_ibkr_positions(port: int, client_id: int = 8, timeout: float = 5.0) -> d
 
 
 def get_ibkr_account_value(port: int, client_id: int = 9, timeout: float = 5.0,
-                            tag: str = "NetLiquidation") -> float:
+                            tag: str = "NetLiquidation", host: str = IBKR_HOST) -> float:
     """
     Real account value via reqAccountSummary() -- replaces hardcoded total_value.
 
@@ -834,11 +879,11 @@ def get_ibkr_account_value(port: int, client_id: int = 9, timeout: float = 5.0,
             self.done = True
 
         def error(self, reqId, errorCode, errorString, advancedOrderRejectJson=""):
-            logger.error("IBKR error %s: %s", errorCode, errorString)
+            _log_ibkr_message(reqId, errorCode, errorString)
 
     import threading, time
     app = AccountApp()
-    app.connect("127.0.0.1", port, clientId=client_id)
+    app.connect(host, port, clientId=client_id)
     thread = threading.Thread(target=app.run, daemon=True)
     thread.start()
     time.sleep(1.0)
@@ -872,7 +917,9 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
                        max_slippage_tolerance_pct: float | None = None,
                        auto_reduce_on_insufficient_cash: bool = False,
                        available_cash_fn=None, portfolio: str = "",
-                       alerts_log_path: str = ALERTS_LOG_PATH) -> dict:
+                       alerts_log_path: str = ALERTS_LOG_PATH,
+                       host: str = IBKR_HOST, fill_poll_timeout: float = 60.0,
+                       allow_extended_hours: bool = False) -> dict:
     """
     Requires `ibapi` (pip install ibapi --break-system-packages) and a running
     TWS or IB Gateway instance listening on `port`. Only called when --live
@@ -897,6 +944,19 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
     available_cash_fn : callable() -> float, optional
         Injected so this is unit-testable without a real IBKR account-summary round trip.
         Defaults to `get_ibkr_account_value(port, tag="AvailableFunds")`.
+    fill_poll_timeout : float
+        Seconds to wait for each batch (sells, then buys) to reach a terminal status before
+        giving up and logging "did not confirm as Filled". Real paper-account fills have been
+        observed taking longer than a short window -- a too-short timeout doesn't mean the
+        order failed, just that this function stopped watching before the fill callback
+        arrived (confirm in TWS's own execution log before assuming an order didn't fill).
+    allow_extended_hours : bool
+        IBKR/exchanges reject plain MKT orders outside regular trading hours (error 201,
+        "Exchange is closed") -- and only accept LMT orders with outsideRth=True instead (MKT
+        does not work outside RTH at all, confirmed against IBKR's own docs). True switches
+        every order in this call to LMT (limit price = expected_prices[ticker] +/- a small
+        buffer favoring fill likelihood) with outsideRth=True; a ticker with no entry in
+        expected_prices falls back to a regular MKT order (RTH-only) instead of failing.
     """
     try:
         from ibapi.client import EClient
@@ -922,8 +982,12 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
             entry.update(status=status, filled=float(filled), avg_fill_price=float(avgFillPrice))
 
         def error(self, reqId, errorCode, errorString, advancedOrderRejectJson=""):
-            logger.error("IBKR error %s: %s", errorCode, errorString)
-            if reqId in self.order_status:
+            _log_ibkr_message(reqId, errorCode, errorString)
+            # Informational codes (e.g. 10349, "TIF was set to DAY based on order preset")
+            # carry a real orderId but are not failures -- only a genuine error should mark
+            # this order's tracked status as terminal, or the poll loop stops watching an
+            # order that's still pending (or already filled) as if it had been rejected.
+            if reqId in self.order_status and errorCode not in IBKR_INFORMATIONAL_CODES:
                 self.order_status[reqId]["status"] = f"ERROR: {errorString}"
 
     import threading
@@ -941,7 +1005,7 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
     for attempt in range(1, connect_attempts + 1):
         app = IBApp()
         try:
-            app.connect("127.0.0.1", port, clientId=client_id)
+            app.connect(host, port, clientId=client_id)
             thread = threading.Thread(target=app.run, daemon=True)
             thread.start()
             time.sleep(1.5)  # allow nextValidId callback to fire
@@ -965,6 +1029,13 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
             app.disconnect()
         return {}
 
+    # Orders dropped before ever reaching IBKR (floors to 0 whole shares, or scaled to 0 by
+    # cash-availability reduction) never get a real orderId, so they'd otherwise vanish from
+    # the returned results entirely. Tracked separately and merged in at the end so callers
+    # (the rebalance email, in particular) can show what actually happened for every order,
+    # not just the ones that made it to a real IBKR order.
+    dropped_orders: dict = {}
+
     def _submit_and_wait(order_subset: dict, start_order_id: int) -> tuple[dict, int]:
         """Submits every order in order_subset, polls until each reaches a terminal
         status. Returns ({orderId: ticker}, next_available_order_id)."""
@@ -978,18 +1049,74 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
             contract.currency = "USD"
 
             ib_order = Order()
+            # ibapi's Order() defaults eTradeOnly/firmQuoteOnly to True (legacy fields from
+            # older ibapi releases) -- current TWS/Gateway versions have dropped server-side
+            # support for them entirely and reject ANY order carrying them as True with error
+            # 10268 ("attribute is not supported"), regardless of account/order type. Every
+            # order is rejected until these are explicitly cleared -- this is IBKR's own
+            # documented fix for this exact ibapi/TWS version combination, not optional.
+            ib_order.eTradeOnly = False
+            ib_order.firmQuoteOnly = False
             ib_order.action = order["action"]
-            # NOTE: ibapi expects totalQuantity as a Decimal for fractional orders in
-            # newer versions of the API. If placing fractional shares, use:
-            #   from decimal import Decimal
-            #   ib_order.totalQuantity = Decimal(str(order["shares"]))
-            # Whole-share orders (the default) work fine as plain int/float.
-            ib_order.totalQuantity = order["shares"]
             ib_order.orderType = "MKT"
             # Consider "MOC" (market-on-close) or limit orders with a price band
             # instead of raw "MKT" for anything beyond a liquid, tight-spread ETF.
 
-            logger.info("Placing %s %d shares of %s (orderId=%d)", order["action"], order["shares"], ticker, oid)
+            # IBKR does not support fractional EQUITY/ETF share orders via the API, under any
+            # circumstances -- confirmed empirically (error 10243, "Fractional-sized order
+            # cannot be placed via API. Please use desktop version") even after correctly
+            # setting cashQty per IBKR's own official sample code (LimitOrderWithCashQty):
+            # cashQty only authorizes fractional fills for forex/CASH-pair orders, NOT STK
+            # contracts like these. There is no code-level workaround for STK -- the desktop/
+            # web UI is the only way to place a genuinely fractional equity order. So: floor to
+            # whole shares here, at the submission boundary only. allow_fractional_shares still
+            # fully applies everywhere else (sizing math, drift calc, the backtest engine) --
+            # only the final live order quantity is forced whole, because that's a hard broker
+            # constraint no config setting can change.
+            shares = order["shares"]
+            if shares != int(shares):
+                floored = int(shares)
+                if floored <= 0:
+                    logger.warning(
+                        "%s: dropping %s order -- %.4f shares floors to 0 whole shares "
+                        "(IBKR does not support fractional equity orders via API).",
+                        ticker, order["action"], shares)
+                    dropped_orders[ticker] = {
+                        "status": "DROPPED_FRACTIONAL",
+                        "filled": 0.0,
+                        "avg_fill_price": 0.0,
+                    }
+                    continue
+                logger.info(
+                    "%s: flooring fractional order %.4f -> %d whole shares (IBKR does not "
+                    "support fractional equity orders via API).", ticker, shares, floored)
+                shares = floored
+            ib_order.totalQuantity = shares
+
+            # IBKR/exchanges reject plain MKT orders outside regular trading hours (error 201,
+            # "Exchange is closed") and only accept LMT orders with outsideRth=True instead --
+            # MKT does not work outside RTH at all (confirmed against IBKR's own TWS API docs),
+            # so this is a real order-type change, not just a flag. A 0.5% buffer favors
+            # actually getting filled over exact price -- extended-hours liquidity is thinner,
+            # so a tight limit risks no fill at all. No reference price -> fall back to a
+            # regular MKT (RTH-only) order rather than submitting an unpriced limit order.
+            extended_hours_note = ""
+            if allow_extended_hours:
+                ref_price = (expected_prices or {}).get(ticker)
+                if ref_price and ref_price > 0:
+                    buffer = 0.005
+                    ib_order.outsideRth = True
+                    ib_order.orderType = "LMT"
+                    ib_order.lmtPrice = round(
+                        ref_price * (1 + buffer if order["action"] == "BUY" else 1 - buffer), 2)
+                    extended_hours_note = f" [extended hours: LMT @ {ib_order.lmtPrice}]"
+                else:
+                    logger.warning(
+                        "%s: allow_extended_hours is set but no reference price is available -- "
+                        "submitting as a regular MKT order (RTH only) instead.", ticker)
+
+            logger.info("Placing %s %s shares of %s (orderId=%d)%s",
+                        order["action"], shares, ticker, oid, extended_hours_note)
             app.order_status[oid] = {"status": "SUBMITTED", "filled": 0.0, "avg_fill_price": 0.0}
             order_id_to_ticker[oid] = ticker
             app.placeOrder(oid, contract, ib_order)
@@ -997,8 +1124,8 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
             time.sleep(0.3)  # simple pacing; IBKR rate-limits rapid order submission
 
         # --- poll for fill confirmation instead of a blind fixed sleep ---
-        poll_timeout, waited = 15.0, 0.0
-        while waited < poll_timeout:
+        waited = 0.0
+        while waited < fill_poll_timeout:
             statuses = [app.order_status.get(o, {}).get("status") for o in order_id_to_ticker]
             if all(s in ("Filled", "Cancelled", "Inactive") or (s and s.startswith("ERROR")) for s in statuses):
                 break
@@ -1088,6 +1215,11 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
                         if new_shares <= 0:
                             logger.warning("Dropping BUY %s -- reduced to 0 shares after "
                                            "cash-availability scaling.", t)
+                            dropped_orders[t] = {
+                                "status": "DROPPED_INSUFFICIENT_CASH",
+                                "filled": 0.0,
+                                "avg_fill_price": 0.0,
+                            }
                             continue
                         reduced[t] = {**o, "shares": new_shares}
                         logger.info("Reduced BUY %s: %d -> %d shares (cash-availability scaling "
@@ -1098,6 +1230,8 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
         results.update(_collect_results(buy_ids))
 
     app.disconnect()
+    for ticker, dropped in dropped_orders.items():
+        results.setdefault(ticker, dropped)
     return results
 
 
@@ -1172,7 +1306,7 @@ def run(
                               signal_context=signal_context)
 
     for ticker, order in orders.items():
-        logger.info("%-6s %-4s shares=%-4d (%s)", ticker, order["action"], order["shares"], order["reason"])
+        logger.info("%-6s %-4s shares=%-8.4f (%s)", ticker, order["action"], order["shares"], order["reason"])
 
     # --- Epic 2, Story 2.4: advisory capacity check (best-effort; never blocks trading) ---
     if cfg.max_pct_of_adv > 0:
@@ -1208,11 +1342,13 @@ def run(
         fill_results = place_orders_ibkr(orders, port=ibkr_port, expected_prices=latest_prices,
                                           max_slippage_tolerance_pct=cfg.max_slippage_tolerance_pct,
                                           auto_reduce_on_insufficient_cash=cfg.auto_reduce_buys_on_insufficient_cash,
-                                          portfolio=portfolio, alerts_log_path=alerts_log_path)
+                                          portfolio=portfolio, alerts_log_path=alerts_log_path,
+                                          allow_extended_hours=cfg.allow_extended_hours)
         for ticker, fill in fill_results.items():
             if ticker in orders:
                 orders[ticker]["fill_status"] = fill["status"]
                 orders[ticker]["fill_price"] = fill["avg_fill_price"]
+                orders[ticker]["fill_shares"] = fill["filled"]
     else:
         logger.info("DRY RUN: no orders sent to broker. Use --live to actually trade.")
 

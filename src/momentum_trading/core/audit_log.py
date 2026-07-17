@@ -25,6 +25,8 @@ import hashlib
 import os
 from datetime import datetime
 
+from .paths import logs_dir
+
 
 def _last_row_hash(path: str) -> str:
     if not os.path.isfile(path):
@@ -64,7 +66,7 @@ def append_hash_chained_row(log_path: str, header: list[str], fields: list) -> s
 
 
 ALERTS_LOG_HEADER = ["timestamp", "portfolio", "alert_type", "severity", "message", "row_hash"]
-ALERTS_LOG_PATH = "data/alerts_log.csv"
+ALERTS_LOG_PATH = str(logs_dir() / "alerts_log.csv")
 
 
 def log_alert(portfolio: str, alert_type: str, severity: str, message: str,

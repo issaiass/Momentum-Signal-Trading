@@ -15,7 +15,10 @@ metadata:
 # Epic 12: email notification categories. CRITICAL (stop-loss executions,
 # circuit-breaker trips, the Epic 26 capital-allocation error that aborts a run) is ALWAYS
 # sent and cannot be disabled here -- only STANDARD, PERIODIC, and WARNING are filterable.
-# Requires SMTP env vars set (see DEPLOYMENT.md).
+# Requires SMTP env vars set (see DEPLOYMENT.md). If sending via a Gmail account, SMTP_PASS
+# must be a Gmail App Password, NOT your normal account password -- generate one at
+# https://myaccount.google.com/apppasswords (requires 2-Step Verification enabled on the
+# account first).
 notifications:
   send_standard: true             # routine rebalance BUY/SELL/HOLD summaries
   send_periodic: true             # monthly performance report
@@ -60,8 +63,16 @@ default_risk:
                                    # (Epic 25: applies to both backtest and --live, same formula)
 
   # Share granularity
-  allow_fractional_shares: false   # true = size positions to 4dp fractional shares
-                                    # (only if your broker/tickers actually support it)
+  allow_fractional_shares: false   # true = size positions to 4dp fractional shares in the
+                                    # BACKTEST and in sizing/drift math. LIVE execution against
+                                    # IBKR always floors to whole shares at order-submission
+                                    # time regardless of this setting -- IBKR's API does not
+                                    # support fractional EQUITY/ETF orders under any circumstances
+                                    # (confirmed: not even via cashQty, which only works for
+                                    # forex/CASH-pair orders). See DEPLOYMENT.md's
+                                    # "Troubleshooting: IBKR order placement". Set true if you
+                                    # still want precise backtest sizing; live orders are
+                                    # unaffected either way.
 
   # Epic 28: LIVE ONLY. place_orders_ibkr() always submits SELLs first and waits for them
   # to clear before submitting BUYs (not configurable -- there's no valid reason to skip
@@ -72,6 +83,19 @@ default_risk:
   # where a BUY racing ahead of its funding SELL can be rejected or trigger a cash-account
   # violation; on margin it silently relies on buying power instead. See docs/RUNNING.md.
   auto_reduce_buys_on_insufficient_cash: false
+
+  # LIVE ONLY, no effect on the backtest. A rebalance running at or after market close submits
+  # plain MKT orders that IBKR/exchanges reject outright ("Order rejected - reason:Exchange is
+  # closed", IBKR error 201) -- true switches every live order to LMT with outsideRth=True
+  # instead, which IBKR DOES accept outside regular trading hours (MKT orders never work outside
+  # RTH, confirmed against IBKR's own TWS API docs -- this is a real order-type change, not just
+  # a flag). Limit price is the last known price +/- a small buffer favoring fill likelihood.
+  # Covers NASDAQ's standard extended sessions: pre-market 4:00-9:30am ET, after-hours
+  # 4:00-8:00pm ET. Extended-hours liquidity is thinner than regular hours -- expect a real
+  # chance of no fill, a partial fill, or a worse price than the same order placed during RTH;
+  # this is a genuine economic trade-off, not just a technical toggle. See DEPLOYMENT.md's
+  # "Troubleshooting: IBKR order placement".
+  allow_extended_hours: false
 
   # Selection: how many top-momentum-ranked tickers to actually hold each rebalance
   # (clamped to the portfolio's own tickers list if that's smaller -- e.g. top_n: 10 with

@@ -72,20 +72,46 @@ reaches your inbox:
 
 **STANDARD (rebalance summary)** — an HTML table per portfolio, sent after each rebalance,
 showing ticker / action / shares / reason for every position considered that cycle (including
-HOLDs, so you can see what *wasn't* traded and why).
+HOLDs, so you can see what *wasn't* traded and why), plus a **"What Actually Happened"** column
+showing the REAL execution outcome per ticker — distinct from the signal's intended action,
+since an intended BUY/SELL doesn't always actually fill. Built by
+`build_rebalance_summary_html()` from `fill_status`/`fill_price`/`fill_shares`, which
+`execution/live_signal.py`'s `run()` merges onto each order after a `--live` call to
+`place_orders_ibkr()`:
+- **Filled** — `"Filled N @ $price"` (green)
+- **Dropped, fractional** — `"Dropped — rounds to 0 whole shares"` (amber) — the order's share
+  count floored to 0 whole shares before ever reaching IBKR (IBKR has no fractional equity API
+  support; see `DEPLOYMENT.md`'s "Troubleshooting: IBKR order placement")
+- **Dropped, insufficient cash** — `"Dropped — insufficient cash"` (amber) — scaled to 0 shares
+  by `auto_reduce_buys_on_insufficient_cash`
+- **Rejected** — `"Rejected — <reason>"` (red) — a genuine IBKR error (excludes
+  `IBKR_INFORMATIONAL_CODES`, which never reach this state)
+- **Cancelled/Inactive** — `"<status> — not filled"` (red)
+- **Still open** — `"Still open — status <status>"` (amber) — `fill_poll_timeout` elapsed before
+  a terminal status arrived (e.g. a limit order still working outside RTH)
+- **HOLD** — `"—"` — no order was ever attempted for this ticker this cycle
+- **Dry-run** — `"Dry-run — no order sent"` — the rebalance ran without `--live`, so nothing was
+  ever sent to a broker; passed through as `build_rebalance_summary_html(..., dry_run=True)`
 
 **PERIODIC (monthly report)** — HTML email with:
 - An embedded portfolio-value-over-time chart (PNG, generated via matplotlib)
-- Current position summary (total value, cash, unrealized P&L)
+- Current position summary (total value, cash, unrealized P&L) — from the latest snapshot row
+- Actual P&L (realized, unrealized, total, trade count, total return) — from
+  `execution/live_signal.py`'s `measure_live_performance()`, which replays the real trade log
+  with FIFO lot matching. This is distinct from "Current position"'s unrealized P&L above: that
+  one only marks currently-*open* positions from the latest snapshot, while this section also
+  includes realized gains from trades that have since closed, and is filtered to rows matching
+  the run's actual `dry_run`/`--live` mode (the two modes share one log file).
 - Cumulative return vs. benchmark (via `compare_to_benchmark()`)
 
-Degrades gracefully: if there isn't enough snapshot history yet for a chart, or benchmark
-comparison data isn't available, those sections are simply omitted rather than causing the
-whole report to fail.
+Degrades gracefully: if there isn't enough snapshot history yet for a chart, benchmark
+comparison data isn't available, or no trade log exists yet (`FileNotFoundError`, e.g. no
+rebalance has ever fired for this portfolio), those sections are simply omitted rather than
+causing the whole report to fail.
 
 ## What's implemented vs. deferred
 
-**Implemented and tested** (`tests/test_notifications.py`):
+**Implemented and tested** (`tests/interfaces/test_notifications.py`):
 - Category filtering logic (CRITICAL unsuppressable, STANDARD/PERIODIC/WARNING configurable)
 - HTML generation for rebalance summaries and monthly reports
 - Chart embedding via matplotlib

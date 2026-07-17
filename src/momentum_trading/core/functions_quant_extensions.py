@@ -19,6 +19,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from .paths import data_dir
+
 
 # --------------------------------------------------------------------------- #
 # 1. LIQUIDITY / CAPACITY FILTER
@@ -659,7 +661,7 @@ def scenario_shock(
 # --------------------------------------------------------------------------- #
 # 11. BENCHMARK COMPARISON FROM SNAPSHOT LOG (Epic 4, Story 4.3)
 # --------------------------------------------------------------------------- #
-def compare_to_benchmark(name: str, snapshot_dir: str = "data") -> dict:
+def compare_to_benchmark(name: str, snapshot_dir: str = str(data_dir())) -> dict:
     """
     Reads write_portfolio_snapshot()'s log (live_signal.py) and returns
     cumulative portfolio return vs. cumulative benchmark return since the

@@ -88,6 +88,6 @@ last month; it only asks "who's strongest right now."
   exposure. It picks the *relative* winners, which can still be losing money in absolute terms
   during a broad downturn.
 - Past backtested performance under this signal has genuinely never been validated against
-  real market data in this project (see `../README.md`'s "Are You Ready?" section) — the theory
+  real market data in this project (see `../README.md`'s "Project Maturity & Safety" section) — the theory
   above explains *why someone might expect* this to work, not confirmation that it does, here,
   now, on your specific universe.

@@ -157,6 +157,24 @@ class TestMeasureLivePerformance:
         with pytest.raises(FileNotFoundError):
             measure_live_performance("2026-01-01", "2026-03-01", log_path=str(tmp_path / "nonexistent.csv"))
 
+    def test_dry_run_filter_excludes_the_other_mode(self, tmp_path):
+        # log_orders() writes both dry-run and live rows to the SAME file -- without
+        # filtering, a report could silently mix simulated and real fills.
+        log_path = tmp_path / "trades.csv"
+        with open(log_path, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["timestamp", "ticker", "action", "shares", "price", "reason", "dry_run"])
+            w.writerow(["2026-01-05T09:35:00", "XLK", "BUY", 5, 200.0, "entry", True])   # dry-run
+            w.writerow(["2026-01-06T09:35:00", "XLK", "BUY", 2, 210.0, "entry", False])  # live
+
+        live_only = measure_live_performance("2026-01-01", "2026-03-01", log_path=str(log_path), dry_run=False)
+        assert live_only["trade_count"] == 1
+        assert live_only["open_positions"]["XLK"] == pytest.approx(2.0)
+
+        dry_run_only = measure_live_performance("2026-01-01", "2026-03-01", log_path=str(log_path), dry_run=True)
+        assert dry_run_only["trade_count"] == 1
+        assert dry_run_only["open_positions"]["XLK"] == pytest.approx(5.0)
+
 
 class TestRunMultiPortfolio:
     """
@@ -401,6 +419,227 @@ def _install_fake_ibkr(monkeypatch, submission_log):
     monkeypatch.setattr(EClient, "disconnect", fake_disconnect)
 
 
+class TestFractionalOrderFlooring:
+    """
+    IBKR does not support fractional EQUITY/ETF share orders via the API under any
+    circumstances -- confirmed empirically (error 10243) even after correctly setting
+    cashQty per IBKR's own official sample code: cashQty only authorizes fractional fills
+    for forex/CASH-pair orders, not STK contracts. place_orders_ibkr() floors fractional
+    share counts to whole shares at the submission boundary as the only way to actually
+    place an order -- these tests confirm that flooring (and the drop-if-zero case).
+    """
+
+    def test_fractional_order_floors_to_whole_shares(self, monkeypatch, tmp_path):
+        import momentum_trading.execution.live_signal as ls
+        submission_log = []
+        _install_fake_ibkr(monkeypatch, submission_log)
+
+        orders = {"BUY1": {"action": "BUY", "shares": 5.9094}}
+        ls.place_orders_ibkr(orders, port=9999, alerts_log_path=str(tmp_path / "alerts_log.csv"))
+
+        assert submission_log == [("BUY", "BUY1", 5)]
+
+    def test_fractional_order_flooring_to_zero_is_dropped(self, monkeypatch, tmp_path, caplog):
+        import momentum_trading.execution.live_signal as ls
+        submission_log = []
+        _install_fake_ibkr(monkeypatch, submission_log)
+
+        orders = {"BUY1": {"action": "BUY", "shares": 0.9094}}
+        with caplog.at_level("WARNING"):
+            ls.place_orders_ibkr(orders, port=9999, alerts_log_path=str(tmp_path / "alerts_log.csv"))
+
+        assert submission_log == []  # never submitted -- 0 whole shares isn't a valid order
+        assert any("floors to 0 whole shares" in r.message for r in caplog.records)
+
+    def test_fractional_order_flooring_to_zero_is_recorded_in_results(self, monkeypatch, tmp_path):
+        # A ticker dropped for flooring to 0 whole shares never gets a real IBKR orderId, so
+        # _collect_results() alone would silently omit it entirely -- place_orders_ibkr()
+        # tracks it separately (dropped_orders) and merges it back in, so callers building the
+        # rebalance summary email's "What Actually Happened" column can still see it.
+        import momentum_trading.execution.live_signal as ls
+        submission_log = []
+        _install_fake_ibkr(monkeypatch, submission_log)
+
+        orders = {"BUY1": {"action": "BUY", "shares": 0.9094}}
+        result = ls.place_orders_ibkr(orders, port=9999, alerts_log_path=str(tmp_path / "alerts_log.csv"))
+
+        assert result == {"BUY1": {"status": "DROPPED_FRACTIONAL", "filled": 0.0, "avg_fill_price": 0.0}}
+
+    def test_whole_share_order_is_unaffected(self, monkeypatch, tmp_path):
+        import momentum_trading.execution.live_signal as ls
+        submission_log = []
+        _install_fake_ibkr(monkeypatch, submission_log)
+
+        orders = {"BUY1": {"action": "BUY", "shares": 5}}
+        ls.place_orders_ibkr(orders, port=9999, alerts_log_path=str(tmp_path / "alerts_log.csv"))
+
+        assert submission_log == [("BUY", "BUY1", 5)]
+
+
+class TestExtendedHoursOrders:
+    """
+    IBKR/exchanges reject plain MKT orders outside regular trading hours (error 201, "Exchange
+    is closed") -- and MKT orders never work outside RTH at all, confirmed against IBKR's own
+    TWS API docs; only LMT orders with outsideRth=True do. allow_extended_hours=True switches
+    place_orders_ibkr() to that combination; these tests confirm the order actually gets built
+    that way, that the buffer direction is correct for BUY vs. SELL, and that a ticker with no
+    reference price falls back to a regular MKT order instead of submitting unpriced.
+    """
+
+    def _install_fake_ibkr_capturing_order(self, monkeypatch, captured):
+        from ibapi.client import EClient
+
+        def fake_connect(self, host, port, clientId):
+            self.nextValidId(1)
+
+        def fake_run(self):
+            pass
+
+        def fake_place_order(self, orderId, contract, order):
+            captured.append({
+                "symbol": contract.symbol, "action": order.action,
+                "orderType": order.orderType, "outsideRth": order.outsideRth,
+                "lmtPrice": order.lmtPrice, "totalQuantity": order.totalQuantity,
+            })
+            self.orderStatus(orderId, "Filled", order.totalQuantity, 0, 100.0)
+
+        def fake_disconnect(self):
+            pass
+
+        monkeypatch.setattr(EClient, "connect", fake_connect)
+        monkeypatch.setattr(EClient, "run", fake_run)
+        monkeypatch.setattr(EClient, "placeOrder", fake_place_order)
+        monkeypatch.setattr(EClient, "disconnect", fake_disconnect)
+
+    def test_extended_hours_buy_sets_lmt_outside_rth_with_higher_buffer(self, monkeypatch, tmp_path):
+        import momentum_trading.execution.live_signal as ls
+        captured = []
+        self._install_fake_ibkr_capturing_order(monkeypatch, captured)
+
+        orders = {"BUY1": {"action": "BUY", "shares": 5}}
+        ls.place_orders_ibkr(orders, port=9999, expected_prices={"BUY1": 100.0},
+                              alerts_log_path=str(tmp_path / "alerts_log.csv"),
+                              allow_extended_hours=True)
+
+        order = captured[0]
+        assert order["orderType"] == "LMT"
+        assert order["outsideRth"] is True
+        assert order["lmtPrice"] == pytest.approx(100.5, abs=0.001)  # +0.5% buffer, favors fill
+
+    def test_extended_hours_sell_uses_lower_buffer(self, monkeypatch, tmp_path):
+        import momentum_trading.execution.live_signal as ls
+        captured = []
+        self._install_fake_ibkr_capturing_order(monkeypatch, captured)
+
+        orders = {"SELL1": {"action": "SELL", "shares": 5}}
+        ls.place_orders_ibkr(orders, port=9999, expected_prices={"SELL1": 100.0},
+                              alerts_log_path=str(tmp_path / "alerts_log.csv"),
+                              allow_extended_hours=True)
+
+        order = captured[0]
+        assert order["orderType"] == "LMT"
+        assert order["outsideRth"] is True
+        assert order["lmtPrice"] == pytest.approx(99.5, abs=0.001)  # -0.5% buffer, favors fill
+
+    def test_extended_hours_without_reference_price_falls_back_to_mkt(self, monkeypatch, tmp_path, caplog):
+        import momentum_trading.execution.live_signal as ls
+        captured = []
+        self._install_fake_ibkr_capturing_order(monkeypatch, captured)
+
+        orders = {"BUY1": {"action": "BUY", "shares": 5}}
+        with caplog.at_level("WARNING"):
+            ls.place_orders_ibkr(orders, port=9999,  # no expected_prices
+                                  alerts_log_path=str(tmp_path / "alerts_log.csv"),
+                                  allow_extended_hours=True)
+
+        order = captured[0]
+        assert order["orderType"] == "MKT"
+        assert order["outsideRth"] is False
+        assert any("no reference price is available" in r.message for r in caplog.records)
+
+    def test_extended_hours_disabled_by_default(self, monkeypatch, tmp_path):
+        import momentum_trading.execution.live_signal as ls
+        captured = []
+        self._install_fake_ibkr_capturing_order(monkeypatch, captured)
+
+        orders = {"BUY1": {"action": "BUY", "shares": 5}}
+        ls.place_orders_ibkr(orders, port=9999, expected_prices={"BUY1": 100.0},
+                              alerts_log_path=str(tmp_path / "alerts_log.csv"))
+        # allow_extended_hours not passed -- must default to off, unaffected behavior
+
+        order = captured[0]
+        assert order["orderType"] == "MKT"
+        assert order["outsideRth"] is False
+
+
+class TestInformationalOrderErrorDoesNotCorruptStatus:
+    """
+    IBKR error 10349 ("Order TIF was set to DAY based on order preset") carries a real
+    orderId but is not a failure -- confirmed empirically against a real paper account
+    (orders carrying this exact code went on to fill seconds later with a real
+    execDetails/commissionReport). Before this fix, place_orders_ibkr()'s error() callback
+    unconditionally overwrote the order's tracked status to "ERROR: ..." for ANY error
+    callback matching that orderId, and the poll loop treats status.startswith("ERROR") as
+    terminal -- so an order that was actually fine (or still pending) got misreported as
+    rejected and the code stopped watching it too early.
+    """
+
+    def test_informational_error_does_not_mark_order_as_failed(self, monkeypatch, tmp_path):
+        from ibapi.client import EClient
+
+        def fake_connect(self, host, port, clientId):
+            self.nextValidId(1)
+
+        def fake_run(self):
+            pass
+
+        def fake_place_order(self, orderId, contract, order):
+            # Simulate IBKR sending the informational TIF notice BEFORE the real fill --
+            # exactly the ordering observed in the real log that exposed this bug.
+            self.error(orderId, 10349, "Order TIF was set to DAY based on order preset.")
+            self.orderStatus(orderId, "Filled", order.totalQuantity, 0, 100.0)
+
+        def fake_disconnect(self):
+            pass
+
+        monkeypatch.setattr(EClient, "connect", fake_connect)
+        monkeypatch.setattr(EClient, "run", fake_run)
+        monkeypatch.setattr(EClient, "placeOrder", fake_place_order)
+        monkeypatch.setattr(EClient, "disconnect", fake_disconnect)
+
+        import momentum_trading.execution.live_signal as ls
+        orders = {"BUY1": {"action": "BUY", "shares": 5}}
+        results = ls.place_orders_ibkr(orders, port=9999, alerts_log_path=str(tmp_path / "alerts_log.csv"))
+
+        assert results["BUY1"]["status"] == "Filled"  # not "ERROR: Order TIF was set to DAY..."
+
+    def test_genuine_error_still_marks_order_as_failed(self, monkeypatch, tmp_path):
+        from ibapi.client import EClient
+
+        def fake_connect(self, host, port, clientId):
+            self.nextValidId(1)
+
+        def fake_run(self):
+            pass
+
+        def fake_place_order(self, orderId, contract, order):
+            self.error(orderId, 10268, "The 'EtradeOnly' order attribute is not supported.")
+
+        def fake_disconnect(self):
+            pass
+
+        monkeypatch.setattr(EClient, "connect", fake_connect)
+        monkeypatch.setattr(EClient, "run", fake_run)
+        monkeypatch.setattr(EClient, "placeOrder", fake_place_order)
+        monkeypatch.setattr(EClient, "disconnect", fake_disconnect)
+
+        import momentum_trading.execution.live_signal as ls
+        orders = {"BUY1": {"action": "BUY", "shares": 5}}
+        results = ls.place_orders_ibkr(orders, port=9999, alerts_log_path=str(tmp_path / "alerts_log.csv"))
+
+        assert results["BUY1"]["status"].startswith("ERROR")
+
+
 class TestSellsBeforeBuys:
     """
     Epic 28, Story 28.3: place_orders_ibkr() must submit and confirm ALL sells before
@@ -514,6 +753,23 @@ class TestCashAwareBuySizing:
         )
         buy_calls = [(t, s) for a, t, s in submission_log if a == "BUY"]
         assert buy_calls == []  # dropped entirely, never submitted
+
+    def test_auto_reduce_drop_is_recorded_in_results(self, monkeypatch, tmp_path):
+        # Same drop-to-zero-after-scaling case as above, but confirming the ticker still
+        # appears in the returned results dict (not silently omitted) so the rebalance
+        # summary email's "What Actually Happened" column can report it.
+        import momentum_trading.execution.live_signal as ls
+        submission_log = []
+        _install_fake_ibkr(monkeypatch, submission_log)
+
+        orders = {"BUY1": {"action": "BUY", "shares": 1}}
+        result = ls.place_orders_ibkr(
+            orders, port=9999, expected_prices={"BUY1": 1000.0},
+            auto_reduce_on_insufficient_cash=True,
+            available_cash_fn=lambda: 10.0,
+            alerts_log_path=str(tmp_path / "alerts_log.csv"),
+        )
+        assert result == {"BUY1": {"status": "DROPPED_INSUFFICIENT_CASH", "filled": 0.0, "avg_fill_price": 0.0}}
 
     def test_no_shortfall_submits_unchanged_regardless_of_flag(self, monkeypatch, tmp_path):
         import momentum_trading.execution.live_signal as ls

@@ -35,7 +35,9 @@ so on purpose.
 - Multi-portfolio orchestration on one shared IBKR account, with capital-allocation and
   ticker-overlap safety checks
 - Portfolio-level circuit breaker (% and $ drawdown), idempotent daily scheduling, config-approval
-  gate before `--live` will run
+  gate before `--live` will run. Monthly (default) or weekly rebalancing, both targeting the
+  first real NYSE trading day of the period via `pandas_market_calendars`, automatically rolling
+  forward past weekends/holidays rather than firing on a fixed calendar date
 - Hash-chained, tamper-evident audit logs for trades, email commands, and alerts, three
   separate logs, kept deliberately apart
 - Categorized email notifications (CRITICAL/STANDARD/PERIODIC/DAILY/WARNING) and pydantic-

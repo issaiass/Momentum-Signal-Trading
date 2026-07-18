@@ -368,6 +368,29 @@ every 2 weeks, `0.75` = every 3 weeks), see `STRATEGY_THEORY.md` for the theory,
 `DEPLOYMENT.md`'s "Choosing a rebalance cadence" section for worked daily/weekly/monthly examples
 (including exactly which env vars change and which don't, for Docker deployments).
 
+## 4.11a. Trading-Day Scheduling (Monthly/Weekly Roll-Forward)
+
+`is_rebalance_day()` (`execution/live_signal.py`) targets the **first real NYSE trading day**
+of the period, monthly or weekly, not a fixed calendar date. It's not "check if today is a
+trading day AND today is near the 1st", it fetches the exchange's actual trading-session
+schedule for the whole month (or week, for fractional `holding_period`) via
+`pandas_market_calendars`' `NYSE` calendar (`mcal.get_calendar("NYSE")`), then targets whichever
+date is that schedule's first entry. A weekend or market holiday is never IN that schedule, so
+if the 1st of the month falls on one, the target is automatically whichever day the market
+actually opens next, no explicit `if holiday: shift by one day` branch needed, the roll-forward
+happens by construction.
+
+Worked example, test-proven (`tests/execution/test_live_signal.py::TestIsRebalanceDay`): January
+1, 2026 is New Year's Day, a market holiday. `is_rebalance_day(1, today="2026-01-01")` is
+`False`; `is_rebalance_day(1, today="2026-01-02")` is `True`, the actual first trading day of
+that month. The same mechanism applies to the weekly branch:
+`test_holiday_shifts_the_weekly_target_day` confirms a week starting on Presidents' Day (a
+Monday holiday) targets the following Tuesday instead.
+
+This confirms monthly is both the default configuration (`holding_period: 1` in
+`config.example.yaml`) and holiday/weekend-aware, and that weekly (and every 2/3-week) cadences
+get the identical trading-calendar treatment, not a separate or weaker mechanism.
+
 ## 4.12. Additional capabilities, quick pointers
 
 - **Alternative position sizing**: set `sizing_method: score_proportional` in `config.yaml`'s

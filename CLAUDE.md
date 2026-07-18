@@ -104,6 +104,16 @@ that tests enforce, don't casually violate these when editing:
   `holding_period` is a `float`, not just an `int`, values below `1` map onto weeks (`0.25` =
   weekly) via `execution/live_signal.py`'s `is_rebalance_day()`; only `holding_period <= 0` is a
   hard validation error, sub-weekly values (`< 0.25`) are allowed but flagged (see below).
+  `is_rebalance_day()` targets the first REAL trading day of the period (monthly or weekly), not
+  a fixed calendar date: `mcal.get_calendar(exchange)` (default `"NYSE"`) +
+  `cal.schedule(start_date, end_date)` builds the exchange's actual trading-session list for the
+  month/week, and the target is whichever date is that schedule's first entry. A weekend/holiday
+  is never IN that schedule, so the roll-forward past it happens by construction, there's no
+  explicit `if holiday: shift` branch to break. Confirmed test-proven for BOTH branches, not just
+  one: `test_default_fires_on_first_trading_day_of_month` (Jan 1 2026 = New Year's Day, resolves
+  to Jan 2) and `test_holiday_shifts_the_weekly_target_day` (a Presidents'-Day Monday resolves to
+  the following Tuesday). Don't add a separate holiday-check step if editing this, the
+  `cal.schedule()` call already IS the holiday check.
 - **`execution/live_signal.py`**, live signal/order generation, IBKR integration (`ibapi`
   `EClient`/`EWrapper`, not a third-party wrapper), multi-portfolio orchestration, FIFO P&L,
   hash-chained audit log. `fetch_ohlcv_for_tickers()` is distinct from `fetch_live_prices()`,

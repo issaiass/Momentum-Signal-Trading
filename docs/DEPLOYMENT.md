@@ -537,7 +537,74 @@ example is right below it) to add `--live` — and if trading real money on port
 `docker compose up -d`), this line is baked into the image, so run `docker compose up -d --build`
 after editing it. For a one-off manual run instead of changing the schedule, use `docker exec`.
 
+This is deliberate, not a gap: `--live`/`--confirm-live-trading` were evaluated for env-var
+support (matching `IBKR_PORT`/`DAILY_RUNNER_CRON`'s pattern) and explicitly rejected — an env var
+toggle would let real-money trading get enabled by a plain `.env` edit + `docker compose up -d`
+alone, no script edit or rebuild, removing the intentional friction that currently requires a
+deliberate code change before any real order can ever be placed. Same reasoning as dry-run being
+the unflagged default elsewhere in this project.
+
 **Native Windows path:** edit the `schtasks /TR` argument (or the `.bat` file) the same way —
 add `--live` (and `--confirm-live-trading` for port 7496) — then re-run the `schtasks /Create`
 command, or edit the task directly in Task Scheduler's GUI.
+
+## Choosing a rebalance cadence: daily, weekly, or monthly
+
+**Two independent knobs control this, and they are not the same thing:**
+
+1. **`DAILY_RUNNER_CRON`** (`.env`/`docker-compose.yml`) — how often the *container* attempts to
+   invoke `daily-runner` at all. Default: `35 9 * * 1-5` (every weekday, 9:35am ET).
+2. **`config.yaml`'s `default_risk.holding_period`** (or a per-portfolio `risk_overrides`
+   override) — whether `daily-runner` treats *today*, once invoked, as an actual rebalance day.
+   This is `is_rebalance_day()`'s self-gating logic, and it's what actually determines
+   daily/weekly/monthly cadence.
+
+**`DAILY_RUNNER_CRON` should stay at its daily-weekday default for every cadence below — you do
+not change it to "run weekly" or "run monthly".** Two reasons:
+- `is_rebalance_day()` finds the correct trading day within whatever period `holding_period`
+  specifies, shifting automatically around holidays/weekends. That self-gating only works if the
+  script is actually invoked on every candidate day — if `DAILY_RUNNER_CRON` itself only fires
+  weekly/monthly at some fixed calendar slot instead, a holiday shift can make it miss the real
+  computed rebalance day entirely.
+- Stop-loss and time-stop checks (`check_and_handle_stop_losses`/`check_and_handle_time_stops`)
+  are meant to run **every day** regardless of rebalance cadence — they're independent of
+  `holding_period`. Changing `DAILY_RUNNER_CRON` to anything less than daily silently stops those
+  checks too, not just the rebalance.
+
+So: **cadence is a `config.yaml` setting, not a cron schedule setting.** The recipes below hold
+`DAILY_RUNNER_CRON` fixed at its default specifically to make that visible — only
+`holding_period` and the `daily-runner` invocation flags (dry-run/paper/live, per "Going live for
+real" above) change.
+
+| Cadence | `config.yaml` `holding_period` | `.env` `DAILY_RUNNER_CRON` |
+|---|---|---|
+| Rebalance monthly (default) | `1` | `35 9 * * 1-5` (default — leave unset) |
+| Rebalance weekly | `0.25` | `35 9 * * 1-5` (unchanged) |
+| Rebalance every 3 weeks | `0.75` | `35 9 * * 1-5` (unchanged) |
+| Rebalance every 2 months | `2` | `35 9 * * 1-5` (unchanged) |
+
+The resulting `docker-entrypoint.sh`-generated crontab line is **identical for every row above**
+— only `config.yaml` changes — and differs only by which `daily-runner` invocation you've set per
+"Going live for real":
+
+```
+# Dry-run (default — no config.yaml approval needed, never places an order):
+35 9 * * 1-5 cd /app && daily-runner >> /app/logs/daily_$(date +%Y%m%d).log 2>&1
+
+# Paper trading (after editing the line in docker-entrypoint.sh + docker compose up -d --build):
+35 9 * * 1-5 cd /app && daily-runner --live --port 7497 >> /app/logs/daily_$(date +%Y%m%d).log 2>&1
+
+# Real money (also requires config.yaml's metadata.approved_by/approved_date set):
+35 9 * * 1-5 cd /app && daily-runner --live --port 7496 --confirm-live-trading >> /app/logs/daily_$(date +%Y%m%d).log 2>&1
+```
+
+**Not recommended: rebalancing faster than weekly** (`holding_period` below `0.25`, e.g. `0.1`)
+— this is allowed and will run (never blocked), but every run logs a `HOLDING_PERIOD_TOO_FREQUENT`
+WARNING and sends a WARNING-category email, since the momentum signal is computed over a
+monthly-scale `lookback_period` and trading faster than weekly adds real cost without improving
+signal quality. See `EMAIL_REPORTING.md`/`ALERT_LOG.md` for what that alert looks like.
+
+`RISK_MONITOR_CRON` is unrelated to all of the above — it's the separate, independent oversight
+process (`risk_monitor.py`), hourly by default, and doesn't need to change for any cadence choice
+here.
 

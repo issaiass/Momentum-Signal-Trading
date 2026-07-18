@@ -121,7 +121,11 @@ that tests enforce — don't casually violate these when editing:
 explicit user ask: dry-run is the *unflagged default* (`--live` is opt-in, and there is no
 `--dry-run` flag — passing one is an argparse error, since `parse_args()` is strict); real-money
 trading requires `--port 7496` **and** `--confirm-live-trading` together; circuit-breaker halts
-require explicit `--resume-trading`, never auto-clear.
+require explicit `--resume-trading`, never auto-clear; `docker-entrypoint.sh`'s `--live`/
+`--confirm-live-trading` are manual-edit-and-rebuild-only, deliberately NOT env-var-driven like
+every other setting in that file (`DAILY_RUNNER_CRON`, `IBKR_HOST`/`IBKR_PORT`) — considered and
+explicitly rejected, since an env var toggle would let real-money trading get enabled by a plain
+`.env` edit alone, no code change or rebuild required.
 
 ## Testing conventions
 

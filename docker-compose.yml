@@ -10,6 +10,9 @@ services:
       # needs `docker compose up -d` (container recreate), NOT `--build` -- the
       # entrypoint regenerates /etc/cron.d/momentum-cron from these on every start.
       # Defaults: daily-runner at 9:35am ET weekdays; risk_monitor hourly 9am-4pm ET weekdays.
+      # DAILY_RUNNER_CRON is NOT how you set daily/weekly/monthly rebalancing -- leave it at the
+      # default for every cadence; that's config.yaml's holding_period instead. See
+      # docs/DEPLOYMENT.md's "Choosing a rebalance cadence" section.
       - DAILY_RUNNER_CRON=${DAILY_RUNNER_CRON:-35 9 * * 1-5}
       - RISK_MONITOR_CRON=${RISK_MONITOR_CRON:-0 9-16 * * 1-5}
       # Space-separated portfolio names to independently risk-monitor, one

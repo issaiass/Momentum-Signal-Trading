@@ -33,6 +33,13 @@ CRONTAB_PATH="${CRONTAB_PATH:-/etc/cron.d/momentum-cron}"
 # Single quotes around the log-path segments keep $(date ...) UNevaluated here --
 # it must land literally in the crontab file so cron's own shell evaluates it fresh
 # every time the job actually fires, not once now at container startup.
+#
+# IMPORTANT: DAILY_RUNNER_CRON only controls how often this container ATTEMPTS a run (leave it
+# at the daily-weekday default below for every cadence, daily/weekly/monthly alike) -- the
+# actual rebalance cadence is set via config.yaml's holding_period, which daily-runner itself
+# self-gates on via is_rebalance_day(). Changing DAILY_RUNNER_CRON to fire less than daily would
+# also silently stop the daily stop-loss/time-stop checks, which run independently of
+# holding_period. See docs/DEPLOYMENT.md's "Choosing a rebalance cadence" for worked examples.
 {
   echo "$DAILY_RUNNER_CRON"' cd /app && daily-runner >> /app/logs/daily_$(date +%Y%m%d).log 2>&1'
   # To go live, replace the line above with (paper: --port 7497, real money also needs
@@ -41,6 +48,16 @@ CRONTAB_PATH="${CRONTAB_PATH:-/etc/cron.d/momentum-cron}"
   # daily-runner's --port now defaults to the IBKR_PORT env var (set in .env) when omitted,
   # so if IBKR_PORT is already correct there, an explicit --port above isn't strictly required --
   # it's kept in the example for clarity and because it still overrides IBKR_PORT if both are set.
+  #
+  # --live and --confirm-live-trading, unlike --port (and unlike DAILY_RUNNER_CRON/IBKR_HOST/
+  # IBKR_PORT above), are DELIBERATELY NOT env-var-driven -- this was considered and explicitly
+  # rejected, not an oversight. An env var toggle would let real-money trading get enabled by a
+  # plain .env edit + `docker compose up -d`, no script edit or rebuild -- removing the
+  # intentional friction that requires a deliberate code change (this file) plus
+  # `docker compose up -d --build` before any real order can ever be placed. Same reasoning as
+  # dry-run being the unflagged default and --confirm-live-trading being a second, separate flag
+  # in daily_runner.py itself -- see CLAUDE.md's "Safety defaults that are load-bearing" and
+  # docs/DEPLOYMENT.md's "Going live for real".
   for p in $RISK_MONITOR_PORTFOLIOS; do
     echo "$RISK_MONITOR_CRON"' cd /app && python -m momentum_trading.risk.risk_monitor --portfolio '"$p"' >> /app/logs/risk_monitor_'"$p"'_$(date +%Y%m%d).log 2>&1'
   done

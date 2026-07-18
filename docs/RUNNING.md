@@ -360,11 +360,10 @@ glance at what's scheduled around each rebalance date before `--live` runs, espe
 Stage 2/3 of the rollout above. This is a manual awareness recommendation, not an automated
 feature in this codebase.
 
-`holding_period` also accepts fractional values mapping onto weeks (`0.25` = every week, `0.5`
-= every 2 weeks, `0.75` = every 3 weeks) — see `STRATEGY_THEORY.md`. Anything faster than
-weekly (`< 0.25`) is allowed but triggers a non-blocking WARNING (logged and emailed every run)
-since it's not recommended: the momentum signal is computed over a monthly-scale
-`lookback_period`, so trading faster than weekly adds real cost without improving the signal.
+`holding_period` also accepts fractional values mapping onto weeks (`0.25` = every week, `0.5` =
+every 2 weeks, `0.75` = every 3 weeks) — see `STRATEGY_THEORY.md` for the theory, or
+`DEPLOYMENT.md`'s "Choosing a rebalance cadence" section for worked daily/weekly/monthly examples
+(including exactly which env vars change and which don't, for Docker deployments).
 
 ## 4.12. Additional capabilities — quick pointers
 

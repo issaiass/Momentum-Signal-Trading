@@ -39,6 +39,15 @@ notifications:
                                    # this setting, so the risk is never fully invisible even
                                    # with this set to false. Must be true/false, not a string,
                                    # validated at load time.
+  send_email_command_feedback: true  # ACCEPTED/REJECTED/ERROR reply emails for
+                                   # email-commanded remote actions (PAUSE/RESUME/STATUS/
+                                   # etc., see below). Gates the EMAIL only, every attempt is
+                                   # still logged to logs/email_commands_log.csv regardless of
+                                   # this setting, an audit trail you could silence would defeat
+                                   # its own purpose. Default true, matches this feature's
+                                   # existing always-on behavior, set false to keep the audit
+                                   # log but stop the reply-email traffic. Must be true/false,
+                                   # not a string, validated at load time. See EMAIL_COMMANDS.md.
 
 # Email-commanded remote actions (PAUSE/RESUME/SKIP_NEXT_REBALANCE
 # auto-applied; LIQUIDATE/ADJUST_PARAM parsed+validated but require manual

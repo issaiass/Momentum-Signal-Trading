@@ -65,7 +65,11 @@ README says so on purpose.
   validated, fail-safe email-commanded remote actions (pause/resume/liquidate/adjust risk
   params/report), the rebalance summary email includes a "What Actually Happened" column
   showing the real fill outcome per ticker (filled, dropped, rejected, still open, dry-run), not
-  just the intended signal action
+  just the intended signal action. Every email command gets a three-way ACCEPTED/REJECTED/ERROR
+  outcome, logged unconditionally and, by default, replied to by email
+  (`notifications.send_email_command_feedback`, gates the email only), a command that parses
+  successfully but fails while being applied is isolated to itself, not aborting the rest of
+  that run's batch, see `docs/EMAIL_COMMANDS.md`
 - Monthly and (opt-in, off by default) daily performance reports per portfolio, technical
   indicators (trend/momentum/volatility/volume) and fundamental indicators (P/E, PEG, ROE,
   Debt-to-Equity, Current Ratio) for currently held positions, macro context (Fed Funds Rate,
@@ -75,7 +79,7 @@ README says so on purpose.
   monthly report, 1-day/1/2/3-week for the daily report)
 - Dockerized, self-scheduling deployment (`docker compose up -d`, internal cron, no manual
   triggering needed for normal operation)
-- 399-test pytest suite covering code mechanics, order sizing, config validation, audit-log
+- 413-test pytest suite covering code mechanics, order sizing, config validation, audit-log
   integrity, multi-portfolio capital math, entirely on synthetic/mocked data, no live broker
   required to run it
 
@@ -198,7 +202,7 @@ momentum-trading/
 │       └── email_diagnostics.py     backs `daily-runner --test-email`, live SMTP+IMAP
 │                                     check independent of config.yaml
 │
-└── tests/                         pytest suite (399 tests), mirrors src/ layout where a
+└── tests/                         pytest suite (413 tests), mirrors src/ layout where a
     ├── conftest.py                  test's primary subject is a single sub-package;
     ├── test_architecture.py         cross-cutting/integration tests stay at tests/ root
     ├── test_daily_runner.py

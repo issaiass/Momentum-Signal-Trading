@@ -106,6 +106,22 @@ class TestConfigSchemaValidation:
         ok = {"portfolios": {"p1": {"tickers": ["SPY"]}}}
         validate_config_schema(ok, "test.yaml")  # should not raise
 
+    def test_non_bool_send_email_command_feedback_raises(self):
+        # Same YAML-truthiness footgun as send_warning above, this field gates the
+        # ACCEPTED/REJECTED/ERROR reply emails for email-commanded remote actions.
+        bad = {"portfolios": {"p1": {"tickers": ["SPY"]}},
+               "notifications": {"send_email_command_feedback": "false"}}
+        with pytest.raises(ValueError, match="send_email_command_feedback"):
+            validate_config_schema(bad, "test.yaml")
+
+    def test_bool_send_email_command_feedback_is_valid(self):
+        ok_true = {"portfolios": {"p1": {"tickers": ["SPY"]}},
+                   "notifications": {"send_email_command_feedback": True}}
+        ok_false = {"portfolios": {"p1": {"tickers": ["SPY"]}},
+                    "notifications": {"send_email_command_feedback": False}}
+        validate_config_schema(ok_true, "test.yaml")   # should not raise
+        validate_config_schema(ok_false, "test.yaml")  # should not raise
+
 
 class TestLoadConfig:
     """
@@ -582,6 +598,147 @@ class TestAlertsReportEmailCommand:
 
         daily_runner.check_and_apply_email_commands(["p1"], ibkr_port=7497, dry_run=True)
 
+        assert sent == []
+
+
+class TestSendEmailCommandFeedbackFlag:
+    """
+    notifications.send_email_command_feedback gates the ACCEPTED/REJECTED/ERROR reply
+    EMAIL only (default true, matches this feature's pre-existing always-on behavior).
+    poll_and_process_commands() is mocked out here (as in TestAlertsReportEmailCommand
+    above), the audit-log-always-writes guarantee is a property of that unmocked
+    function itself, see tests/interfaces/test_email_commands.py.
+    """
+
+    def _configure_email_env(self, monkeypatch):
+        monkeypatch.setenv("IMAP_HOST", "imap.example.com")
+        monkeypatch.setenv("IMAP_USER", "bot@example.com")
+        monkeypatch.setenv("IMAP_PASS", "secret")
+        monkeypatch.setenv("TRUSTED_SENDER_EMAIL", "trader@example.com")
+
+    def _parsed_status(self):
+        from momentum_trading.interfaces.email_commands import parse_command
+        return parse_command("trader@example.com", "trader@example.com",
+                              "ACTION: STATUS\nPORTFOLIO: p1")
+
+    def test_default_true_sends_reply_email(self, monkeypatch):
+        self._configure_email_env(monkeypatch)
+        monkeypatch.setattr(daily_runner, "poll_and_process_commands",
+                             lambda *a, **k: [self._parsed_status()])
+        sent = []
+        monkeypatch.setattr(daily_runner, "send_alert_email",
+                             lambda subject, body: sent.append((subject, body)))
+
+        daily_runner.check_and_apply_email_commands(["p1"], ibkr_port=7497, dry_run=True)
+
+        assert len(sent) == 1
+        assert "STATUS" in sent[0][0]
+
+    def test_flag_false_suppresses_reply_email(self, monkeypatch):
+        self._configure_email_env(monkeypatch)
+        monkeypatch.setattr(daily_runner, "poll_and_process_commands",
+                             lambda *a, **k: [self._parsed_status()])
+        sent = []
+        monkeypatch.setattr(daily_runner, "send_alert_email",
+                             lambda subject, body: sent.append((subject, body)))
+
+        daily_runner.check_and_apply_email_commands(
+            ["p1"], ibkr_port=7497, dry_run=True, send_email_command_feedback=False,
+        )
+
+        assert sent == []
+
+    def test_flag_false_does_not_block_command_application(self, tmp_path, monkeypatch):
+        # PAUSE (not dry-run) still writes the halt flag even with feedback suppressed,
+        # the flag only gates the reply EMAIL, never the underlying action.
+        self._configure_email_env(monkeypatch)
+        from momentum_trading.interfaces.email_commands import parse_command
+        parsed = parse_command("trader@example.com", "trader@example.com",
+                                "ACTION: PAUSE\nPORTFOLIO: p1")
+        monkeypatch.setattr(daily_runner, "poll_and_process_commands", lambda *a, **k: [parsed])
+        monkeypatch.setattr(daily_runner, "send_alert_email", lambda *a, **k: None)
+        halt_path = tmp_path / "halt_p1.flag"
+        monkeypatch.setattr(daily_runner, "_halt_flag_path", lambda name: halt_path)
+        monkeypatch.setattr(daily_runner, "LOCK_DIR", tmp_path)
+
+        daily_runner.check_and_apply_email_commands(
+            ["p1"], ibkr_port=7497, dry_run=False, send_email_command_feedback=False,
+        )
+
+        assert halt_path.exists()
+
+
+class TestEmailCommandApplyTimeErrorIsolation:
+    """
+    An exception while APPLYING an already-ACCEPTED command (e.g. a file-write failure)
+    must be isolated to just that command: logged as its own ERROR row (not silently
+    merged into REJECTED, and not just a log stream line), optionally emailed, and must
+    NOT abort every OTHER command queued in the same batch. Before this, any apply-time
+    exception propagated out of the whole per-command loop, silently skipping every
+    command after the one that failed.
+    """
+
+    def _configure_email_env(self, monkeypatch):
+        monkeypatch.setenv("IMAP_HOST", "imap.example.com")
+        monkeypatch.setenv("IMAP_USER", "bot@example.com")
+        monkeypatch.setenv("IMAP_PASS", "secret")
+        monkeypatch.setenv("TRUSTED_SENDER_EMAIL", "trader@example.com")
+
+    def test_one_command_failing_to_apply_does_not_abort_the_rest(self, tmp_path, monkeypatch):
+        self._configure_email_env(monkeypatch)
+        from momentum_trading.interfaces.email_commands import parse_command
+        cmd1 = parse_command("trader@example.com", "trader@example.com", "ACTION: PAUSE\nPORTFOLIO: p1")
+        cmd2 = parse_command("trader@example.com", "trader@example.com", "ACTION: PAUSE\nPORTFOLIO: p2")
+        monkeypatch.setattr(daily_runner, "poll_and_process_commands", lambda *a, **k: [cmd1, cmd2])
+
+        def _flag_path(name):
+            if name == "p1":
+                raise OSError("disk full")
+            return tmp_path / f"halt_{name}.flag"
+        monkeypatch.setattr(daily_runner, "_halt_flag_path", _flag_path)
+        monkeypatch.setattr(daily_runner, "LOCK_DIR", tmp_path)
+
+        logged = []
+        monkeypatch.setattr(daily_runner, "log_command_attempt",
+                             lambda sender, result, **kw: logged.append((sender, result, kw)))
+        sent = []
+        monkeypatch.setattr(daily_runner, "send_alert_email",
+                             lambda subject, body: sent.append((subject, body)))
+
+        daily_runner.check_and_apply_email_commands(["p1", "p2"], ibkr_port=7497, dry_run=False)
+
+        # p2's halt flag WAS written, despite p1 failing first in the same batch.
+        assert (tmp_path / "halt_p2.flag").exists()
+        # p1's failure was recorded as its own ERROR row, not silently swallowed.
+        assert len(logged) == 1
+        assert logged[0][2].get("outcome") == "ERROR"
+        assert "disk full" in logged[0][2].get("reason", "")
+        # And (default flag = true) an error email was sent specifically for it.
+        assert any("APPLY ERROR" in subj for subj, _ in sent)
+
+    def test_apply_error_reply_suppressed_when_feedback_flag_false(self, tmp_path, monkeypatch):
+        self._configure_email_env(monkeypatch)
+        from momentum_trading.interfaces.email_commands import parse_command
+        cmd1 = parse_command("trader@example.com", "trader@example.com", "ACTION: PAUSE\nPORTFOLIO: p1")
+        monkeypatch.setattr(daily_runner, "poll_and_process_commands", lambda *a, **k: [cmd1])
+        monkeypatch.setattr(daily_runner, "_halt_flag_path",
+                             lambda name: (_ for _ in ()).throw(OSError("disk full")))
+        monkeypatch.setattr(daily_runner, "LOCK_DIR", tmp_path)
+        logged = []
+        monkeypatch.setattr(daily_runner, "log_command_attempt",
+                             lambda sender, result, **kw: logged.append((sender, result, kw)))
+        sent = []
+        monkeypatch.setattr(daily_runner, "send_alert_email",
+                             lambda subject, body: sent.append((subject, body)))
+
+        daily_runner.check_and_apply_email_commands(
+            ["p1"], ibkr_port=7497, dry_run=False, send_email_command_feedback=False,
+        )
+
+        # Still logged (the audit trail is unconditional)...
+        assert len(logged) == 1
+        assert logged[0][2].get("outcome") == "ERROR"
+        # ...but no error email was sent.
         assert sent == []
 
 

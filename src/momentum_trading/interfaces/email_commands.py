@@ -236,6 +236,7 @@ class ParsedCommandResult(BaseModel):
     command: Optional[object] = None
     error: Optional[str] = None
     raw_action: Optional[str] = None
+    sender: str = ""
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -295,15 +296,26 @@ def parse_command(sender: str, trusted_sender: str, body: str) -> ParsedCommandR
 
 def log_command_attempt(
     sender: str, result: ParsedCommandResult, log_path: str = EMAIL_COMMANDS_LOG_PATH,
+    outcome: str | None = None, reason: str | None = None,
 ) -> None:
     """
-    Every parsed attempt (accepted or rejected) is
+    Every parsed attempt (accepted, rejected, or errored) is
     logged to a dedicated, hash-chained audit trail, using the SAME
     hash-chain pattern as the trade log (live_signal.py's log_orders) for
     consistency: tampering with this log is detectable the same way tampering
     with the trade log is. This was a real gap in the original email-commands
     implementation, console logging alone doesn't survive a log rotation
     or give you a queryable history of who tried what, when.
+
+    outcome / reason : both optional, backward compatible. When omitted
+    (every pre-existing call site), the outcome is derived from
+    result.success ("ACCEPTED"/"REJECTED") and reason from result.error,
+    unchanged from this function's original behavior. Pass outcome="ERROR"
+    explicitly (with reason=str(exception)) for a failure that happened
+    OUTSIDE parse_command() itself, an IMAP polling failure or a failure
+    while APPLYING an already-ACCEPTED command, so those failures land in
+    the SAME audit trail instead of only ever reaching daily_runner.py's
+    own log stream.
     """
     import csv
     import hashlib
@@ -326,10 +338,12 @@ def log_command_attempt(
 
     action = result.raw_action or ""
     portfolio = getattr(result.command, "portfolio", "") if result.success else ""
+    resolved_outcome = outcome if outcome is not None else ("ACCEPTED" if result.success else "REJECTED")
+    resolved_reason = reason if reason is not None else (result.error or "")
     row_fields = [
         datetime.now().isoformat(), sender, action, portfolio,
-        "ACCEPTED" if result.success else "REJECTED",
-        result.error or "",
+        resolved_outcome,
+        resolved_reason,
     ]
     row_hash = _row_hash(prev_hash, row_fields)
 
@@ -340,13 +354,36 @@ def log_command_attempt(
         writer.writerow(row_fields + [row_hash])
 
     logger.info("Command attempt logged: sender=%s action=%s outcome=%s",
-                sender, action, "ACCEPTED" if result.success else "REJECTED")
+                sender, action, resolved_outcome)
 
 
-def build_reply_body(result: ParsedCommandResult) -> str:
-    """Human-readable confirmation/rejection body to email back to the sender."""
+def build_reply_body(result: ParsedCommandResult, outcome: str | None = None,
+                      reason: str | None = None) -> str:
+    """
+    Human-readable confirmation/rejection/error body to email back to the
+    sender. outcome/reason are optional, backward compatible: when omitted
+    (every pre-existing call site), outcome is derived from result.success
+    exactly as before ("ACCEPTED"/"REJECTED") and reason from result.error.
+    Pass outcome="ERROR" explicitly for a failure that happened OUTSIDE
+    parse_command() itself (see log_command_attempt()'s docstring for the
+    two cases this covers), with reason=str(exception) since result.error
+    is None for a command that parsed successfully and only failed later,
+    while being APPLIED.
+    """
     ts = datetime.now().isoformat()
-    if result.success:
+    if outcome is None:
+        outcome = "ACCEPTED" if result.success else "REJECTED"
+
+    if outcome == "ERROR":
+        resolved_reason = reason if reason is not None else result.error
+        return (
+            f"Command processing ERROR at {ts}\n\n"
+            f"Reason: {resolved_reason}\n\n"
+            f"This may mean an earlier ACCEPTED reply for this command did not actually "
+            f"take effect. Check logs/email_commands_log.csv and the bot's own logs for "
+            f"details."
+        )
+    if outcome == "ACCEPTED":
         cmd = result.command
         return (
             f"Command ACCEPTED at {ts}\n\n"
@@ -484,6 +521,7 @@ def poll_and_process_commands(
                 body = msg.get_payload(decode=True).decode(errors="ignore")
 
             result = parse_command(sender, trusted_sender, body)
+            result.sender = sender
             log_command_attempt(sender, result)
             if dry_run:
                 result.raw_action = f"[DRY-RUN] {result.raw_action}" if result.raw_action else "[DRY-RUN]"
@@ -503,5 +541,16 @@ def poll_and_process_commands(
         conn.logout()
     except Exception as e:
         logger.error("IMAP polling failed: %s", e)
+        # Distinct from a REJECTED command, this failed OUTSIDE parse_command() itself
+        # (connection/fetch/decode failure), there may be no specific sender or message
+        # to attribute it to. Still recorded in the SAME audit trail (not just the log
+        # stream), and, if a reply channel is configured, reported to the trusted
+        # sender directly, since a silent poll failure otherwise means commands stop
+        # being processed with no visible signal beyond daily_runner.py's own logs.
+        error_result = ParsedCommandResult(success=False, raw_action="POLL_ERROR", error=str(e))
+        log_command_attempt("", error_result, outcome="ERROR")
+        if send_reply_fn is not None:
+            send_reply_fn(trusted_sender, "Email command check ERROR",
+                          build_reply_body(error_result, outcome="ERROR"))
 
     return results

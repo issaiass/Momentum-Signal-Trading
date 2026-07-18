@@ -41,8 +41,14 @@ specific environment variables (below).
 - **Fail-safe.** Any email that doesn't match the trusted sender, or that does but doesn't
   parse as a valid recognized command, is ignored. The bot continues running on its **current**
   configuration, it never partially applies a malformed command and never crashes.
-- **Confirmation replies.** Every parsed attempt (accepted or rejected) gets an email reply
-  explaining what happened and why.
+- **Confirmation replies.** Every parsed attempt gets an email reply explaining what happened
+  and why, one of three outcomes: `ACCEPTED`, `REJECTED` (a parse-time validation failure, e.g.
+  wrong sender, malformed body, `LIQUIDATE`'s confirmation phrase missing), or `ERROR` (a
+  failure OUTSIDE parsing itself, either the IMAP poll failing before any message was even
+  fetched, or a command that parsed as `ACCEPTED` but then failed while `daily_runner.py`
+  actually applied it, e.g. a file-write failure). Gated by
+  `notifications.send_email_command_feedback` (default `true`, see "Feedback emails and the
+  audit trail" below), the underlying audit-log write is never gated, only the email.
 - **High-impact actions require manual follow-through.** `LIQUIDATE` and `ADJUST_PARAM` are
   parsed and validated, but **not auto-applied**, they're logged and alerted so a human
   reviews and applies them deliberately. Only `PAUSE`, `RESUME`, and `SKIP_NEXT_REBALANCE` are
@@ -150,11 +156,39 @@ still wins), this can never be used to accidentally make the bot riskier.
   recent `LIMIT` rows (default 10, capped at 50) from `logs/alerts_log.csv`, filtered to the
   requested portfolio (or every portfolio, for `ALL`). See `docs/ALERT_LOG.md`.
 
+## Feedback emails and the audit trail
+
+Every command attempt has THREE possible outcomes, `ACCEPTED`, `REJECTED`, or `ERROR`, and two
+independent places it's recorded, an audit-log row (always) and a reply email
+(`notifications.send_email_command_feedback`, default `true`).
+
+- **`ACCEPTED`** / **`REJECTED`**: decided at parse time, by `parse_command()`, exactly as
+  described above under "Confirmation replies."
+- **`ERROR`**: decided AFTER parsing, in one of two places:
+  1. **Poll-level**: the IMAP connection/fetch itself fails (server unreachable, bad
+     credentials, network error), before any message was even parsed. There may be no specific
+     sender/command to attribute this to, it's logged with an empty `sender` and
+     `action=POLL_ERROR`, and (if a reply channel is configured) reported once to
+     `TRUSTED_SENDER_EMAIL`.
+  2. **Apply-time**: a command parsed successfully (`ACCEPTED`) but then failed while
+     `daily_runner.py` actually applied it, e.g. a halt-flag file write failing. Each command's
+     apply step is wrapped in its own error boundary, **one command failing to apply does not
+     abort the rest of the batch**, every other command queued in the same run (including other
+     portfolios via `PORTFOLIO: ALL`) still gets its chance to apply. This also means the
+     earlier `ACCEPTED` reply for that specific command may have been optimistic, an `ERROR`
+     follow-up reply says so explicitly and points back to the audit log.
+- `notifications.send_email_command_feedback: false` gates the EMAIL only (all three outcomes),
+  the exact same pattern `send_warning` already uses for capital-safety warnings. The
+  hash-chained audit-log write below is never gated by this or anything else, an audit trail you
+  could silence would defeat its own purpose.
+
 ## Audit logging and duplicate protection
 
-- **Every parsed attempt** (accepted or rejected) is logged to a dedicated, hash-chained audit
-  trail at `logs/email_commands_log.csv`, same tamper-evident pattern as the trade log
-  (`live_signal.py`'s `log_orders()`), verifiable with `verify_log_integrity()`.
+- **Every parsed attempt** (`ACCEPTED`, `REJECTED`, or `ERROR`) is logged to a dedicated,
+  hash-chained audit trail at `logs/email_commands_log.csv`, same tamper-evident pattern as the
+  trade log (`live_signal.py`'s `log_orders()`), verifiable with `verify_log_integrity()`. This
+  write is unconditional, `notifications.send_email_command_feedback` only gates the reply
+  email, never this log.
 - **Message-ID deduplication**: each processed email's RFC `Message-ID` is recorded to
   `data/processed_command_ids.txt` and skipped on future polls, protects against the same
   command being applied twice if the IMAP server's `\Seen` flag doesn't persist correctly
@@ -164,13 +198,19 @@ still wins), this can never be used to accidentally make the bot riskier.
 ## Testing before relying on this
 
 - `email_commands.py`'s parsing/validation logic is covered by
-  `tests/interfaces/test_email_commands.py` (36 tests, all passing), sender authentication, the
+  `tests/interfaces/test_email_commands.py` (49 tests, all passing), sender authentication, the
   `ADJUST_PARAM` allowlist (including `top_n`), `LIQUIDATE`'s confirmation phrase,
-  `STATUS`/`SET_MAX_DRAWDOWN`/`ALERTS_REPORT` parsing, audit-log hash-chain integrity, and
-  fail-safe behavior on malformed input are all verified. `SET_MAX_DRAWDOWN`'s tightening-only
-  enforcement is covered separately in `tests/test_daily_runner.py::TestMaxDrawdownEmailOverride`;
-  `ALERTS_REPORT`'s end-to-end read-and-reply path (mocked IMAP, no real mail server) is covered
-  by `tests/test_daily_runner.py::TestAlertsReportEmailCommand`.
+  `STATUS`/`SET_MAX_DRAWDOWN`/`ALERTS_REPORT` parsing, audit-log hash-chain integrity (including
+  the `ERROR` outcome's default-unchanged and explicit-outcome behavior), `build_reply_body()`'s
+  `ERROR` branch, a mocked-IMAP-failure poll-level `ERROR` case
+  (`TestPollLevelError`), and fail-safe behavior on malformed input are all verified.
+  `SET_MAX_DRAWDOWN`'s tightening-only enforcement is covered separately in
+  `tests/test_daily_runner.py::TestMaxDrawdownEmailOverride`; `ALERTS_REPORT`'s end-to-end
+  read-and-reply path (mocked IMAP, no real mail server) is covered by
+  `tests/test_daily_runner.py::TestAlertsReportEmailCommand`; the `send_email_command_feedback`
+  flag and apply-time `ERROR`/batch-isolation behavior are covered by
+  `tests/test_daily_runner.py::TestSendEmailCommandFeedbackFlag` and
+  `TestEmailCommandApplyTimeErrorIsolation`.
 - Try the interactive `email_commands_walkthrough.ipynb` for a hands-on demo of every command
   and failure mode before enabling this against a real inbox.
 - **The IMAP polling function (`poll_and_process_commands()`) has NOT been tested against a

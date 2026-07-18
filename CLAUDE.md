@@ -207,6 +207,20 @@ that tests enforce, don't casually violate these when editing:
   `notifications.py`'s `build_monthly_report_html()`/`build_daily_report_html()` are both thin
   wrappers over a shared `_build_report_html()`, the two reports differ only in cadence/window
   scale, not structure, so keep it that way rather than letting them diverge into two copies.
+  `email_commands.py`'s command-outcome model is three-way, not two: `ACCEPTED`/`REJECTED`
+  (decided at parse time by `parse_command()`) plus `ERROR` (decided AFTER parsing, either
+  `poll_and_process_commands()`'s own top-level except catching an IMAP/connection failure
+  before any message was fetched, or `daily_runner.py`'s per-command apply loop catching a
+  failure while APPLYING an already-`ACCEPTED` command). `log_command_attempt()` and
+  `build_reply_body()` both take optional `outcome`/`reason` overrides for this, backward
+  compatible, every pre-existing call site (no `outcome=` passed) still derives
+  `ACCEPTED`/`REJECTED` from `result.success` exactly as before. `daily_runner.py`'s
+  `check_and_apply_email_commands()` wraps EACH command's apply block in its own
+  `try/except`, deliberately, so one command failing to apply does not abort the rest of
+  the batch, don't reintroduce one shared `try/except` around the whole per-command loop.
+  `notifications.send_email_command_feedback` (default `true`) gates the ACCEPTED/REJECTED/
+  ERROR reply EMAIL only, same pattern as `send_warning`, `log_command_attempt()`'s audit
+  write is never gated by it or anything else.
 - **`daily_runner.py`**, the actual scheduled entry point (`daily-runner` console script).
   Loads and schema-validates `config.yaml`, loops over every portfolio defined under
   `portfolios:`, idempotent per day, refuses `--live` unless `config.yaml`'s

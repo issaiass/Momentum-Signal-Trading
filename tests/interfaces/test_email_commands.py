@@ -275,6 +275,58 @@ class TestAuditLogging:
         result_tampered = verify_log_integrity(log_path)
         assert result_tampered["valid"] is False
 
+    def test_default_outcome_derivation_unchanged(self, tmp_path):
+        # Regression: omitting outcome/reason (every pre-existing call site) must still
+        # derive ACCEPTED/REJECTED from result.success exactly as before this extension.
+        from momentum_trading.interfaces.email_commands import log_command_attempt
+        log_path = str(tmp_path / "cmd_log.csv")
+        result = parse_command(TRUSTED, TRUSTED, "ACTION: RESUME\nPORTFOLIO: p1")
+        log_command_attempt(TRUSTED, result, log_path)
+
+        import pandas as pd
+        df = pd.read_csv(log_path)
+        assert df.iloc[0]["outcome"] == "ACCEPTED"
+
+    def test_explicit_error_outcome_is_logged(self, tmp_path):
+        # A failure OUTSIDE parse_command() itself (IMAP polling, or applying an
+        # already-ACCEPTED command) is a third, distinct outcome, not silently folded
+        # into REJECTED (a parse-time validation failure means something different).
+        from momentum_trading.interfaces.email_commands import log_command_attempt
+        log_path = str(tmp_path / "cmd_log.csv")
+        result = parse_command(TRUSTED, TRUSTED, "ACTION: PAUSE\nPORTFOLIO: p1")
+        log_command_attempt(TRUSTED, result, log_path, outcome="ERROR", reason="disk full")
+
+        import pandas as pd
+        df = pd.read_csv(log_path)
+        assert df.iloc[0]["outcome"] == "ERROR"
+        assert df.iloc[0]["reason"] == "disk full"
+
+
+class TestBuildReplyBodyErrorOutcome:
+    """
+    build_reply_body()'s new outcome="ERROR" branch, distinct from its pre-existing
+    ACCEPTED/REJECTED branches, and confirming the default (no outcome passed) path
+    is unchanged.
+    """
+
+    def test_default_outcome_derivation_unchanged(self):
+        ok = parse_command(TRUSTED, TRUSTED, "ACTION: RESUME\nPORTFOLIO: p1")
+        bad = parse_command("evil@x.com", TRUSTED, "ACTION: PAUSE\nPORTFOLIO: p1")
+        assert "ACCEPTED" in build_reply_body(ok)
+        assert "REJECTED" in build_reply_body(bad)
+
+    def test_error_outcome_uses_explicit_reason(self):
+        ok = parse_command(TRUSTED, TRUSTED, "ACTION: PAUSE\nPORTFOLIO: p1")
+        body = build_reply_body(ok, outcome="ERROR", reason="disk full")
+        assert "ERROR" in body
+        assert "disk full" in body
+
+    def test_error_outcome_falls_back_to_result_error_when_no_reason_given(self):
+        bad = parse_command("evil@x.com", TRUSTED, "ACTION: PAUSE\nPORTFOLIO: p1")
+        body = build_reply_body(bad, outcome="ERROR")
+        assert "ERROR" in body
+        assert "trusted sender" in body  # from result.error, the fallback
+
 
 class TestFailSafeBehavior:
     """
@@ -425,3 +477,55 @@ class TestReplyCascadeGuard:
         assert results[0].success is False
         assert len(replies) == 1
         assert len(logged) == 1
+
+
+class _FailingIMAPConnection:
+    """A connection that raises the moment it's used, standing in for a real IMAP
+    connection/login/search failure (server down, bad credentials, network error)."""
+
+    def login(self, user, password):
+        raise ConnectionError("could not connect to IMAP server")
+
+
+class TestPollLevelError:
+    """
+    A failure INSIDE poll_and_process_commands()'s own try block (connection/fetch
+    failure, before any message is even parsed) previously vanished into a single
+    logger.error() call, no audit-log row, no email, even though this is exactly the
+    kind of failure an operator needs to know about, commands silently stop being
+    processed otherwise. Distinct from a REJECTED command: there may be no specific
+    sender/message to attribute it to (the failure can happen before fetching anything).
+    """
+
+    def test_imap_failure_logs_error_and_sends_one_reply(self, monkeypatch):
+        monkeypatch.setattr(imaplib, "IMAP4_SSL", lambda host: _FailingIMAPConnection())
+        logged = []
+        monkeypatch.setattr(email_commands_module, "log_command_attempt",
+                             lambda sender, result, **kw: logged.append((sender, result, kw)))
+        replies = []
+
+        results = poll_and_process_commands(
+            "imap.example.com", "trader@example.com", "pw", "trader@example.com",
+            send_reply_fn=lambda to_addr, subject, body: replies.append((to_addr, subject, body)),
+        )
+
+        assert results == []
+        assert len(logged) == 1
+        sender, result, kwargs = logged[0]
+        assert kwargs.get("outcome") == "ERROR"
+        assert result.raw_action == "POLL_ERROR"
+        assert "could not connect" in result.error
+        assert len(replies) == 1
+        to_addr, subject, body = replies[0]
+        assert to_addr == "trader@example.com"  # the trusted sender, no other target known
+        assert "ERROR" in subject
+        assert "could not connect" in body
+
+    def test_imap_failure_with_no_reply_fn_does_not_raise(self, monkeypatch):
+        monkeypatch.setattr(imaplib, "IMAP4_SSL", lambda host: _FailingIMAPConnection())
+
+        results = poll_and_process_commands(
+            "imap.example.com", "trader@example.com", "pw", "trader@example.com",
+        )  # send_reply_fn defaults to None
+
+        assert results == []

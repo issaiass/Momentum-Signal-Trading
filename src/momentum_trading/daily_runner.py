@@ -54,6 +54,7 @@ from .interfaces.notifications import (
 from .interfaces.email_commands import (
     poll_and_process_commands, PauseCommand, ResumeCommand, LiquidateCommand,
     SkipRebalanceCommand, StatusCommand, SetMaxDrawdownCommand, AlertsReportCommand,
+    log_command_attempt, build_reply_body,
 )
 from .core import functions_quant_extensions as fnx
 
@@ -204,6 +205,21 @@ def validate_config_schema(raw: dict, path: str) -> None:
             f"notifications.send_warning: must be true/false, got {send_warning!r} "
             f"({type(send_warning).__name__}), a non-boolean value here can silently "
             f"enable or disable capital-safety warning emails against your intent."
+        )
+
+    # --- notifications.send_email_command_feedback must be a real bool if present, same
+    #     YAML-truthiness footgun as send_warning above, this one gates the
+    #     ACCEPTED/REJECTED/ERROR reply emails for email-commanded remote actions. ---
+    send_email_command_feedback = (
+        raw.get("notifications", {}).get("send_email_command_feedback")
+        if isinstance(raw.get("notifications"), dict) else None
+    )
+    if send_email_command_feedback is not None and not isinstance(send_email_command_feedback, bool):
+        errors.append(
+            f"notifications.send_email_command_feedback: must be true/false, got "
+            f"{send_email_command_feedback!r} ({type(send_email_command_feedback).__name__}), "
+            f"a non-boolean value here can silently enable or disable email-command feedback "
+            f"replies against your intent."
         )
 
     if errors:
@@ -364,7 +380,8 @@ def _resume_trading_with_alert(name: str) -> None:
     resume_trading(name, alert_fn=send_alert_email)
 
 
-def check_and_apply_email_commands(portfolio_names: list[str], ibkr_port: int, dry_run: bool) -> None:
+def check_and_apply_email_commands(portfolio_names: list[str], ibkr_port: int, dry_run: bool,
+                                     send_email_command_feedback: bool = True) -> None:
     """
     Polls for commands from the trusted sender and applies the ones that are
     safe to auto-apply (PAUSE/RESUME reuse the existing circuit-breaker halt
@@ -376,6 +393,11 @@ def check_and_apply_email_commands(portfolio_names: list[str], ibkr_port: int, d
     applying it deliberately (LIQUIDATE via a manual place_orders_ibkr call,
     ADJUST_PARAM via editing config.yaml with the validated value) rather
     than a fully automatic pipeline.
+
+    send_email_command_feedback : gates ACCEPTED/REJECTED/ERROR reply EMAILS
+    only (notifications.send_email_command_feedback in config.yaml). Every
+    attempt is still logged to logs/email_commands_log.csv regardless, see
+    log_command_attempt().
 
     Requires IMAP_HOST, IMAP_USER, IMAP_PASS, TRUSTED_SENDER_EMAIL env vars.
     Silently does nothing if unconfigured (email commands are opt-in).
@@ -396,8 +418,15 @@ def check_and_apply_email_commands(portfolio_names: list[str], ibkr_port: int, d
             "docs/EMAIL_COMMANDS.md) but noisy; a dedicated inbox for IMAP_USER avoids it entirely."
         )
 
-    def _reply(to_addr, subject, body):
+    def _maybe_send(subject, body):
+        if not send_email_command_feedback:
+            logger.info("Email command feedback suppressed (send_email_command_feedback: "
+                        "false): %s", subject)
+            return
         send_alert_email(subject, body)  # reuses existing SMTP reply path
+
+    def _reply(to_addr, subject, body):
+        _maybe_send(subject, body)
 
     results = poll_and_process_commands(imap_host, imap_user, imap_password, trusted_sender,
                                          send_reply_fn=_reply, dry_run=dry_run)
@@ -428,7 +457,7 @@ def check_and_apply_email_commands(portfolio_names: list[str], ibkr_port: int, d
                 )
             else:
                 report_body = f"No alerts recorded for '{cmd.portfolio}' as of {datetime.now().isoformat()}."
-            send_alert_email(f"ALERTS_REPORT: {cmd.portfolio}", report_body)
+            _maybe_send(f"ALERTS_REPORT: {cmd.portfolio}", report_body)
             logger.info("ALERTS_REPORT reply sent via email command (portfolio=%s, limit=%d, rows=%d).",
                         cmd.portfolio, cmd.limit, len(rows))
             continue
@@ -439,61 +468,76 @@ def check_and_apply_email_commands(portfolio_names: list[str], ibkr_port: int, d
                 logger.warning("Email command referenced unknown portfolio %r, skipped.", name)
                 continue
 
-            if isinstance(cmd, PauseCommand):
-                if dry_run:
-                    logger.info("[%s] DRY-RUN: would PAUSE via email command (not applied).", name)
-                    continue
-                LOCK_DIR.mkdir(exist_ok=True)
-                _halt_flag_path(name).write_text(f"{datetime.now().isoformat()} | email command: PAUSE")
-                logger.info("[%s] PAUSED via email command.", name)
-            elif isinstance(cmd, ResumeCommand):
-                if dry_run:
-                    logger.info("[%s] DRY-RUN: would RESUME via email command (not applied).", name)
-                    continue
-                _resume_trading_with_alert(name)
-            elif isinstance(cmd, SkipRebalanceCommand):
-                if dry_run:
-                    logger.info("[%s] DRY-RUN: would SKIP next rebalance via email command (not applied).", name)
-                    continue
-                LOCK_DIR.mkdir(exist_ok=True)
-                _skip_next_flag_path(name).write_text(datetime.now().isoformat())
-                logger.info("[%s] Next rebalance will be SKIPPED via email command.", name)
-            elif isinstance(cmd, StatusCommand):
-                # read-only, safe to reply even in dry-run, nothing is applied
-                snap = get_latest_snapshot(name)
-                halted = _halt_flag_path(name).exists()
-                status_body = (
-                    f"Status for '{name}' as of {datetime.now().isoformat()}\n\n"
-                    f"Circuit breaker halted: {halted}\n"
-                    f"Latest snapshot: {snap if snap else 'no snapshot recorded yet'}"
-                )
-                send_alert_email(f"STATUS: {name}", status_body)
-                logger.info("[%s] STATUS reply sent via email command.", name)
-            elif isinstance(cmd, SetMaxDrawdownCommand):
-                if dry_run:
-                    logger.info("[%s] DRY-RUN: would set max_drawdown override to %.2f%% via email "
-                               "(not applied).", name, cmd.new_value * 100)
-                    continue
-                LOCK_DIR.mkdir(exist_ok=True)
-                _max_drawdown_override_path(name).write_text(str(cmd.new_value))
-                logger.info("[%s] max_portfolio_drawdown_pct override set to %.2f%% via email "
-                           "(tightening-only, effective value is min(config, override)).",
-                           name, cmd.new_value * 100)
-                send_alert_email(
-                    f"Drawdown override applied: {name}",
-                    f"max_portfolio_drawdown_pct override set to {cmd.new_value:.1%} for '{name}'.\n"
-                    f"This can only TIGHTEN the effective threshold, never loosen it, the actual "
-                    f"breaker will use whichever of config.yaml's value or this override is smaller.",
-                )
-            else:
-                # LIQUIDATE / ADJUST_PARAM / TRIGGER_REPORT: flagged for manual
-                # follow-through rather than auto-applied, see docstring.
-                logger.warning("[%s] Email command %s parsed successfully but requires MANUAL "
-                               "follow-through (not auto-applied): %s", name, cmd.action, cmd)
-                send_alert_email(
-                    f"Email command needs manual action: {cmd.action} ({name})",
-                    f"Command parsed and validated successfully but is not auto-applied.\n"
-                    f"Action: {cmd.action}\nPortfolio: {name}\n\nReview and apply manually.",
+            try:
+                if isinstance(cmd, PauseCommand):
+                    if dry_run:
+                        logger.info("[%s] DRY-RUN: would PAUSE via email command (not applied).", name)
+                        continue
+                    LOCK_DIR.mkdir(exist_ok=True)
+                    _halt_flag_path(name).write_text(f"{datetime.now().isoformat()} | email command: PAUSE")
+                    logger.info("[%s] PAUSED via email command.", name)
+                elif isinstance(cmd, ResumeCommand):
+                    if dry_run:
+                        logger.info("[%s] DRY-RUN: would RESUME via email command (not applied).", name)
+                        continue
+                    _resume_trading_with_alert(name)
+                elif isinstance(cmd, SkipRebalanceCommand):
+                    if dry_run:
+                        logger.info("[%s] DRY-RUN: would SKIP next rebalance via email command (not applied).", name)
+                        continue
+                    LOCK_DIR.mkdir(exist_ok=True)
+                    _skip_next_flag_path(name).write_text(datetime.now().isoformat())
+                    logger.info("[%s] Next rebalance will be SKIPPED via email command.", name)
+                elif isinstance(cmd, StatusCommand):
+                    # read-only, safe to reply even in dry-run, nothing is applied
+                    snap = get_latest_snapshot(name)
+                    halted = _halt_flag_path(name).exists()
+                    status_body = (
+                        f"Status for '{name}' as of {datetime.now().isoformat()}\n\n"
+                        f"Circuit breaker halted: {halted}\n"
+                        f"Latest snapshot: {snap if snap else 'no snapshot recorded yet'}"
+                    )
+                    _maybe_send(f"STATUS: {name}", status_body)
+                    logger.info("[%s] STATUS reply sent via email command.", name)
+                elif isinstance(cmd, SetMaxDrawdownCommand):
+                    if dry_run:
+                        logger.info("[%s] DRY-RUN: would set max_drawdown override to %.2f%% via email "
+                                   "(not applied).", name, cmd.new_value * 100)
+                        continue
+                    LOCK_DIR.mkdir(exist_ok=True)
+                    _max_drawdown_override_path(name).write_text(str(cmd.new_value))
+                    logger.info("[%s] max_portfolio_drawdown_pct override set to %.2f%% via email "
+                               "(tightening-only, effective value is min(config, override)).",
+                               name, cmd.new_value * 100)
+                    _maybe_send(
+                        f"Drawdown override applied: {name}",
+                        f"max_portfolio_drawdown_pct override set to {cmd.new_value:.1%} for '{name}'.\n"
+                        f"This can only TIGHTEN the effective threshold, never loosen it, the actual "
+                        f"breaker will use whichever of config.yaml's value or this override is smaller.",
+                    )
+                else:
+                    # LIQUIDATE / ADJUST_PARAM / TRIGGER_REPORT: flagged for manual
+                    # follow-through rather than auto-applied, see docstring.
+                    logger.warning("[%s] Email command %s parsed successfully but requires MANUAL "
+                                   "follow-through (not auto-applied): %s", name, cmd.action, cmd)
+                    _maybe_send(
+                        f"Email command needs manual action: {cmd.action} ({name})",
+                        f"Command parsed and validated successfully but is not auto-applied.\n"
+                        f"Action: {cmd.action}\nPortfolio: {name}\n\nReview and apply manually.",
+                    )
+            except Exception as e:
+                # Isolated to THIS command/portfolio only, deliberately not re-raised, one
+                # command's apply failure must not abort every OTHER command still queued in
+                # this same batch (a single poll can return several results, and one command
+                # can target several portfolios via PORTFOLIO: ALL). An earlier ACCEPTED
+                # reply may already have promised this would be applied; it wasn't (or
+                # wasn't fully), so this is recorded as its own ERROR row in the SAME audit
+                # trail as ACCEPTED/REJECTED, not just daily_runner.py's own log stream.
+                logger.error("[%s] Email command %s failed to APPLY: %s", name, cmd.action, e)
+                log_command_attempt(result.sender, result, outcome="ERROR", reason=str(e))
+                _maybe_send(
+                    f"Email command APPLY ERROR: {cmd.action} ({name})",
+                    build_reply_body(result, outcome="ERROR", reason=str(e)),
                 )
 
 
@@ -731,7 +775,10 @@ def main():
 
     # --- Check for and apply email commands (opt-in, silent no-op if unconfigured) ---
     try:
-        check_and_apply_email_commands(list(portfolios.keys()), args.port, dry_run=not args.live)
+        check_and_apply_email_commands(
+            list(portfolios.keys()), args.port, dry_run=not args.live,
+            send_email_command_feedback=notification_cfg.get("send_email_command_feedback", True),
+        )
     except Exception as e:
         logger.warning("Email command check failed (non-fatal, continuing with normal run): %s", e)
 

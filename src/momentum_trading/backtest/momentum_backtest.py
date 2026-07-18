@@ -90,6 +90,18 @@ class BacktestConfig:
                                              # non-blocking WARNING (see
                                              # is_lookback_period_too_short()), a momentum signal
                                              # that short is genuinely noisy.
+    skip_month_guardrail: bool = False      # LIVE-ONLY, the "Skip-Month" guardrail (classic
+                                             # academic "12-1 momentum" construction): when True
+                                             # AND lookback_period > 3 (months) AND
+                                             # holding_period >= 1 (monthly regime, this is
+                                             # inherently a monthly-lookback concept), the most
+                                             # recent ~month is excluded from the momentum
+                                             # ranking window, to avoid short-term reversal decay.
+                                             # Default False, deliberately opt-in: enabling it
+                                             # changes what the SAME lookback_period actually
+                                             # picks each rebalance, a real signal-construction
+                                             # change, not just a new warning. See
+                                             # execution/live_signal.py's resolve_momentum_scores().
     initial_capital: float = 100_000.0
     commission: float = 0.0                 # flat $ per trade, BACKTEST-ONLY: only
                                              # run_risk_managed_backtest()'s simulated cash
@@ -106,7 +118,23 @@ class BacktestConfig:
     portfolio_vol_lookback: int = 21        # trailing window to estimate realized vol
     max_gross_exposure: float = 1.0         # never lever above 100% invested
     min_gross_exposure: float = 0.20        # floor so we don't fully flatline
-    max_position_weight: float = 0.35       # single-name cap
+    max_position_weight: float = 0.35       # single-name cap, FLAT, identical for every ticker
+                                             # regardless of that ticker's own volatility
+    position_vol_budget: float | None = None  # the "Volatility-Adjustment" (Scaling) constraint:
+                                             # None (default) = disabled. When set, each
+                                             # position is ALSO capped at
+                                             # position_vol_budget / asset_vol (that ticker's own
+                                             # trailing realized vol, same vol_lookback_days
+                                             # window inverse-vol sizing already uses), whichever
+                                             # of that or max_position_weight above is more
+                                             # restrictive wins. Complementary to, not redundant
+                                             # with, max_position_weight: a low-vol name can be
+                                             # allowed a larger weight than a high-vol name even
+                                             # under the same flat cap. Never allows a single
+                                             # position's vol contribution to exceed this budget,
+                                             # regardless of how strong the momentum signal is.
+                                             # See backtest/momentum_backtest.py's
+                                             # _apply_volatility_budget_caps().
     stop_loss_pct: float = 0.12             # per-position stop from entry price
     use_regime_filter: bool = True
     regime_benchmark: str = "SPY"
@@ -120,6 +148,15 @@ class BacktestConfig:
     # --- turnover / cost control ---
     drift_threshold: float = 0.03           # only trade a name if |target_w - current_w| exceeds this
     min_trade_size: float = 50.0            # skip any trade below this $ notional
+    max_turnover_pct: float = 0.20          # LIVE-ONLY advisory (non-blocking WARNING) threshold
+                                             # for the "Turnover Limit" constraint:
+                                             # Total_Positions_Changed / Total_Positions per
+                                             # rebalance (execution/live_signal.py's
+                                             # compute_turnover()/is_turnover_too_high()), a
+                                             # position-COUNT ratio, distinct from
+                                             # drift_threshold/min_trade_size above, which are
+                                             # dollar-value filters. High turnover is a sign the
+                                             # momentum ranking is over-sensitive to noise.
 
     # --- cash flow simulation ---
     monthly_contribution: float = 0.0       # $ added to cash at each rebalance date (0 = off)
@@ -213,6 +250,8 @@ class BacktestConfig:
             errors.append(f"drift_threshold ({self.drift_threshold}) must be >= 0")
         if self.min_trade_size < 0:
             errors.append(f"min_trade_size ({self.min_trade_size}) must be >= 0")
+        if not (0 < self.max_turnover_pct <= 1.0):
+            errors.append(f"max_turnover_pct ({self.max_turnover_pct}) should be in (0, 1.0]")
         if self.aggregate_drift_threshold < 0:
             errors.append(f"aggregate_drift_threshold ({self.aggregate_drift_threshold}) must be >= 0")
         if not (0 <= self.max_portfolio_drawdown_pct < 1.0):
@@ -229,6 +268,8 @@ class BacktestConfig:
             errors.append(f"commission ({self.commission}) must be >= 0")
         if self.target_portfolio_vol <= 0:
             errors.append(f"target_portfolio_vol ({self.target_portfolio_vol}) must be > 0")
+        if self.position_vol_budget is not None and self.position_vol_budget <= 0:
+            errors.append(f"position_vol_budget ({self.position_vol_budget}) must be > 0 or None")
         if not (0 <= self.correlation_penalty_strength <= 1.0):
             errors.append(f"correlation_penalty_strength ({self.correlation_penalty_strength}) should be in [0, 1.0]")
         if self.liquidity_stress_multiplier < 1.0:
@@ -442,7 +483,13 @@ def resolve_target_weights(
                 weights, daily_prices, as_of, cfg.correlation_lookback_days, cfg.correlation_penalty_strength
             )
 
-    return _apply_position_caps(weights, cfg.max_position_weight)
+    weights = _apply_position_caps(weights, cfg.max_position_weight)
+    if cfg.position_vol_budget is not None:
+        weights = _apply_volatility_budget_caps(
+            weights, daily_prices, as_of, cfg.vol_lookback_days,
+            cfg.position_vol_budget, cfg.max_position_weight,
+        )
+    return weights
 
 
 def _trading_days(prices: pd.DataFrame, exchange: str) -> pd.DatetimeIndex:
@@ -495,6 +542,57 @@ def _apply_position_caps(weights: dict, max_weight: float) -> dict:
         for t in over:
             weights[t] = max_weight
         under = {t: w for t, w in weights.items() if w < max_weight}
+        under_sum = sum(under.values())
+        if under_sum <= 0:
+            break
+        for t in under:
+            weights[t] += excess * (weights[t] / under_sum)
+    total = sum(weights.values())
+    if total > 0:
+        weights = {t: w / total for t, w in weights.items()}
+    return weights
+
+
+def _apply_volatility_budget_caps(
+    weights: dict, daily_prices: pd.DataFrame, as_of: pd.Timestamp, lookback: int,
+    position_vol_budget: float, max_position_weight: float,
+) -> dict:
+    """
+    The "Volatility-Adjustment" (Scaling) constraint: caps each position at
+    min(max_position_weight, position_vol_budget / asset_vol), never allowing a single
+    position to exceed its own volatility budget regardless of how strong the momentum signal
+    is. Complementary to, not redundant with, _apply_position_caps()'s flat max_position_weight
+    cap, that one is identical for every ticker regardless of its own volatility, this one
+    varies per ticker, a low-vol name can be allowed a larger weight than a high-vol name even
+    under the same flat cap. Reuses the same trailing-vol window _inverse_vol_weights() computes
+    (window[valid].pct_change().std() over `lookback` trading days), so "asset volatility" means
+    the same thing throughout this module. Same iterative cap-and-redistribute approximation
+    _apply_position_caps() already uses (not a full LP solve), per-ticker caps instead of one
+    global scalar. Only called when cfg.position_vol_budget is not None.
+    """
+    tickers = list(weights.keys())
+    window = daily_prices.loc[:as_of].iloc[-(lookback + 1):]
+    valid = [t for t in tickers if t in window.columns]
+    vol = window[valid].pct_change().dropna(how="all").std() if valid else pd.Series(dtype=float)
+
+    caps = {}
+    for t in tickers:
+        asset_vol = vol.get(t) if t in vol.index else None
+        if asset_vol is None or pd.isna(asset_vol) or asset_vol <= 0:
+            # undefined vol (e.g. brand-new listing), fall back to the flat cap
+            caps[t] = max_position_weight
+        else:
+            caps[t] = min(max_position_weight, position_vol_budget / asset_vol)
+
+    weights = dict(weights)
+    for _ in range(10):
+        over = {t: w for t, w in weights.items() if w > caps.get(t, max_position_weight)}
+        if not over:
+            break
+        excess = sum(w - caps[t] for t, w in over.items())
+        for t in over:
+            weights[t] = caps[t]
+        under = {t: w for t, w in weights.items() if w < caps.get(t, max_position_weight)}
         under_sum = sum(under.values())
         if under_sum <= 0:
             break

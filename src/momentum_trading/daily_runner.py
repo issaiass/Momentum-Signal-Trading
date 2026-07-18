@@ -28,6 +28,8 @@ import pandas as pd
 
 from .execution.live_signal import (
     is_rebalance_day, is_holding_period_too_frequent, is_lookback_period_too_short,
+    is_lookback_shorter_than_holding, is_lookback_to_holding_ratio_too_low,
+    compute_turnover, is_turnover_too_high,
     run, run_multi_portfolio,
     get_ibkr_positions, get_ibkr_account_value, with_retry,
     place_orders_ibkr, log_orders, write_portfolio_snapshot, get_latest_snapshot,
@@ -812,6 +814,70 @@ def main():
                     plain_text_fallback=lookback_period_text,
                 )
 
+            # --- Momentum Persistence constraint (non-blocking): lookback_period must be
+            #     strictly older than holding_period (in the same regime-appropriate unit),
+            #     otherwise a position is held based on already-stale signal dynamics. ---
+            if is_lookback_shorter_than_holding(cfg.lookback_period, cfg.holding_period):
+                logger.warning(
+                    "[%s] lookback_period=%s is not older than holding_period=%s "
+                    "(Momentum Persistence constraint), not recommended.",
+                    name, cfg.lookback_period, cfg.holding_period,
+                )
+                log_alert(
+                    name, "MOMENTUM_PERSISTENCE_VIOLATION", "WARNING",
+                    f"lookback_period={cfg.lookback_period} is not older than "
+                    f"holding_period={cfg.holding_period}.",
+                    log_path=ALERTS_LOG_PATH,
+                )
+                persistence_text = (
+                    f"Portfolio '{name}' is configured with lookback_period={cfg.lookback_period} "
+                    f"and holding_period={cfg.holding_period}: the momentum signal is not older "
+                    f"than the period you intend to hold the resulting position.\n\n"
+                    f"This is not recommended (the \"Momentum Persistence\" constraint): a signal "
+                    f"must be older than your holding period, otherwise you're holding assets "
+                    f"based on signal dynamics that are already stale by the time you exit. This "
+                    f"run is proceeding normally, nothing was blocked, but consider increasing "
+                    f"lookback_period relative to holding_period. See docs/RISK_CONSTRAINTS.md."
+                )
+                send_action_email(
+                    NotificationCategory.WARNING, f"Momentum Persistence constraint violated: {name}",
+                    f"<pre>{persistence_text}</pre>", notification_cfg,
+                    plain_text_fallback=persistence_text,
+                )
+
+            # --- Lookback-to-Hold Ratio constraint (non-blocking): lookback_period / holding_period
+            #     below 3 risks "whipsawing", the position gets exited/re-entered based on noise
+            #     within a lookback window barely longer than the holding period. Deliberately
+            #     independent of the Momentum Persistence check above, not suppressed when that
+            #     one already fired. ---
+            if is_lookback_to_holding_ratio_too_low(cfg.lookback_period, cfg.holding_period):
+                logger.warning(
+                    "[%s] lookback_period=%s / holding_period=%s ratio is below 3 "
+                    "(Lookback-to-Hold Ratio constraint), risks whipsawing.",
+                    name, cfg.lookback_period, cfg.holding_period,
+                )
+                log_alert(
+                    name, "LOOKBACK_TO_HOLD_RATIO_TOO_LOW", "WARNING",
+                    f"lookback_period={cfg.lookback_period} / holding_period={cfg.holding_period} "
+                    f"ratio is below 3.",
+                    log_path=ALERTS_LOG_PATH,
+                )
+                ratio_text = (
+                    f"Portfolio '{name}' is configured with lookback_period={cfg.lookback_period} "
+                    f"and holding_period={cfg.holding_period}, a lookback-to-holding ratio below "
+                    f"3.\n\n"
+                    f"This is not recommended (the \"Lookback-to-Hold Ratio\" constraint): for "
+                    f"stable momentum, the signal's history should be meaningfully longer than "
+                    f"the trade duration, a ratio below 3 risks whipsawing. This run is "
+                    f"proceeding normally, nothing was blocked, but consider a larger "
+                    f"lookback_period relative to holding_period. See docs/RISK_CONSTRAINTS.md."
+                )
+                send_action_email(
+                    NotificationCategory.WARNING, f"Lookback-to-Hold Ratio too low: {name}",
+                    f"<pre>{ratio_text}</pre>", notification_cfg,
+                    plain_text_fallback=ratio_text,
+                )
+
             # --- item 1: real positions from IBKR, never local memory. total_value comes
             #     from resolved_total_values, resolved once above the loop. ---
             if args.live:
@@ -956,6 +1022,38 @@ def main():
                     alerts_log_path=ALERTS_LOG_PATH,
                 )
                 mark_ran_today(f"rebalance_{name}")
+
+                # --- Turnover Limit constraint (non-blocking): Total_Positions_Changed /
+                #     Total_Positions for this rebalance, high turnover is a sign the momentum
+                #     ranking is over-sensitive to noise rather than tracking a persistent
+                #     trend. Only meaningful on an actual rebalance (orders_result is {} when
+                #     AGGREGATE_DRIFT_SKIP fired, compute_turnover({}) correctly returns 0.0). ---
+                turnover = compute_turnover(orders_result)
+                if is_turnover_too_high(turnover, cfg.max_turnover_pct):
+                    logger.warning(
+                        "[%s] turnover=%.1f%% exceeds max_turnover_pct=%.1f%% "
+                        "(Turnover Limit constraint), flagged for review.",
+                        name, turnover * 100, cfg.max_turnover_pct * 100,
+                    )
+                    log_alert(
+                        name, "TURNOVER_TOO_HIGH", "WARNING",
+                        f"turnover={turnover:.2%} exceeds max_turnover_pct={cfg.max_turnover_pct:.2%}.",
+                        log_path=ALERTS_LOG_PATH,
+                    )
+                    turnover_text = (
+                        f"Portfolio '{name}' rebalanced with turnover={turnover:.2%} "
+                        f"(Total_Positions_Changed / Total_Positions), exceeding the configured "
+                        f"max_turnover_pct={cfg.max_turnover_pct:.2%}.\n\n"
+                        f"This is flagged for review (the \"Turnover Limit\" constraint): high "
+                        f"turnover is almost always a sign of an over-sensitive signal. This run "
+                        f"is proceeding normally, nothing was blocked. See "
+                        f"docs/RISK_CONSTRAINTS.md."
+                    )
+                    send_action_email(
+                        NotificationCategory.WARNING, f"Turnover too high: {name}",
+                        f"<pre>{turnover_text}</pre>", notification_cfg,
+                        plain_text_fallback=turnover_text,
+                    )
 
                 # --- STANDARD-category notification (filterable) ---
                 if orders_result:

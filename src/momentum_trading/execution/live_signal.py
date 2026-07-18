@@ -135,6 +135,49 @@ def is_lookback_period_too_short(lookback_period: float, holding_period: float) 
     return weeks_lookback < 2
 
 
+def _lookback_and_holding_in_common_unit(lookback_period: float, holding_period: float) -> tuple[float, float]:
+    """
+    Expresses lookback_period and holding_period in the SAME unit, weeks (via round(x * 4)) in
+    the weekly regime (holding_period < 1), months directly otherwise, exactly matching
+    resolve_momentum_scores()'s own regime-based interpretation of lookback_period. Shared by
+    is_lookback_shorter_than_holding() and is_lookback_to_holding_ratio_too_low() so both
+    constraints compare the same two numbers the signal calculation itself actually uses,
+    never a separate unit-conversion convention that could drift out of sync with it.
+    """
+    if holding_period < 1:
+        return max(1, round(lookback_period * 4)), max(1, round(holding_period * 4))
+    return lookback_period, holding_period
+
+
+def is_lookback_shorter_than_holding(lookback_period: float, holding_period: float) -> bool:
+    """
+    The "Momentum Persistence" constraint: a signal must be older than the period you intend to
+    hold the asset, if lookback_period is not strictly greater than holding_period (in the same
+    regime-appropriate unit), you're holding a position based on signal dynamics that are
+    already stale by the time you exit. Equality counts as a violation ("older than", not "at
+    least as old as").
+    """
+    lookback, holding = _lookback_and_holding_in_common_unit(lookback_period, holding_period)
+    return lookback <= holding
+
+
+def is_lookback_to_holding_ratio_too_low(lookback_period: float, holding_period: float) -> bool:
+    """
+    The "Lookback-to-Hold Ratio" constraint: for stable momentum, the signal's history should be
+    meaningfully longer than the trade duration, academic convention is roughly 3-12x. A ratio
+    below 3 risks "whipsawing", the position gets exited/re-entered based on noise within a
+    lookback window barely longer than the holding period itself, rather than a persistent
+    trend. Deliberately independent of is_lookback_shorter_than_holding(), not suppressed when
+    that one already fired (a ratio < 1 trips both), matching this module's existing precedent
+    of non-deduplicated advisory checks (e.g. is_holding_period_too_frequent() and
+    is_lookback_period_too_short() can also both fire for the same misconfiguration). Only the
+    low end is checked, warranted by the whipsaw rationale, there's no stated reason a high
+    ratio is itself a problem.
+    """
+    lookback, holding = _lookback_and_holding_in_common_unit(lookback_period, holding_period)
+    return (lookback / holding) < 3
+
+
 def is_rebalance_day(holding_period_months: float = 1, exchange: str = "NYSE",
                       reference_day_of_month: int = 1,
                       today: pd.Timestamp | None = None) -> bool:
@@ -204,6 +247,7 @@ def calculate_period_returns(df_prices: pd.DataFrame, period: int = 12) -> pd.Da
 
 def resolve_momentum_scores(
     daily_prices: pd.DataFrame, lookback_period: float, holding_period: float,
+    skip_month_guardrail: bool = False,
 ) -> pd.DataFrame:
     """
     Resamples daily_prices to the granularity matching the strategy's cadence and computes
@@ -218,16 +262,25 @@ def resolve_momentum_scores(
     lookback_period's granularity to holding_period's regime rather than lookback_period's own
     value, so a short-term (weekly) strategy's lookback window is expressed on the SAME
     week-scale as its rebalance cadence, not mixed months/weeks, lookback_period=1.0 under a
-    weekly holding_period means "4 weeks", not "1 month".
+    weekly holding_period means "4 weeks", not "1 month". skip_month_guardrail is ignored in
+    this branch, it's inherently a monthly-lookback concept (see below).
 
     holding_period >= 1 (monthly+ cadence) resamples to MONTHLY exactly as before,
-    lookback_period stays in whole months, this branch is byte-for-byte the existing behavior.
+    lookback_period stays in whole months, this branch is byte-for-byte the existing behavior
+    UNLESS skip_month_guardrail is True and lookback_period > 3: then the monthly-resampled
+    series is shifted back one bar (excluding the most recent ~month) before computing the
+    trailing return, the classic academic "12-1 momentum" construction, avoiding short-term
+    reversal decay. This is an approximation of a 21-trading-day lag (one monthly-resampled
+    bar), not a literal daily-granularity shift, documented explicitly rather than overclaiming
+    precision. Default False, a no-op when lookback_period <= 3 even if True.
     """
     if holding_period < 1:
         weeks_lookback = max(1, round(lookback_period * 4))
         resampled = daily_prices.resample("W").last()
         return calculate_period_returns(resampled, period=weeks_lookback)
     monthly_prices = daily_prices.resample("ME").last()
+    if skip_month_guardrail and lookback_period > 3:
+        monthly_prices = monthly_prices.shift(1)
     return calculate_period_returns(monthly_prices, period=max(1, round(lookback_period)))
 
 
@@ -492,6 +545,33 @@ def generate_orders(
             orders[t] = _with_context({"action": action, "shares": shares, "reason": f"drift ${drift_dollar:,.2f}"}, t)
 
     return orders
+
+
+def compute_turnover(orders: dict) -> float:
+    """
+    The "Turnover Limit" constraint: Total_Positions_Changed / Total_Positions for this
+    rebalance. Total_Positions is every ticker generate_orders() produced a decision for (the
+    union of currently-held and newly-targeted tickers, exactly orders.keys());
+    Total_Positions_Changed is the count where action is BUY or SELL, HOLD (including "no live
+    price available"/"below min_trade_size"/"within drift_threshold" holds) doesn't count as a
+    change. High turnover is a sign the momentum ranking is over-sensitive to noise rather than
+    tracking a persistent trend. Returns 0.0 for an empty dict (e.g. run()'s
+    AGGREGATE_DRIFT_SKIP early-return), correctly "no turnover" when nothing traded.
+    """
+    if not orders:
+        return 0.0
+    changed = sum(1 for o in orders.values() if o.get("action") in ("BUY", "SELL"))
+    return changed / len(orders)
+
+
+def is_turnover_too_high(turnover_pct: float, max_turnover_pct: float) -> bool:
+    """
+    True when a rebalance's turnover (see compute_turnover()) exceeds the configured
+    max_turnover_pct (BacktestConfig, default 0.20). A named function rather than an inline
+    comparison in daily_runner.py, for consistency with this module's other is_*_too_*
+    advisory-check functions.
+    """
+    return turnover_pct > max_turnover_pct
 
 
 # --------------------------------------------------------------------------- #
@@ -1445,7 +1525,9 @@ def run(
         logger.error("No price data returned; aborting.")
         return {}
 
-    scores = resolve_momentum_scores(daily_prices, lookback_period, cfg.holding_period).dropna(how="all")
+    scores = resolve_momentum_scores(
+        daily_prices, lookback_period, cfg.holding_period, cfg.skip_month_guardrail,
+    ).dropna(how="all")
     ranks = assign_ranks(scores)
     picks = get_top_etfs(ranks, top_n=top_n)
     logger.info("Today's signal picks (top %d): %s", top_n, picks)

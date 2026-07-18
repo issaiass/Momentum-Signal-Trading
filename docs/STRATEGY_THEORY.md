@@ -45,7 +45,11 @@ the academic literature guarantees it.
    3-12 month range the Jegadeesh and Titman study above actually validated, the classic
    literature doesn't cover momentum signals this short, this project's own walk-forward
    tooling hasn't specifically stress-tested it either. Treat short-term momentum as an
-   unvalidated variant, not an academically-backed alternative.
+   unvalidated variant, not an academically-backed alternative. Both regimes have several risk
+   constraints available, non-blocking advisory warnings (Momentum Persistence,
+   Lookback-to-Hold Ratio, Turnover Limit) and opt-in config toggles (the Skip-Month Guardrail,
+   a per-position Volatility-Adjustment budget), see `docs/RISK_CONSTRAINTS.md` for the full
+   list and exact thresholds.
 2. **Ranking**: all ETFs in the universe are ranked by that trailing return.
 3. **Selection**: the top `top_n` ranked ETFs become the month's picks, configurable via
    `config.yaml`'s `default_risk.top_n` (or per-portfolio `risk_overrides`), default 10,

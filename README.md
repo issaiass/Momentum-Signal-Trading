@@ -11,18 +11,33 @@ monthly, the bulk of the engineering is in making that simple idea safe to run u
 circuit breakers, idempotent scheduling, tamper-evident audit logs, email-commanded remote
 control, and a config-approval gate before any real order can be placed.
 
-Below is an illustrative backtest (2016–2026, real ETF price history, the project's own
-`run_custom_backtest()`) of the rotation strategy against a plain buy-and-hold SPY benchmark:
+Below is a real backtest (2006-2025, real ETF price history, the project's own
+`run_custom_backtest()`) of the rotation strategy against a plain buy-and-hold SPY benchmark,
+across three scenarios that vary signal concentration (`top_n`) and rebalance cadence
+(`holding_period`), the two structural dimensions this project's own research notebooks already
+study, not a search across many configs for a flattering one, see
+`notebooks/research/DHI0016_notebook3_full_backtest_IMPROVED.ipynb`'s "Multi-Scenario Equity
+Curve" cell for the exact reproducible source:
 
 <p align="center">
-<img src="docs/img/equity_curve.png?raw=true" alt="Momentum ETF rotation vs buy-and-hold SPY equity curve" width="85%"/>
+<img src="docs/img/equity_curve.png?raw=true" alt="Momentum ETF rotation scenarios vs buy-and-hold SPY equity curve" width="85%"/>
 </p>
 
-**Read this chart honestly, not optimistically:** in this window the strategy underperformed a
-naive buy-and-hold SPY position (CAGR 5.76% vs. SPY's own run, Sharpe 0.52, max drawdown -29%).
-That's not a bug being hidden, it's the whole point of the "Project Maturity & Safety" section
-below. This project is a well-tested *trading system*, not a proven *edge*, and the README says
-so on purpose.
+| Scenario | CAGR | Ann. Vol | Sharpe | Max Drawdown |
+|---|---|---|---|---|
+| Default (`top_n=10`, `holding_period=1`) | 6.79% | 10.17% | 0.70 | -27.48% |
+| Concentrated (`top_n=5`, `holding_period=1`) | 7.07% | 12.12% | 0.63 | -32.37% |
+| Concentrated + Quarterly (`top_n=5`, `holding_period=3`) | 6.64% | 12.19% | 0.59 | -22.03% |
+| SPY (buy-and-hold benchmark) | 10.67% | 15.20% | 0.75 | -50.78% |
+
+**Read this chart honestly, not optimistically:** none of these three scenarios beat SPY's raw
+CAGR or Sharpe over this ~19.6-year window, that's reported plainly here, not hidden. What
+concentration and cadence changes DO buy is meaningfully lower volatility and a substantially
+shallower max drawdown (-22% to -32% vs. SPY's -51%), consistent with this being a
+lower-volatility rotation strategy, not a return-maximizing one, at least in this backtest
+window. That's not a bug being hidden, it's the whole point of the "Project Maturity & Safety"
+section below. This project is a well-tested *trading system*, not a proven *edge*, and the
+README says so on purpose.
 
 **What's actually here:**
 - Risk-managed backtest engine, correlation-spike detection, liquidity-stress-aware slippage,
@@ -40,7 +55,10 @@ so on purpose.
   forward past weekends/holidays rather than firing on a fixed calendar date. Long-term
   (monthly-scale, the academically-studied default) or short-term (weekly-scale, an unvalidated
   variant) momentum lookback windows, both configurable via `holding_period`/`lookback_period`
-  in `config.example.yaml`
+  in `config.example.yaml`. Six long-term/short-term risk constraints (advisory warnings for
+  Momentum Persistence, Lookback-to-Hold Ratio, and Turnover Limit; opt-in config toggles for
+  the Skip-Month Guardrail and per-position Volatility-Adjustment budget), see
+  `docs/RISK_CONSTRAINTS.md`
 - Hash-chained, tamper-evident audit logs for trades, email commands, and alerts, three
   separate logs, kept deliberately apart
 - Categorized email notifications (CRITICAL/STANDARD/PERIODIC/DAILY/WARNING) and pydantic-
@@ -57,9 +75,18 @@ so on purpose.
   monthly report, 1-day/1/2/3-week for the daily report)
 - Dockerized, self-scheduling deployment (`docker compose up -d`, internal cron, no manual
   triggering needed for normal operation)
-- 373-test pytest suite covering code mechanics, order sizing, config validation, audit-log
+- 399-test pytest suite covering code mechanics, order sizing, config validation, audit-log
   integrity, multi-portfolio capital math, entirely on synthetic/mocked data, no live broker
   required to run it
+
+**Recommended config presets** (LIVE-ONLY, tunes `daily_runner.py`'s signal generation, has no
+effect on the backtest engine), warning-free starting points for each cadence, full field list
+and rationale in `docs/RISK_CONSTRAINTS.md`'s "Recommended Config Presets" section:
+
+| Preset | `holding_period` | `lookback_period` | `top_n` | Notes |
+|---|---|---|---|---|
+| Long-Term Momentum (Monthly) | `1` | `12` | `10` | Academically-studied default cadence |
+| Short-Term Momentum (Weekly) | `0.25` | `1.0` | `5` | Unvalidated variant, see `docs/STRATEGY_THEORY.md` |
 
 The project tree:
 
@@ -77,15 +104,20 @@ momentum-trading/
 │
 ├── docs/                          structural governance & operational guides
 │   ├── img/
-│   │   └── equity_curve.png        illustrative backtest chart, shown above
+│   │   ├── equity_curve.png        multi-scenario backtest vs SPY chart, shown above
+│   │   ├── momentum_winners_vs_losers.png   Notebook 1 EDA: top vs bottom decile evidence
+│   │   ├── momentum_win_rate_heatmap.png    Notebook 1 EDA: win rate by lookback/holding
+│   │   └── momentum_decile_returns.png      Notebook 1 EDA: avg forward return by decile
 │   ├── DEPLOYMENT.md               one-time setup on a new machine
 │   ├── RUNNING.md                  day-to-day run commands
 │   ├── TESTING.md                  how to run/interpret the test suite
 │   ├── STRATEGY_THEORY.md          momentum theory + worked numeric example
 │   ├── EMAIL_REPORTING.md          notification categories, monthly report config
 │   ├── EMAIL_COMMANDS.md           remote email commands: syntax, security model
-│   └── ALERT_LOG.md                alert log schema, every alert_type, how it differs
-│                                     from the trade log and email command log
+│   ├── ALERT_LOG.md                alert log schema, every alert_type, how it differs
+│   │                                 from the trade log and email command log
+│   └── RISK_CONSTRAINTS.md         long-term/short-term momentum risk constraints,
+│                                     advisory warnings and opt-in config toggles
 │
 ├── notebooks/
 │   ├── research/                  strategy design, signal research, backtesting
@@ -166,7 +198,7 @@ momentum-trading/
 │       └── email_diagnostics.py     backs `daily-runner --test-email`, live SMTP+IMAP
 │                                     check independent of config.yaml
 │
-└── tests/                         pytest suite (373 tests), mirrors src/ layout where a
+└── tests/                         pytest suite (399 tests), mirrors src/ layout where a
     ├── conftest.py                  test's primary subject is a single sub-package;
     ├── test_architecture.py         cross-cutting/integration tests stay at tests/ root
     ├── test_daily_runner.py
@@ -369,20 +401,55 @@ and multi-portfolio/Docker specifics live in `docs/RUNNING.md` and `docs/DEPLOYM
 | Configure/understand email notifications and monthly reports | `docs/EMAIL_REPORTING.md` |
 | Configure/understand email-commanded remote actions (PAUSE/RESUME/etc.) | `docs/EMAIL_COMMANDS.md` |
 | Understand the alert log (what's recorded, how it differs from the trade/email-command logs) | `docs/ALERT_LOG.md` |
+| Understand the long-term/short-term momentum risk constraints (turnover, skip-month, vol budget) | `docs/RISK_CONSTRAINTS.md` |
 
 </details>
 
 <details open>
 <summary> <b>Results<b></summary>
 
-The chart in "Brief Review" above is the current representative result: an illustrative
-backtest, real ETF price history, run through this project's own backtest engine, not a
-hand-tuned or cherry-picked window. As shown, the strategy has **not** beaten a plain
-buy-and-hold SPY position over 2016–2026 in this configuration. That is reported here
-deliberately, not hidden, and it's exactly why "Project Maturity & Safety" above draws a hard
-line between "this codebase is well-tested" and "this strategy is proven." Further validation
-(walk-forward, regime-conditional breakdown, out-of-sample holdout) is available via
-`core/functions_quant_extensions.py` and Notebook 1, see `docs/STRATEGY_THEORY.md`.
+The chart in "Brief Review" above is the current representative result: a real ETF price
+history backtest, run through this project's own backtest engine, not a hand-tuned or
+cherry-picked window. Further validation (walk-forward, regime-conditional breakdown,
+out-of-sample holdout) is available via `core/functions_quant_extensions.py` and Notebook 1, see
+`docs/STRATEGY_THEORY.md`.
+
+### Underlying Momentum Evidence (Notebook 1 EDA)
+
+The equity-curve chart above is this project's own backtested strategy scenarios against SPY,
+specific configurations' outcomes. The three charts below are a different, earlier kind of
+evidence: the classic academic cross-sectional momentum anomaly itself, measured directly on
+this project's own ETF universe and price history in `notebooks/research/
+DHI0016_notebook1_research_and_EDA_IMPROVED.ipynb`, before any of this project's own risk
+overlays, sizing, or execution logic are applied. Don't conflate the two, a real anomaly existing
+in this universe/history is not the same claim as "this project's specific live configuration
+beats SPY."
+
+<p align="center">
+<img src="docs/img/momentum_winners_vs_losers.png?raw=true" alt="Cumulative performance of top vs. bottom momentum deciles" width="80%"/>
+</p>
+
+**Winners vs. losers**: every month, ETFs are ranked into deciles by trailing 12-month return,
+this chart tracks the cumulative, indexed-to-100 performance of the top decile (recent winners)
+against the bottom decile (recent losers). The winner decile compounding visibly above the loser
+decile over time is the core cross-sectional momentum effect this whole strategy is built on.
+
+<p align="center">
+<img src="docs/img/momentum_win_rate_heatmap.png?raw=true" alt="Momentum win rate by lookback and holding period" width="80%"/>
+</p>
+
+**Does it hold across parameter choices?**: a lookback-period x holding-period grid, each cell is
+the percentage of months the top decile actually beat the bottom decile at that specific
+combination. A grid dominated by win rates comfortably above 2.06% across most combinations is
+evidence the effect isn't an artifact of one specific lookback/holding choice.
+
+<p align="center">
+<img src="docs/img/momentum_decile_returns.png?raw=true" alt="Average 1-month forward return by momentum decile" width="80%"/>
+</p>
+
+**The plainest picture**: average 1-month forward return by decile (12-month lookback), decile 1
+being the recent losers, decile 10 the recent winners. A roughly monotonic increase from decile
+1 to decile 10 is the textbook signature of the momentum anomaly.
 
 </details>
 

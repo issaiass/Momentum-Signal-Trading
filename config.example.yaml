@@ -78,17 +78,51 @@ default_risk:
                                    # lookback_period stays in whole months, unchanged from
                                    # above. Values shorter than 2 weeks in the weekly regime are
                                    # allowed but trigger a non-blocking WARNING, a momentum
-                                   # signal that short is genuinely noisy.
+                                   # signal that short is genuinely noisy. Two more non-blocking
+                                   # WARNINGs compare lookback_period against holding_period
+                                   # directly (in the same regime-appropriate unit): the
+                                   # "Momentum Persistence" constraint (lookback_period must be
+                                   # strictly older than holding_period) and the
+                                   # "Lookback-to-Hold Ratio" constraint (lookback_period /
+                                   # holding_period should be roughly >= 3, a lower ratio risks
+                                   # whipsawing). See docs/RISK_CONSTRAINTS.md.
+  skip_month_guardrail: false     # the "Skip-Month" guardrail (classic academic "12-1
+                                   # momentum" construction): when true AND lookback_period > 3
+                                   # (months) AND holding_period >= 1 (monthly regime only),
+                                   # excludes the most recent ~month from the momentum ranking
+                                   # window, to avoid short-term reversal decay. Default false,
+                                   # deliberately opt-in: enabling it changes what the SAME
+                                   # lookback_period actually picks each rebalance, a real
+                                   # signal-construction change, not just a new warning. See
+                                   # docs/RISK_CONSTRAINTS.md.
   commission: 0.0                 # flat $ commission charged per trade, BACKTEST-ONLY,
                                    # has no effect on --live (real commission is already
                                    # reflected in your broker's real account balance)
   drift_threshold: 0.03           # only trade a name if |target_weight - current_weight| exceeds this
                                    # (skips trivial rebalances that aren't worth the trading cost)
   min_trade_size: 25.0            # skip any single trade below this $ notional
+  max_turnover_pct: 0.20          # the "Turnover Limit" constraint (non-blocking WARNING):
+                                   # Total_Positions_Changed / Total_Positions per rebalance, a
+                                   # position-COUNT ratio, distinct from drift_threshold/
+                                   # min_trade_size above, which are dollar-value filters. e.g.
+                                   # 0.20 = flag for review if more than 20% of this rebalance's
+                                   # tickers got a real BUY/SELL. High turnover is almost always
+                                   # a sign of an over-sensitive signal.
   use_regime_filter: true         # true = skip new entries when regime_benchmark is below its SMA
   regime_benchmark: SPY           # benchmark ticker the regime filter checks against
   regime_sma_window: 150          # trading days in the regime filter's moving average
-  max_position_weight: 0.35       # single-name cap, e.g. 0.35 = no position over 35% of the book
+  max_position_weight: 0.35       # single-name cap, e.g. 0.35 = no position over 35% of the book,
+                                   # FLAT, identical for every ticker regardless of its own vol
+  position_vol_budget: null       # the "Volatility-Adjustment" (Scaling) constraint. null
+                                   # (default) = disabled. When set, each position is ALSO
+                                   # capped at position_vol_budget / that ticker's own trailing
+                                   # realized (daily, unannualized) volatility, whichever of
+                                   # that or max_position_weight above is more restrictive wins.
+                                   # Complementary to max_position_weight, not redundant: a
+                                   # low-vol name can be allowed a larger weight than a high-vol
+                                   # name even under the same flat cap. Never allows a single
+                                   # position's vol contribution to exceed this budget,
+                                   # regardless of how strong the momentum signal is.
   stop_loss_pct: 0.12             # per-position stop-loss, as a fraction below entry price
   auto_execute_stop_loss: false   # true = auto-sell on stop-loss trigger; false = flag + email only
   use_correlation_penalty: false  # true = downweight sizing for positions correlated with other

@@ -75,6 +75,15 @@ class TestBacktestConfigValidation:
             cfg = BacktestConfig(lookback_period=value)
             assert cfg.lookback_period == value
 
+    def test_max_turnover_pct_default(self):
+        assert BacktestConfig().max_turnover_pct == 0.20
+
+    def test_max_turnover_pct_out_of_range_raises(self):
+        with pytest.raises(ValueError, match="max_turnover_pct"):
+            BacktestConfig(max_turnover_pct=0.0)
+        with pytest.raises(ValueError, match="max_turnover_pct"):
+            BacktestConfig(max_turnover_pct=1.5)
+
     def test_zero_or_negative_holding_period_raises(self):
         # holding_period must be > 0, 0 or negative months between rebalances is
         # meaningless. This is the ONLY hard validation on holding_period: fractional
@@ -248,6 +257,49 @@ class TestResolveTargetWeights:
     def test_invalid_sizing_method_raises(self):
         with pytest.raises(ValueError, match="sizing_method"):
             BacktestConfig(sizing_method="bogus")
+
+    def test_volatility_budget_caps_high_vol_position_more_than_low_vol(self):
+        # The "Volatility-Adjustment" (Scaling) constraint: two tickers start at an equal
+        # custom_weights split, position_vol_budget should cap the high-vol ticker well
+        # below its requested weight while leaving the low-vol ticker close to unaffected,
+        # confirming the two caps (flat max_position_weight vs. per-ticker vol budget) are
+        # genuinely complementary, not one silently dominating the other.
+        np.random.seed(2)
+        dates = pd.bdate_range("2024-01-01", "2024-12-31")
+        low_vol = np.cumprod(1 + np.random.normal(0.0003, 0.002, len(dates))) * 100
+        high_vol = np.cumprod(1 + np.random.normal(0.0003, 0.05, len(dates))) * 100
+        prices = pd.DataFrame({"LOW": low_vol, "HIGH": high_vol}, index=dates)
+        as_of = dates[-1]
+
+        cfg_no_budget = BacktestConfig(max_position_weight=0.9, position_vol_budget=None)
+        cfg_with_budget = BacktestConfig(max_position_weight=0.9, position_vol_budget=0.01, vol_lookback_days=63)
+
+        w_no_budget = resolve_target_weights(["LOW", "HIGH"], prices, as_of, cfg_no_budget,
+                                              custom_weights={"LOW": 0.5, "HIGH": 0.5})
+        w_with_budget = resolve_target_weights(["LOW", "HIGH"], prices, as_of, cfg_with_budget,
+                                                custom_weights={"LOW": 0.5, "HIGH": 0.5})
+
+        assert w_with_budget["HIGH"] < w_no_budget["HIGH"]
+        assert w_with_budget["LOW"] > w_with_budget["HIGH"]
+        # LOW absorbs HIGH's excess (weights always sum to 1.0), so LOW's weight increases
+        # under the budget, this is the expected redistribution, not a bug.
+        assert w_with_budget["LOW"] > w_no_budget["LOW"]
+
+    def test_volatility_budget_none_is_unaffected(self, synthetic_daily_prices):
+        # Regression safety: position_vol_budget=None (the default) must leave
+        # resolve_target_weights() byte-for-byte unchanged from before this constraint existed.
+        cfg = BacktestConfig(max_position_weight=0.9, position_vol_budget=None)
+        as_of = synthetic_daily_prices.index[-1]
+        weights = resolve_target_weights(["SPY", "QQQ"], synthetic_daily_prices, as_of, cfg,
+                                          custom_weights={"SPY": 0.8, "QQQ": 0.2})
+        assert weights["SPY"] == pytest.approx(0.8, abs=1e-6)
+        assert weights["QQQ"] == pytest.approx(0.2, abs=1e-6)
+
+    def test_invalid_position_vol_budget_raises(self):
+        with pytest.raises(ValueError, match="position_vol_budget"):
+            BacktestConfig(position_vol_budget=0.0)
+        with pytest.raises(ValueError, match="position_vol_budget"):
+            BacktestConfig(position_vol_budget=-0.01)
 
 
 class TestCrashProtection:

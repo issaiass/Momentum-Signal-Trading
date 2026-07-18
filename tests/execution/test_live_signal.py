@@ -22,6 +22,8 @@ from momentum_trading.execution.live_signal import (
     generate_orders, log_orders, measure_live_performance, run_multi_portfolio, get_top_etfs,
     compute_aggregate_drift, derive_entry_date, compute_target_weights,
     is_rebalance_day, is_holding_period_too_frequent, is_lookback_period_too_short,
+    is_lookback_shorter_than_holding, is_lookback_to_holding_ratio_too_low,
+    compute_turnover, is_turnover_too_high,
     build_position_performance, resolve_momentum_scores, calculate_period_returns,
 )
 from momentum_trading.core.audit_log import read_recent_alerts
@@ -117,6 +119,98 @@ class TestIsLookbackPeriodTooShort:
         assert is_lookback_period_too_short(12.0, 1.0) is False
 
 
+class TestIsLookbackShorterThanHolding:
+    """
+    The "Momentum Persistence" constraint: lookback_period must be strictly older than
+    holding_period, in the SAME regime-appropriate unit resolve_momentum_scores() uses
+    (weeks when holding_period < 1, months otherwise). Equality counts as a violation.
+    """
+
+    def test_monthly_default_passes(self):
+        assert is_lookback_shorter_than_holding(12.0, 1.0) is False
+
+    def test_monthly_equal_values_violate(self):
+        assert is_lookback_shorter_than_holding(1.0, 1.0) is True
+
+    def test_monthly_lookback_shorter_than_holding_violates(self):
+        assert is_lookback_shorter_than_holding(1.0, 3.0) is True
+
+    def test_weekly_two_week_lookback_over_one_week_holding_passes(self):
+        assert is_lookback_shorter_than_holding(0.5, 0.25) is False
+
+    def test_weekly_equal_values_violate(self):
+        assert is_lookback_shorter_than_holding(0.25, 0.25) is True
+
+
+class TestIsLookbackToHoldingRatioTooLow:
+    """
+    The "Lookback-to-Hold Ratio" constraint: lookback_period / holding_period below 3 risks
+    whipsawing. Only the low end is checked (no stated rationale for an upper bound).
+    Deliberately independent of is_lookback_shorter_than_holding(), a ratio < 1 trips both.
+    """
+
+    def test_ratio_of_twelve_is_not_too_low(self):
+        assert is_lookback_to_holding_ratio_too_low(12.0, 1.0) is False
+
+    def test_ratio_of_exactly_three_is_not_too_low(self):
+        # boundary: == 3 is not "lower than 3"
+        assert is_lookback_to_holding_ratio_too_low(3.0, 1.0) is False
+
+    def test_ratio_just_below_three_is_too_low(self):
+        assert is_lookback_to_holding_ratio_too_low(2.9, 1.0) is True
+
+    def test_ratio_below_one_trips_both_constraints(self):
+        # lookback shorter than holding (ratio < 1) is also, necessarily, ratio < 3.
+        assert is_lookback_shorter_than_holding(1.0, 2.0) is True
+        assert is_lookback_to_holding_ratio_too_low(1.0, 2.0) is True
+
+    def test_weekly_regime_ratio_computed_in_weeks(self):
+        # 6-week lookback / 1-week holding = ratio 6, not too low.
+        assert is_lookback_to_holding_ratio_too_low(1.5, 0.25) is False
+        # 2-week lookback / 1-week holding = ratio 2, too low.
+        assert is_lookback_to_holding_ratio_too_low(0.5, 0.25) is True
+
+
+class TestComputeTurnover:
+    """
+    The "Turnover Limit" constraint: Total_Positions_Changed / Total_Positions for a
+    rebalance. Total_Positions is every ticker generate_orders() produced a decision for;
+    HOLD (for any reason) doesn't count as a change.
+    """
+
+    def test_hand_computed_turnover(self):
+        orders = {
+            "A": {"action": "BUY"}, "B": {"action": "SELL"},
+            "C": {"action": "HOLD"}, "D": {"action": "HOLD"},
+            "E": {"action": "HOLD"}, "F": {"action": "HOLD"},
+            "G": {"action": "HOLD"}, "H": {"action": "HOLD"},
+            "I": {"action": "HOLD"}, "J": {"action": "HOLD"},
+        }
+        assert compute_turnover(orders) == pytest.approx(0.20)
+
+    def test_empty_orders_is_zero_turnover(self):
+        assert compute_turnover({}) == 0.0
+
+    def test_all_hold_is_zero_turnover(self):
+        orders = {"A": {"action": "HOLD"}, "B": {"action": "HOLD"}}
+        assert compute_turnover(orders) == 0.0
+
+    def test_all_traded_is_full_turnover(self):
+        orders = {"A": {"action": "BUY"}, "B": {"action": "SELL"}}
+        assert compute_turnover(orders) == 1.0
+
+
+class TestIsTurnoverTooHigh:
+    def test_exactly_at_threshold_is_not_too_high(self):
+        assert is_turnover_too_high(0.20, 0.20) is False
+
+    def test_above_threshold_is_too_high(self):
+        assert is_turnover_too_high(0.21, 0.20) is True
+
+    def test_below_threshold_is_not_too_high(self):
+        assert is_turnover_too_high(0.10, 0.20) is False
+
+
 class TestResolveMomentumScores:
     """
     resolve_momentum_scores() is where run() decides monthly vs. weekly momentum ranking,
@@ -193,6 +287,66 @@ class TestResolveMomentumScores:
 
         pd.testing.assert_frame_equal(actual, expected)
 
+    def test_skip_month_guardrail_defaults_off_and_matches_pre_existing_behavior(self):
+        # Regression safety: calling resolve_momentum_scores() without the new parameter at
+        # all (as every pre-existing caller does) must still match the un-shifted computation.
+        dates = pd.bdate_range("2024-01-01", "2026-01-01")
+        rng = np.random.default_rng(1)
+        prices = pd.Series(100 + np.cumsum(rng.normal(0, 1, len(dates))), index=dates)
+        daily_prices = pd.DataFrame({"XLK": prices})
+
+        actual = resolve_momentum_scores(daily_prices, lookback_period=12.0, holding_period=1.0)
+        monthly_prices = daily_prices.resample("ME").last()
+        expected = calculate_period_returns(monthly_prices, period=12)
+        pd.testing.assert_frame_equal(actual, expected)
+
+    def test_skip_month_guardrail_shifts_the_monthly_window_by_one_bar(self):
+        # The "Skip-Month" guardrail (classic academic "12-1 momentum"): excludes the most
+        # recent ~month from the ranking window when enabled and lookback_period > 3.
+        dates = pd.bdate_range("2024-01-01", "2026-01-01")
+        rng = np.random.default_rng(2)
+        prices = pd.Series(100 + np.cumsum(rng.normal(0, 1, len(dates))), index=dates)
+        daily_prices = pd.DataFrame({"XLK": prices})
+
+        actual = resolve_momentum_scores(
+            daily_prices, lookback_period=12.0, holding_period=1.0, skip_month_guardrail=True,
+        )
+        shifted_monthly = daily_prices.resample("ME").last().shift(1)
+        expected = calculate_period_returns(shifted_monthly, period=12)
+        pd.testing.assert_frame_equal(actual, expected)
+
+        # And it must differ from the un-shifted (guardrail off) computation, confirming the
+        # shift actually changed the signal, not a no-op.
+        unshifted = resolve_momentum_scores(daily_prices, lookback_period=12.0, holding_period=1.0)
+        assert not actual.dropna(how="all").equals(unshifted.dropna(how="all"))
+
+    def test_skip_month_guardrail_is_a_noop_at_or_below_three_months(self):
+        # "for lookback_period > 3 months", exactly 3 does not qualify.
+        dates = pd.bdate_range("2024-01-01", "2025-06-01")
+        rng = np.random.default_rng(3)
+        prices = pd.Series(100 + np.cumsum(rng.normal(0, 1, len(dates))), index=dates)
+        daily_prices = pd.DataFrame({"XLK": prices})
+
+        with_flag = resolve_momentum_scores(
+            daily_prices, lookback_period=3.0, holding_period=1.0, skip_month_guardrail=True,
+        )
+        without_flag = resolve_momentum_scores(
+            daily_prices, lookback_period=3.0, holding_period=1.0, skip_month_guardrail=False,
+        )
+        pd.testing.assert_frame_equal(with_flag, without_flag)
+
+    def test_skip_month_guardrail_ignored_in_weekly_regime(self):
+        # skip_month_guardrail is inherently a monthly-lookback concept, holding_period < 1
+        # (weekly regime) must ignore it entirely, even with a lookback_period > 3.
+        daily_prices = self._linear_daily_prices(35)
+        with_flag = resolve_momentum_scores(
+            daily_prices, lookback_period=1.5, holding_period=0.25, skip_month_guardrail=True,
+        )
+        without_flag = resolve_momentum_scores(
+            daily_prices, lookback_period=1.5, holding_period=0.25, skip_month_guardrail=False,
+        )
+        pd.testing.assert_frame_equal(with_flag, without_flag)
+
     def test_run_invokes_the_weekly_path_when_holding_period_is_sub_monthly(self, monkeypatch, tmp_path):
         # Integration confirmation, not just that resolve_momentum_scores() works in
         # isolation, but that run() actually calls it with cfg.holding_period (not some
@@ -207,9 +361,9 @@ class TestResolveMomentumScores:
         calls = []
         real_resolve = live_signal.resolve_momentum_scores
 
-        def spy_resolve(daily_prices, lookback_period, holding_period):
+        def spy_resolve(daily_prices, lookback_period, holding_period, skip_month_guardrail=False):
             calls.append((lookback_period, holding_period))
-            return real_resolve(daily_prices, lookback_period, holding_period)
+            return real_resolve(daily_prices, lookback_period, holding_period, skip_month_guardrail)
 
         monkeypatch.setattr(live_signal, "resolve_momentum_scores", spy_resolve)
 

@@ -125,6 +125,14 @@ that tests enforce, don't casually violate these when editing:
   to Jan 2) and `test_holiday_shifts_the_weekly_target_day` (a Presidents'-Day Monday resolves to
   the following Tuesday). Don't add a separate holiday-check step if editing this, the
   `cal.schedule()` call already IS the holiday check.
+  Three new risk-constraint fields, all detailed in `docs/RISK_CONSTRAINTS.md`, don't duplicate
+  the full rationale here: `max_turnover_pct` (default `0.20`, the "Turnover Limit"
+  position-COUNT ratio, distinct from `drift_threshold`/`aggregate_drift_threshold`'s
+  dollar-value drift), `skip_month_guardrail` (default `False`, opt-in, changes
+  `resolve_momentum_scores()`'s actual signal when enabled, don't ever default this on without
+  an explicit ask), `position_vol_budget` (default `None`, the per-ticker vol-budget cap applied
+  in `resolve_target_weights()` via `_apply_volatility_budget_caps()`, AFTER the flat
+  `max_position_weight` cap, complementary not redundant with it).
 - **`execution/live_signal.py`**, live signal/order generation, IBKR integration (`ibapi`
   `EClient`/`EWrapper`, not a third-party wrapper), multi-portfolio orchestration, FIFO P&L,
   hash-chained audit log. `fetch_ohlcv_for_tickers()` is distinct from `fetch_live_prices()`,
@@ -165,6 +173,19 @@ that tests enforce, don't casually violate these when editing:
   `notebooks/operational/portfolio_snapshot_report.ipynb` demonstrate real Position Performance
   data safely (dry-run only, no IBKR needed), see that notebook's section 5a. Don't remove this
   key without checking that notebook first.
+  Four new pure functions back the `docs/RISK_CONSTRAINTS.md` advisory constraints, all wired
+  into `daily_runner.py`'s per-portfolio WARNING checks (same `logger.warning` → `log_alert` →
+  `send_action_email(NotificationCategory.WARNING, ...)` triple-step every existing WARNING
+  site already uses): `is_lookback_shorter_than_holding()`/`is_lookback_to_holding_ratio_too_low()`
+  (Momentum Persistence/Ratio, compare `lookback_period` and `holding_period` in the same
+  regime-appropriate unit via the shared `_lookback_and_holding_in_common_unit()` helper, don't
+  introduce a second unit-conversion convention if extending these), and
+  `compute_turnover()`/`is_turnover_too_high()` (Turnover Limit, computed directly from `run()`'s
+  returned `orders` dict, `action` is never overwritten by the `--live` fill-status merge so
+  this is always reliable regardless of dry-run/live/dropped/filled state). None of these four,
+  or the two config-toggle constraints in `backtest/momentum_backtest.py`, are visible to
+  `risk/risk_monitor.py`, that independence is deliberate, see `docs/RISK_CONSTRAINTS.md`'s
+  closing section before wiring any of this into the monitor.
 - **`risk/circuit_breaker.py`**, extracted from `daily_runner.py` with alerting
   dependency-injected (`alert_fn` param) specifically so `risk/` has zero import dependency on
   `interfaces/`, enforced by an AST-based test
@@ -227,6 +248,8 @@ explicitly rejected, since an env var toggle would let real-money trading get en
 - `docs/TESTING.md`, test organization and fixtures
 - `docs/STRATEGY_THEORY.md`, momentum theory, worked example
 - `docs/EMAIL_REPORTING.md` / `docs/EMAIL_COMMANDS.md`, notification and remote-command setup
+- `docs/RISK_CONSTRAINTS.md`, long-term vs. short-term momentum risk constraints (advisory
+  warnings and opt-in config toggles), and why they're deliberately invisible to `risk_monitor.py`
 
 ## Constraints for documentation
 - Do not use "—" to comment, document the code or add this marks on files.

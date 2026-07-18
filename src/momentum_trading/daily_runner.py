@@ -27,7 +27,7 @@ import yaml
 import pandas as pd
 
 from .execution.live_signal import (
-    is_rebalance_day, run, run_multi_portfolio,
+    is_rebalance_day, is_holding_period_too_frequent, run, run_multi_portfolio,
     get_ibkr_positions, get_ibkr_account_value, with_retry,
     place_orders_ibkr, log_orders, write_portfolio_snapshot, get_latest_snapshot,
     derive_entry_date, measure_live_performance,
@@ -734,6 +734,41 @@ def main():
             tickers = spec["tickers"]
             trade_log_path = str(logs_dir() / f"live_trades_log_{name}.csv")
 
+            # --- Holding-period-too-frequent warning (non-blocking) -- holding_period below
+            #     0.25 (faster than weekly) is a real, well-defined schedule, just an
+            #     economically inadvisable one: the momentum signal is computed over a
+            #     monthly-scale lookback_period, so rebalancing faster than weekly adds real
+            #     commission/slippage/whole-share drift cost without improving signal quality.
+            #     Fires every run (not just rebalance days), same as the ticker-overlap check
+            #     below, so a persistent misconfiguration keeps surfacing until fixed. ---
+            if is_holding_period_too_frequent(cfg.holding_period):
+                logger.warning(
+                    "[%s] holding_period=%s is faster than weekly (< 0.25) -- not recommended. "
+                    "The momentum signal is computed over a monthly-scale lookback_period, so "
+                    "rebalancing this often adds commission/slippage/whole-share drift cost "
+                    "without improving signal quality.", name, cfg.holding_period,
+                )
+                log_alert(
+                    name, "HOLDING_PERIOD_TOO_FREQUENT", "WARNING",
+                    f"holding_period={cfg.holding_period} is faster than weekly (< 0.25).",
+                    log_path=ALERTS_LOG_PATH,
+                )
+                holding_period_text = (
+                    f"Portfolio '{name}' is configured with holding_period={cfg.holding_period}, "
+                    f"faster than weekly (0.25).\n\n"
+                    f"This is not recommended: the momentum signal is computed over a "
+                    f"monthly-scale lookback_period, so rebalancing faster than weekly adds real "
+                    f"commission/slippage/whole-share drift cost without any corresponding "
+                    f"improvement in signal quality. This run is proceeding normally -- nothing "
+                    f"was blocked -- but consider setting holding_period to 0.25 (weekly) or "
+                    f"higher."
+                )
+                send_action_email(
+                    NotificationCategory.WARNING, f"Holding period faster than weekly: {name}",
+                    f"<pre>{holding_period_text}</pre>", notification_cfg,
+                    plain_text_fallback=holding_period_text,
+                )
+
             # --- item 1: real positions from IBKR, never local memory. total_value comes
             #     from resolved_total_values, resolved once above the loop. ---
             if args.live:
@@ -824,6 +859,7 @@ def main():
                     total_value=total_value,
                     cfg=cfg,
                     top_n=min(cfg.top_n, len(tickers)),
+                    lookback_period=cfg.lookback_period,
                     dry_run=not args.live,
                     ibkr_port=args.port,
                     log_path=trade_log_path,

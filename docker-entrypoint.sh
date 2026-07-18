@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 
-# Epic 20: cron schedule times are runtime-configurable via DAILY_RUNNER_CRON /
+# Cron schedule times are runtime-configurable via DAILY_RUNNER_CRON /
 # RISK_MONITOR_CRON (docker-compose.yml / .env) instead of baked into the image at
 # build time -- changing the schedule now only needs a container recreate
 # (`docker compose up -d`), not a full rebuild. Defaults match the original fixed
@@ -10,7 +10,7 @@ set -e
 DAILY_RUNNER_CRON="${DAILY_RUNNER_CRON:-35 9 * * 1-5}"
 RISK_MONITOR_CRON="${RISK_MONITOR_CRON:-0 9-16 * * 1-5}"
 
-# Epic 22: space-separated portfolio names to independently risk-monitor, one cron
+# Space-separated portfolio names to independently risk-monitor, one cron
 # entry each -- config.yaml supports any number of portfolios (daily-runner already
 # loops over all of them), but risk_monitor.py previously covered a single
 # hardcoded "portfolio1" regardless of how many were configured, silently leaving
@@ -18,7 +18,7 @@ RISK_MONITOR_CRON="${RISK_MONITOR_CRON:-0 9-16 * * 1-5}"
 # single-portfolio behavior if unset; must match names under config.yaml's
 # portfolios: key, kept as an explicit env var (not auto-discovered from
 # config.yaml) so a bad/incomplete config can never prevent cron from starting --
-# same reasoning as Epic 19 keeping --portfolio explicit per entry.
+# same reasoning as risk_monitor.py's --portfolio flag being explicit per entry.
 #
 # To monitor more than one portfolio, set this in .env (NOT here -- this default only
 # ever covers a single portfolio):

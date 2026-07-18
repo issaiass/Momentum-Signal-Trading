@@ -45,7 +45,7 @@ so on purpose.
   signal action
 - Dockerized, self-scheduling deployment (`docker compose up -d`, internal cron, no manual
   triggering needed for normal operation)
-- 271-test pytest suite covering code mechanics — order sizing, config validation, audit-log
+- 285-test pytest suite covering code mechanics — order sizing, config validation, audit-log
   integrity, multi-portfolio capital math — entirely on synthetic/mocked data, no live broker
   required to run it
 
@@ -139,7 +139,7 @@ momentum-trading/
 │                                     TRIGGER_REPORT/ADJUST_PARAM/STATUS/SET_MAX_DRAWDOWN/
 │                                     ALERTS_REPORT)
 │
-└── tests/                         pytest suite (271 tests), mirrors src/ layout where a
+└── tests/                         pytest suite (285 tests), mirrors src/ layout where a
     ├── conftest.py                  test's primary subject is a single sub-package;
     ├── test_architecture.py         cross-cutting/integration tests stay at tests/ root
     ├── test_daily_runner.py

@@ -64,7 +64,12 @@ that tests enforce — don't casually violate these when editing:
   `tests/test_architecture.py::TestPathResolutionAcrossWorkingDirectories` guards this.
 - **`backtest/momentum_backtest.py`** — `BacktestConfig` (validated on construction) and
   `resolve_target_weights()`, the sizing logic shared by *both* the backtest engine and live
-  execution, specifically so the two paths can't silently diverge.
+  execution, specifically so the two paths can't silently diverge. `lookback_period` is LIVE-ONLY
+  (mirrors `commission`'s existing BACKTEST-ONLY note, opposite direction) — the engine consumes
+  pre-computed `monthly_picks`, so this field only affects `daily_runner.py`'s live rebalance loop.
+  `holding_period` is a `float`, not just an `int` — values below `1` map onto weeks (`0.25` =
+  weekly) via `execution/live_signal.py`'s `is_rebalance_day()`; only `holding_period <= 0` is a
+  hard validation error, sub-weekly values (`< 0.25`) are allowed but flagged (see below).
 - **`execution/live_signal.py`** — live signal/order generation, IBKR integration (`ibapi`
   `EClient`/`EWrapper`, not a third-party wrapper), multi-portfolio orchestration, FIFO P&L,
   hash-chained audit log. IBKR routes informational notices (data-farm status, an auto-set TIF,

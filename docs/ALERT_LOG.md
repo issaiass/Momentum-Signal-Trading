@@ -65,6 +65,7 @@ timestamp, portfolio, alert_type, severity, message, row_hash
 | `CIRCUIT_BREAKER_TRIPPED` | CRITICAL | `risk/circuit_breaker.py::check_circuit_breaker()` | Drawdown from peak equity breached the percentage and/or dollar breaker; rebalancing halted for that portfolio |
 | `CIRCUIT_BREAKER_RESUMED` | INFO | `risk/circuit_breaker.py::resume_trading()` | An operator explicitly cleared a halted circuit breaker (no automatic clearing exists) |
 | `STALE_PRICE_FEED` | CRITICAL | `daily_runner.py` (main loop) | Latest price data is older than `max_price_staleness_minutes` allows; that portfolio's run was skipped |
+| `HOLDING_PERIOD_TOO_FREQUENT` | WARNING | `daily_runner.py` (main loop) | That portfolio's `holding_period` is below `0.25` (faster than weekly) -- run proceeds normally, never blocked |
 | `SLIPPAGE_TOLERANCE_EXCEEDED` | WARNING | `execution/live_signal.py::place_orders_ibkr()` | A fill's price deviated from the expected price by more than `max_slippage_tolerance_pct` -- the fill already executed, this is informational only |
 
 **`TICKER_OVERLAP` is not just a theoretical warning** -- observed directly in a real paper run:

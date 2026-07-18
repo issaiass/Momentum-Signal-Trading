@@ -107,16 +107,60 @@ def _log_ibkr_message(reqId: int, errorCode: int, errorString: str) -> None:
         logger.error("IBKR error %s: %s", errorCode, errorString)
 
 
-def is_rebalance_day(holding_period_months: int = 1, exchange: str = "NYSE",
-                      reference_day_of_month: int = 1) -> bool:
+def is_holding_period_too_frequent(holding_period: float) -> bool:
     """
-    True only on the Nth trading day of a rebalance month (default: the FIRST
-    trading day of every month, matching holding_period=1). Lets you schedule
-    this script to run EVERY day via cron/Task Scheduler and have it self-gate,
-    instead of hand-calculating which calendar dates are holidays each year.
+    True for any positive holding_period faster than weekly (< 0.25, i.e. more often than
+    every 4 weeks' worth of months -- see is_rebalance_day()'s weekly mapping). Single source
+    of truth for this threshold so daily_runner.py's warning and its test don't each hardcode
+    0.25 separately. Deliberately not a hard validation error in BacktestConfig -- this is a
+    real, well-defined schedule, just an economically inadvisable one (see daily_runner.py's
+    per-portfolio WARNING check).
+    """
+    return 0 < holding_period < 0.25
+
+
+def is_rebalance_day(holding_period_months: float = 1, exchange: str = "NYSE",
+                      reference_day_of_month: int = 1,
+                      today: pd.Timestamp | None = None) -> bool:
+    """
+    True only on the Nth trading day of a rebalance period. holding_period_months >= 1
+    (the default, holding_period_months=1): the FIRST trading day of every month, or every
+    Nth month if holding_period_months > 1 -- unchanged from this function's original behavior.
+    holding_period_months < 1: weekly granularity instead -- 0.25 = every week, 0.5 = every 2
+    weeks, 0.75 = every 3 weeks (weeks_interval = round(holding_period_months * 4)), firing on
+    the first trading day of the qualifying week. Lets you schedule this script to run EVERY
+    day via cron/Task Scheduler and have it self-gate, instead of hand-calculating which
+    calendar dates are holidays/weekends each year.
+
+    today : pd.Timestamp | None
+        Injectable for testing (defaults to the real current date) -- same dependency-injection
+        pattern used elsewhere in this project (resolve_total_values()'s account_value_fn,
+        circuit_breaker.py's alert_fn) so this function's date logic can be tested against a
+        fixed date instead of the real calendar.
     """
     cal = mcal.get_calendar(exchange)
-    today = pd.Timestamp.today().normalize()
+    today = (today if today is not None else pd.Timestamp.today()).normalize()
+
+    if holding_period_months < 1:
+        weeks_interval = max(1, round(holding_period_months * 4))
+        week_start = today - pd.Timedelta(days=today.dayofweek)  # Monday of this week
+        week_end = week_start + pd.Timedelta(days=6)
+        schedule = cal.schedule(start_date=week_start, end_date=week_end)
+        trading_days_this_week = schedule.index
+
+        if len(trading_days_this_week) == 0:
+            return False
+
+        target_day = trading_days_this_week[0]
+        is_target = today.date() == target_day.date()
+
+        if is_target and weeks_interval > 1:
+            # Weeks since a fixed Monday epoch -- stable across year boundaries, unlike ISO
+            # week numbers (which reset near Dec/Jan and some years have a 53rd week).
+            weeks_since_epoch = (week_start - pd.Timestamp("1970-01-05")).days // 7
+            return (weeks_since_epoch % weeks_interval) == 0
+        return is_target
+
     month_start = today.replace(day=1)
     month_end = (month_start + pd.DateOffset(months=1)) - pd.Timedelta(days=1)
     schedule = cal.schedule(start_date=month_start, end_date=month_end)

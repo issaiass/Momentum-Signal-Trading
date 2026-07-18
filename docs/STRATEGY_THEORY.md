@@ -33,7 +33,11 @@ the academic literature guarantees it.
 
 ## How this specific implementation works
 
-1. **Lookback**: trailing N-month total return per ETF (default 12 months, configurable).
+1. **Lookback**: trailing N-month total return per ETF — configurable via `config.yaml`'s
+   `default_risk.lookback_period` (or per-portfolio `risk_overrides`), default 12 months.
+   LIVE-ONLY: the backtest engine takes pre-computed picks as input, so this field has no effect
+   on backtest results — a backtest's lookback is set wherever the picks were computed (typically
+   a research notebook's own `calculate_period_returns(..., period=...)` call).
 2. **Ranking**: all ETFs in the universe are ranked by that trailing return.
 3. **Selection**: the top `top_n` ranked ETFs become the month's picks — configurable via
    `config.yaml`'s `default_risk.top_n` (or per-portfolio `risk_overrides`), default 10,
@@ -41,8 +45,13 @@ the academic literature guarantees it.
 4. **Sizing**: capital is allocated across picks either by inverse volatility (default —
    underweight noisier names) or, if `sizing_method: score_proportional` is set, proportional
    to each pick's momentum score — stronger momentum gets more capital.
-5. **Rebalance**: monthly (configurable via `holding_period`), with drift-threshold filtering
-   to avoid trading on trivial rebalances.
+5. **Rebalance**: monthly by default, configurable via `holding_period` — which also accepts
+   fractional values mapping onto weeks (`0.25` = weekly, `0.5` = every 2 weeks, `0.75` = every 3
+   weeks), with drift-threshold filtering to avoid trading on trivial rebalances. Anything faster
+   than weekly (`< 0.25`) is allowed but actively discouraged: this signal is computed over a
+   monthly-scale `lookback_period`, so rebalancing faster than weekly adds real commission/
+   slippage/whole-share drift cost without any corresponding improvement in signal quality — a
+   non-blocking WARNING (logged and emailed every run) exists specifically to keep that visible.
 6. **Risk overlays**: regime filter (de-risk when the benchmark is below its long moving
    average), volatility targeting, position caps, correlation penalty, stop-losses, and the
    crash-protection mechanisms sit on top of this core signal — none of them change

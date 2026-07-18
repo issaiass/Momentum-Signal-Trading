@@ -5,7 +5,7 @@
 | Category | Color | Filterable? | Examples |
 |---|---|---|---|
 | **CRITICAL** | Red | **No — always sent** | Stop-loss executions, circuit-breaker trips, config-load failures, connection failures, the capital-allocation error that aborts a run |
-| **WARNING** | Amber | Yes (`notifications.send_warning`) | Fixed portfolio allocations exceeding the real account, ticker overlap across portfolios |
+| **WARNING** | Amber | Yes (`notifications.send_warning`) | Fixed portfolio allocations exceeding the real account, ticker overlap across portfolios, a portfolio's `holding_period` configured faster than weekly |
 | **STANDARD** | Green | Yes (`notifications.send_standard`) | Routine rebalance BUY/SELL/HOLD summaries |
 | **PERIODIC** | Blue | Yes (`notifications.send_periodic`) | Monthly performance report |
 
@@ -51,7 +51,7 @@ consume the whole account. Deliberately NOT made filterable (unlike the two WARN
 below): a run that just silently aborted with no explanation email would be worse than one
 that emails about it, so this stays CRITICAL rather than becoming configurable.
 
-**WARNING (multi-portfolio capital safety)** — two related, non-fatal alerts, sent via
+**WARNING (multi-portfolio capital safety, plus per-portfolio schedule sanity)** — three related, non-fatal alerts, sent via
 `send_action_email(NotificationCategory.WARNING, ...)` (filterable via
 `notifications.send_warning`, defaults to sending if unconfigured — same "unconfigured defaults
 to on" convention as STANDARD/PERIODIC). **The detailed diagnostic log line for each is written
@@ -69,6 +69,14 @@ reaches your inbox:
   shared ticker on a shared IBKR account risks uncoordinated, conflicting orders against the
   same real position. Deliberately a warning, not a blocking error, since some setups
   intentionally run different weightings on overlapping tickers across portfolios.
+- **"Holding period faster than weekly: `<portfolio>`"** — checked per portfolio, every run
+  (dry-run or `--live`), regardless of whether today is actually a rebalance day. Fires when
+  that portfolio's `holding_period` is below `0.25` (the weekly threshold —
+  `is_holding_period_too_frequent()` in `execution/live_signal.py`). This is a real, well-defined
+  schedule (the run is never blocked), just an economically inadvisable one: the momentum signal
+  is computed over a monthly-scale `lookback_period`, so rebalancing faster than weekly adds
+  commission/slippage/whole-share drift cost without improving signal quality. Fires on every
+  run (not just once) so a persistent misconfiguration keeps surfacing until fixed.
 
 **STANDARD (rebalance summary)** — an HTML table per portfolio, sent after each rebalance,
 showing ticker / action / shares / reason for every position considered that cycle (including

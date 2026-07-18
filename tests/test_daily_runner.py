@@ -173,6 +173,27 @@ class TestLoadConfig:
                 f"{name}: expected top_n={expected_top_n}, got {resolved[name]['cfg'].top_n}"
             )
 
+    def test_lookback_period_independent_per_portfolio(self, tmp_path):
+        # Mirrors test_top_n_independent_per_portfolio -- confirms lookback_period
+        # (the trailing-months momentum ranking window) resolves per-portfolio via
+        # risk_overrides on top of one shared default_risk.lookback_period, the same
+        # way every other BacktestConfig field already does.
+        cfg = {
+            "default_risk": {"holding_period": 1, "lookback_period": 12},
+            "portfolios": {
+                "portfolio1": {"tickers": ["SPY", "QQQ", "XLK"], "total_value": 1000.0},
+                "portfolio2": {"tickers": ["XLF", "XLE", "GLD", "TLT"], "total_value": 1000.0,
+                               "risk_overrides": {"lookback_period": 6}},
+            },
+        }
+        path = tmp_path / "config.yaml"
+        with open(path, "w") as f:
+            yaml.safe_dump(cfg, f)
+
+        resolved = load_config(str(path))["portfolios_resolved"]
+        assert resolved["portfolio1"]["cfg"].lookback_period == 12
+        assert resolved["portfolio2"]["cfg"].lookback_period == 6
+
 
 class TestIdempotency:
     """

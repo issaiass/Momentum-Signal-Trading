@@ -21,8 +21,72 @@ import momentum_trading.execution.live_signal as live_signal
 from momentum_trading.execution.live_signal import (
     generate_orders, log_orders, measure_live_performance, run_multi_portfolio, get_top_etfs,
     compute_aggregate_drift, derive_entry_date, compute_target_weights,
+    is_rebalance_day, is_holding_period_too_frequent,
 )
 from momentum_trading.core.audit_log import read_recent_alerts
+
+
+class TestIsRebalanceDay:
+    """
+    is_rebalance_day() had ZERO test coverage before this -- these tests close that gap
+    (regression protection for the pre-existing monthly logic) as well as covering the new
+    weekly branch. All dates are injected via the `today` parameter (added specifically for
+    this) rather than depending on the real calendar date the suite happens to run on.
+    """
+
+    def test_default_fires_on_first_trading_day_of_month(self):
+        # Jan 1 2026 is New Year's Day (a market holiday), so Jan 2 is the real first
+        # trading day of the month.
+        assert is_rebalance_day(1, today=pd.Timestamp("2026-01-02")) is True
+
+    def test_default_does_not_fire_mid_month(self):
+        assert is_rebalance_day(1, today=pd.Timestamp("2026-01-05")) is False
+
+    def test_every_other_month_fires_only_on_alternating_months(self):
+        # holding_period=2: confirmed fires Feb/Apr, not Jan/Mar, for this calendar --
+        # unchanged pre-existing "every Nth month" logic, just now under test for the
+        # first time.
+        assert is_rebalance_day(2, today=pd.Timestamp("2026-01-02")) is False
+        assert is_rebalance_day(2, today=pd.Timestamp("2026-02-02")) is True
+        assert is_rebalance_day(2, today=pd.Timestamp("2026-03-02")) is False
+        assert is_rebalance_day(2, today=pd.Timestamp("2026-04-01")) is True
+
+    def test_weekly_fires_on_first_trading_day_of_week(self):
+        assert is_rebalance_day(0.25, today=pd.Timestamp("2026-01-05")) is True  # Monday
+
+    def test_weekly_does_not_fire_mid_week(self):
+        assert is_rebalance_day(0.25, today=pd.Timestamp("2026-01-07")) is False  # Wednesday
+
+    def test_every_three_weeks_fires_only_every_third_week(self):
+        # holding_period=0.75 -> weeks_interval=3 (the exact mapping from your own examples:
+        # 0.75 = every 3 weeks). Confirms it does NOT fire on the two weeks in between.
+        assert is_rebalance_day(0.75, today=pd.Timestamp("2026-01-05")) is True
+        assert is_rebalance_day(0.75, today=pd.Timestamp("2026-01-12")) is False
+        assert is_rebalance_day(0.75, today=pd.Timestamp("2026-01-19")) is False
+        assert is_rebalance_day(0.75, today=pd.Timestamp("2026-01-26")) is True
+
+    def test_holiday_shifts_the_weekly_target_day(self):
+        # Presidents' Day 2026 falls on Monday 2026-02-16 -- the real first trading day
+        # of that week is Tuesday 2026-02-17. Confirms the weekly branch is
+        # holiday-aware, the same as the pre-existing monthly branch already was.
+        assert is_rebalance_day(0.25, today=pd.Timestamp("2026-02-16")) is False
+        assert is_rebalance_day(0.25, today=pd.Timestamp("2026-02-17")) is True
+
+
+class TestIsHoldingPeriodTooFrequent:
+    """
+    Single source of truth for the 'faster than weekly' threshold used by
+    daily_runner.py's non-blocking WARNING check -- these tests pin the exact boundary.
+    """
+
+    def test_exactly_weekly_is_not_too_frequent(self):
+        assert is_holding_period_too_frequent(0.25) is False
+
+    def test_just_below_weekly_is_too_frequent(self):
+        assert is_holding_period_too_frequent(0.24) is True
+
+    def test_monthly_default_is_not_too_frequent(self):
+        assert is_holding_period_too_frequent(1.0) is False
 
 
 class TestGetTopEtfs:

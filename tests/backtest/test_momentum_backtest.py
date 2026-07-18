@@ -55,6 +55,31 @@ class TestBacktestConfigValidation:
         with pytest.raises(ValueError, match="top_n"):
             BacktestConfig(top_n=0)
 
+    def test_invalid_lookback_period_raises(self):
+        # lookback_period is the trailing-months window used to rank tickers by
+        # momentum -- 0 or negative is meaningless (no return window to rank on),
+        # same class of bug as an invalid top_n.
+        with pytest.raises(ValueError, match="lookback_period"):
+            BacktestConfig(lookback_period=0)
+
+    def test_zero_or_negative_holding_period_raises(self):
+        # holding_period must be > 0 -- 0 or negative months between rebalances is
+        # meaningless. This is the ONLY hard validation on holding_period: fractional
+        # values (including ones faster than weekly) are legitimate, well-defined
+        # schedules, just flagged via a non-blocking WARNING elsewhere (daily_runner.py),
+        # not rejected here.
+        with pytest.raises(ValueError, match="holding_period"):
+            BacktestConfig(holding_period=0)
+        with pytest.raises(ValueError, match="holding_period"):
+            BacktestConfig(holding_period=-0.5)
+
+    def test_fractional_holding_period_accepted(self):
+        # Confirms the int -> float type change didn't just silently truncate/coerce --
+        # 0.25 (weekly) and 0.75 (every 3 weeks) must construct successfully and keep
+        # their exact fractional value.
+        assert BacktestConfig(holding_period=0.25).holding_period == 0.25
+        assert BacktestConfig(holding_period=0.75).holding_period == 0.75
+
     def test_negative_drift_threshold_raises(self):
         # A negative drift threshold would make the "skip trivial rebalances"
         # cost-control logic fire on EVERY rebalance instead of none, silently

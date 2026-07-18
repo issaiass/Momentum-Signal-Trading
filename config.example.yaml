@@ -43,7 +43,18 @@ notifications:
 # there is automatically accepted here too; this is a curated subset of the ones most worth
 # tuning, not an exhaustive list of every BacktestConfig field.
 default_risk:
-  holding_period: 1               # months between forced rebalances
+  holding_period: 1               # months between forced rebalances -- accepts fractional values
+                                   # that map onto weeks: 0.25 = every week, 0.5 = every 2 weeks,
+                                   # 0.75 = every 3 weeks, 1.0 = every month (default), integers
+                                   # >1 = every N months. Values below 0.25 (faster than weekly)
+                                   # are allowed but trigger a non-blocking WARNING log + email
+                                   # every run -- not recommended, since the momentum signal is
+                                   # computed over a monthly-scale lookback_period, so trading
+                                   # faster than weekly adds cost without improving the signal.
+  lookback_period: 12             # trailing months of returns used to RANK tickers by momentum --
+                                   # distinct from holding_period above (how OFTEN you rebalance,
+                                   # not how far back the signal looks). LIVE-ONLY, has no effect
+                                   # on the backtest engine (which receives pre-computed picks).
   commission: 0.0                 # flat $ commission charged per trade -- BACKTEST-ONLY,
                                    # has no effect on --live (real commission is already
                                    # reflected in your broker's real account balance)
@@ -134,9 +145,11 @@ portfolios:
                                    # $1000 placeholder instead). At most ONE portfolio across
                                    # this whole file may be null -- validated at load time,
                                    # since "remainder" is ambiguous with more than one.
-    # risk_overrides:              # optional: override any default_risk field for THIS
-    #   stop_loss_pct: 0.10         # portfolio only -- e.g. a tighter stop, or (see
-    #   top_n: 5                    # portfolio2 below) a different top_n than the default
+    # risk_overrides:              # optional: override ANY default_risk field for THIS
+    #   stop_loss_pct: 0.10         # portfolio only -- e.g. a tighter stop, a different top_n
+    #   top_n: 5                    # than the default (see portfolio2 below), a shorter/longer
+    #   lookback_period: 6          # momentum ranking window (months, LIVE-ONLY), or a different
+    #   holding_period: 3           # rebalance cadence (months) than every other portfolio here
 
   portfolio2:
     tickers: [XLF, XLE, GLD, TLT]

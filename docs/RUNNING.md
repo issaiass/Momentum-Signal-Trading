@@ -360,6 +360,12 @@ glance at what's scheduled around each rebalance date before `--live` runs, espe
 Stage 2/3 of the rollout above. This is a manual awareness recommendation, not an automated
 feature in this codebase.
 
+`holding_period` also accepts fractional values mapping onto weeks (`0.25` = every week, `0.5`
+= every 2 weeks, `0.75` = every 3 weeks) — see `STRATEGY_THEORY.md`. Anything faster than
+weekly (`< 0.25`) is allowed but triggers a non-blocking WARNING (logged and emailed every run)
+since it's not recommended: the momentum signal is computed over a monthly-scale
+`lookback_period`, so trading faster than weekly adds real cost without improving the signal.
+
 ## 4.12. Additional capabilities — quick pointers
 
 - **Alternative position sizing**: set `sizing_method: score_proportional` in `config.yaml`'s

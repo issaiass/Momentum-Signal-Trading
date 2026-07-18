@@ -54,7 +54,28 @@ logger.propagate = False
 # --------------------------------------------------------------------------- #
 @dataclass
 class BacktestConfig:
-    holding_period: int = 1                 # months between forced rebalances
+    holding_period: float = 1.0             # months between forced rebalances -- accepts
+                                             # fractional values that map onto weeks:
+                                             # 0.25 = every week, 0.5 = every 2 weeks,
+                                             # 0.75 = every 3 weeks, 1.0 = every month (default,
+                                             # unchanged behavior), integers >1 = every N months.
+                                             # LIVE: see is_rebalance_day()'s weekly branch in
+                                             # execution/live_signal.py. Values below 0.25 (faster
+                                             # than weekly) are allowed but trigger a non-blocking
+                                             # WARNING alert + email every run (see daily_runner.py
+                                             # / is_holding_period_too_frequent()) -- deliberately
+                                             # not hard-blocked, since it's a real, well-defined
+                                             # schedule, just an economically inadvisable one.
+    lookback_period: int = 12               # trailing months of returns used to RANK tickers by
+                                             # momentum (distinct from holding_period, which
+                                             # controls how often you rebalance, not how far back
+                                             # the signal looks). LIVE-ONLY -- the backtest engine
+                                             # operates on monthly_picks, which the caller (e.g. a
+                                             # research notebook) already computed upstream via
+                                             # calculate_period_returns(..., period=lookback_period)
+                                             # before run_custom_backtest() ever runs, so this field
+                                             # has no effect on backtest results (mirrors
+                                             # commission's BACKTEST-ONLY note, opposite direction).
     initial_capital: float = 100_000.0
     commission: float = 0.0                 # flat $ per trade -- BACKTEST-ONLY: only
                                              # run_risk_managed_backtest()'s simulated cash
@@ -182,8 +203,10 @@ class BacktestConfig:
             errors.append(f"aggregate_drift_threshold ({self.aggregate_drift_threshold}) must be >= 0")
         if not (0 <= self.max_portfolio_drawdown_pct < 1.0):
             errors.append(f"max_portfolio_drawdown_pct ({self.max_portfolio_drawdown_pct}) should be in [0, 1.0)")
-        if self.holding_period < 1:
-            errors.append(f"holding_period ({self.holding_period}) must be >= 1")
+        if self.holding_period <= 0:
+            errors.append(f"holding_period ({self.holding_period}) must be > 0")
+        if self.lookback_period < 1:
+            errors.append(f"lookback_period ({self.lookback_period}) must be >= 1")
         if self.top_n < 1:
             errors.append(f"top_n ({self.top_n}) must be >= 1")
         if self.initial_capital <= 0:

@@ -38,14 +38,19 @@ so on purpose.
   gate before `--live` will run
 - Hash-chained, tamper-evident audit logs for trades, email commands, and alerts — three
   separate logs, kept deliberately apart
-- Categorized email notifications (CRITICAL/STANDARD/PERIODIC/WARNING) and pydantic-validated,
-  fail-safe email-commanded remote actions (pause/resume/liquidate/adjust risk params/report) —
-  the rebalance summary email includes a "What Actually Happened" column showing the real fill
-  outcome per ticker (filled, dropped, rejected, still open, dry-run), not just the intended
-  signal action
+- Categorized email notifications (CRITICAL/STANDARD/PERIODIC/DAILY/WARNING) and pydantic-
+  validated, fail-safe email-commanded remote actions (pause/resume/liquidate/adjust risk
+  params/report) — the rebalance summary email includes a "What Actually Happened" column
+  showing the real fill outcome per ticker (filled, dropped, rejected, still open, dry-run), not
+  just the intended signal action
+- Monthly and (opt-in, off by default) daily performance reports per portfolio — technical
+  indicators (trend/momentum/volatility/volume) for currently held positions, strategy
+  performance indicators since inception (Total Return, CAGR, Max Drawdown, Std Dev, Sharpe,
+  Sortino), and trailing-window benchmark comparison charts (1/3/6-month/YTD/1-year for the
+  monthly report, 1-day/1/2/3-week for the daily report)
 - Dockerized, self-scheduling deployment (`docker compose up -d`, internal cron, no manual
   triggering needed for normal operation)
-- 285-test pytest suite covering code mechanics — order sizing, config validation, audit-log
+- 319-test pytest suite covering code mechanics — order sizing, config validation, audit-log
   integrity, multi-portfolio capital math — entirely on synthetic/mocked data, no live broker
   required to run it
 
@@ -101,7 +106,10 @@ momentum-trading/
 │   │   │                             shared helpers
 │   │   ├── functions_quant_extensions.py   liquidity filter, walk-forward, bootstrap CI,
 │   │   │                             factor decomposition, regime breakdown, dual momentum,
-│   │   │                             VaR/CVaR, scenario shocks, capacity checks, multi-lookback
+│   │   │                             VaR/CVaR, scenario shocks, capacity checks, multi-lookback,
+│   │   │                             since-inception + trailing-window live performance stats
+│   │   ├── technical_indicators.py  hand-rolled SMA/EMA/RSI/MACD/ATR/Bollinger/ADX/VWAP/OBV --
+│   │   │                             not pandas-ta (dependency-conflicts with pandas>=3.0.3)
 │   │   ├── paths.py                 PROJECT_ROOT resolution -- single source of truth for
 │   │   │                             where config.yaml/data/logs live, regardless of CWD
 │   │   ├── smtp_auth.py             shared SMTP auth for email sending -- password-based
@@ -133,13 +141,16 @@ momentum-trading/
 │   │
 │   └── interfaces/
 │       ├── notifications.py         categorized email notifications (CRITICAL/STANDARD/
-│       │                             PERIODIC/WARNING) + monthly HTML report generation
-│       └── email_commands.py        pydantic-validated, fail-safe remote email commands
-│                                     (PAUSE/RESUME/LIQUIDATE/SKIP_NEXT_REBALANCE/
-│                                     TRIGGER_REPORT/ADJUST_PARAM/STATUS/SET_MAX_DRAWDOWN/
-│                                     ALERTS_REPORT)
+│       │                             PERIODIC/DAILY/WARNING) + monthly & daily HTML report
+│       │                             generation (shared builder -- see CLAUDE.md)
+│       ├── email_commands.py        pydantic-validated, fail-safe remote email commands
+│       │                             (PAUSE/RESUME/LIQUIDATE/SKIP_NEXT_REBALANCE/
+│       │                             TRIGGER_REPORT/ADJUST_PARAM/STATUS/SET_MAX_DRAWDOWN/
+│       │                             ALERTS_REPORT)
+│       └── email_diagnostics.py     backs `daily-runner --test-email` -- live SMTP+IMAP
+│                                     check independent of config.yaml
 │
-└── tests/                         pytest suite (285 tests), mirrors src/ layout where a
+└── tests/                         pytest suite (319 tests), mirrors src/ layout where a
     ├── conftest.py                  test's primary subject is a single sub-package;
     ├── test_architecture.py         cross-cutting/integration tests stay at tests/ root
     ├── test_daily_runner.py
@@ -151,10 +162,13 @@ momentum-trading/
     ├── backtest/
     │   └── test_momentum_backtest.py
     ├── core/
-    │   └── test_audit_log.py        hash-chain helper + alert log
+    │   ├── test_audit_log.py        hash-chain helper + alert log
+    │   ├── test_technical_indicators.py
+    │   └── test_functions_quant_extensions.py   since-inception + trailing-window stats
     ├── execution/
     │   └── test_live_signal.py
     └── interfaces/
+        ├── test_email_diagnostics.py
         ├── test_notifications.py
         └── test_email_commands.py
 ```
@@ -373,6 +387,11 @@ line between "this codebase is well-tested" and "this strategy is proven." Furth
 - Tax-aware return modeling for taxable accounts
 - Real order-book-based capacity/market-impact validation, beyond the current ADV-based
   advisory check
+- Fundamental indicators (P/E, PEG, ROE, Debt-to-Equity, Current Ratio) and macro indicators
+  (Fed Funds Rate, CPI) in the performance reports — deliberately deferred, not built: genuinely
+  new data-sourcing surface (nothing in this codebase fetches either today), needing FMP's
+  fundamentals endpoints (plan-tier availability unconfirmed) and a separate FRED integration
+  for macro data. See `docs/EMAIL_REPORTING.md`'s "What's implemented vs. deferred"
 
 </details>
 

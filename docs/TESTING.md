@@ -36,12 +36,14 @@ That's a deliberate scope boundary; see "What this suite does NOT tell you" belo
 | `test_governance.py` | Institutional governance: VaR/CVaR, scenario shocks, capacity checks, tamper-evident hash-chained audit log, independent `risk_monitor.py` (including its `config.yaml` capital fallback), config-approval gate |
 | `test_reporting.py` | Investor-facing reporting: portfolio snapshots, rank/signal-score trade context, benchmark comparison, external-holdings correlation check, multi-lookback signal blending |
 | `test_execution_safety.py` | Broker resilience follow-ups + additional execution safety: dollar drawdown breaker, slippage tolerance, stale price feed protection, time-based stops |
-| `interfaces/test_notifications.py` | Categorized email notifications: CRITICAL cannot be filtered, STANDARD/PERIODIC/WARNING respect config, HTML/chart generation degrades gracefully, the rebalance summary's "What Actually Happened" column correctly reflects real fills, dropped orders, rejections, still-open orders, and dry-run mode |
+| `interfaces/test_notifications.py` | Categorized email notifications: CRITICAL cannot be filtered, STANDARD/PERIODIC/DAILY/WARNING respect config (DAILY uniquely defaults to off), HTML/chart generation degrades gracefully, the rebalance summary's "What Actually Happened" column correctly reflects real fills, dropped orders, rejections, still-open orders, and dry-run mode, plus the monthly/daily report builders' shared strategy-stats/technical-indicators sections and `build_comparison_bar_chart()` |
 | `interfaces/test_email_commands.py` | Email-commanded remote actions: sender authentication, `ADJUST_PARAM` allowlist including `top_n` (security-critical), `LIQUIDATE` confirmation phrase, `ALERTS_REPORT` parsing, fail-safe behavior on malformed input, and the subject-marker guard against a same-inbox reply cascade |
 | `interfaces/test_email_diagnostics.py` | `run_email_diagnostics()`'s live SMTP/IMAP checks (mocked `smtplib`/`imaplib`, no real network): pass/fail/skip reporting per check, and the Gmail-App-Password / Outlook-OAuth2-specific remediation hints on an authentication failure |
 | `core/test_audit_log.py` | The shared hash-chain helper (`append_hash_chained_row()`) every new alert-log write goes through, `log_alert()`'s schema, and `read_recent_alerts()`'s filtering/limit/ordering behavior backing the `ALERTS_REPORT` email command |
+| `core/test_technical_indicators.py` | Hand-rolled SMA/EMA/RSI/MACD/ATR/Bollinger/ADX/VWAP/OBV: hand-verifiable known-value cases (constant/monotonic price series), RSI/ADX boundary checks ([0, 100]), and `compute_latest_indicators()`'s graceful empty-dict behavior on insufficient history |
+| `core/test_functions_quant_extensions.py` | The new live-performance-report wiring: `since_inception_performance()`'s graceful Sharpe/Sortino degradation on short history, `daily_window_comparison()`/`monthly_window_comparison()`'s window-omission behavior, and a regression guard confirming `monthly_window_comparison()` never raises against short live histories (the bug that ruled out reusing `trailing_returns()` directly -- see `CLAUDE.md`) |
 
-Current count: **285 tests**, all passing. Every test file and class has a docstring explaining
+Current count: **319 tests**, all passing. Every test file and class has a docstring explaining
 *why* that group of tests exists, not just what it checks — read those docstrings first if a
 test's purpose isn't obvious from its name.
 
@@ -97,7 +99,7 @@ unintentionally (fix the code).
 
 ## What this suite does NOT tell you
 
-Worth repeating because it's easy to forget once a suite is green: **285 passing tests confirm
+Worth repeating because it's easy to forget once a suite is green: **319 passing tests confirm
 the code does what it's supposed to do, mechanically. They do not confirm the momentum
 strategy itself is profitable or safe in a real crash** — that's a separate question from
 execution mechanics, which have now been confirmed against a real (paper) broker connection.

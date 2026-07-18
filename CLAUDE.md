@@ -62,6 +62,22 @@ that tests enforce — don't casually violate these when editing:
   walk up for `pyproject.toml` → CWD fallback). Any new module needing the data or logs dir
   should use `data_dir()`/`logs_dir()` from here, not a bare `"data"` string —
   `tests/test_architecture.py::TestPathResolutionAcrossWorkingDirectories` guards this.
+  `core/technical_indicators.py` (SMA/EMA/RSI/MACD/ATR/Bollinger/ADX/VWAP/OBV) is hand-rolled,
+  not `pandas-ta` — that package hard-pins `numba==0.61.2`, incompatible with this project's
+  `pandas>=3.0.3` under `uv sync`'s full dependency resolution (confirmed by direct attempt:
+  installs fine standalone, breaks the project lockfile). `core/functions.py`'s
+  `trailing_returns()`/`return_period_dates()` (used by the backtest's `tear_sheet()`) raise a
+  `KeyError` against a short, live daily-snapshot history — their `"Since Inception"` window's
+  lookback routinely falls outside the fetched market-calendar schedule, and the `"M"`-frequency
+  branch skips holiday/weekend snapping entirely. Confirmed only ever exercised against full
+  multi-year backtest histories before now — `functions_quant_extensions.py`'s
+  `since_inception_performance()`/`monthly_window_comparison()`/`daily_window_comparison()`
+  (used by the live monthly/daily email reports) deliberately do NOT call `trailing_returns()`
+  for this reason; they call the individual `annualize_returns()`/`annualize_vol()`/
+  `max_drawdown()`/`sharpe_ratio()`/`sortino_ratio()` functions directly (still reusing them, so
+  live and backtested stats can't diverge) or a small dedicated cumulative-growth-index lookback,
+  never the monolithic aggregator. Don't route new live-reporting code through `tear_sheet()`
+  itself without re-confirming it handles short histories first.
 - **`backtest/momentum_backtest.py`** — `BacktestConfig` (validated on construction) and
   `resolve_target_weights()`, the sizing logic shared by *both* the backtest engine and live
   execution, specifically so the two paths can't silently diverge. `lookback_period` is LIVE-ONLY
@@ -72,7 +88,11 @@ that tests enforce — don't casually violate these when editing:
   hard validation error, sub-weekly values (`< 0.25`) are allowed but flagged (see below).
 - **`execution/live_signal.py`** — live signal/order generation, IBKR integration (`ibapi`
   `EClient`/`EWrapper`, not a third-party wrapper), multi-portfolio orchestration, FIFO P&L,
-  hash-chained audit log. IBKR routes informational notices (data-farm status, an auto-set TIF,
+  hash-chained audit log. `fetch_ohlcv_for_tickers()` is distinct from `fetch_live_prices()` --
+  the latter returns close-only prices across many tickers at once (for momentum ranking), the
+  former returns per-ticker full OHLCV (for `core/technical_indicators.py`), one
+  `get_stock_prices()` call per ticker since `get_bulk_prices()` collapses to close-only.
+  IBKR routes informational notices (data-farm status, an auto-set TIF,
   etc.) through the *same* `EWrapper.error()` callback as real errors — `IBKR_INFORMATIONAL_CODES`
   is the single source of truth for which codes are safe to log at `INFO` and, critically, must
   never be allowed to overwrite a tracked order's status to `"ERROR: ..."` (that mistake once
@@ -97,14 +117,18 @@ that tests enforce — don't casually violate these when editing:
   with `execution/live_signal.py` — the whole point is that a bug in the trading logic can't
   also blind the thing watching for it. It has its own minimal FIFO P&L re-derivation and its
   own YAML read for `total_value`. Preserve this segregation in any future edit here.
-- **`interfaces/`** — email notifications (categorized CRITICAL/STANDARD/PERIODIC — CRITICAL
-  can never be filtered) and pydantic-validated email-commanded remote actions.
+- **`interfaces/`** — email notifications (categorized CRITICAL/STANDARD/PERIODIC/DAILY/WARNING —
+  CRITICAL can never be filtered, DAILY uniquely defaults to OFF when unconfigured, every other
+  filterable category defaults to ON) and pydantic-validated email-commanded remote actions.
   `email_commands.py`'s `poll_and_process_commands()` guards against a same-inbox reply
   cascade with two checks together, not one: the `X-Momentum-Trading-Bot` header catches the
   bot's own generated replies, and `BOT_SUBJECT_MARKER`/`_is_bot_thread()` catches a *human's*
   reply to those replies (which never carries the header) — don't remove either one without
   re-reading why both exist. `email_diagnostics.py`'s `run_email_diagnostics()` backs
   `daily-runner --test-email`, a live SMTP+IMAP check independent of `config.yaml`.
+  `notifications.py`'s `build_monthly_report_html()`/`build_daily_report_html()` are both thin
+  wrappers over a shared `_build_report_html()` — the two reports differ only in cadence/window
+  scale, not structure, so keep it that way rather than letting them diverge into two copies.
 - **`daily_runner.py`** — the actual scheduled entry point (`daily-runner` console script).
   Loads and schema-validates `config.yaml`, loops over every portfolio defined under
   `portfolios:`, idempotent per day, refuses `--live` unless `config.yaml`'s

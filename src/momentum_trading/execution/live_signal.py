@@ -213,6 +213,58 @@ def fetch_live_prices(
     )
 
 
+_OHLCV_COLUMN_ALIASES = {
+    # FMP / EODHD / yfinance each name columns differently -- normalize to lowercase
+    # open/high/low/close/volume so core/technical_indicators.py has one consistent schema
+    # to work with regardless of which vendor answered for a given ticker.
+    "open": "open", "Open": "open",
+    "high": "high", "High": "high",
+    "low": "low", "Low": "low",
+    "close": "close", "Close": "close",
+    "volume": "volume", "Volume": "volume",
+}
+
+
+def fetch_ohlcv_for_tickers(
+    tickers: list[str], lookback_days: int = 60,
+    fmp_api_key: str | None = None, eodhd_api_key: str | None = None,
+) -> dict[str, pd.DataFrame]:
+    """
+    Per-ticker OHLCV (not just close), for technical indicator computation
+    (core/technical_indicators.py) -- distinct from fetch_live_prices() above, which returns
+    only close prices across many tickers at once (all that's needed for momentum ranking).
+    Uses core/functions.py's single-symbol get_stock_prices() (same FMP -> EODHD -> yfinance
+    auto-fallback chain), one call per ticker, since get_bulk_prices() collapses to close-only.
+
+    lookback_days default (60) covers MACD's 26-period EMA plus buffer for the other
+    indicators, without fetching as much history as fetch_live_prices()'s 400-day window
+    (technical indicators don't need a 12-month lookback the way the momentum signal does).
+
+    Returns {ticker: ohlcv_df} for tickers that fetched successfully -- a ticker that fails
+    (vendor outage, delisted symbol, etc.) is simply omitted rather than failing the whole
+    batch, so one bad ticker can't block indicators for the rest of the portfolio.
+    """
+    end_date = datetime.today().strftime("%Y-%m-%d")
+    start_date = (datetime.today() - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
+    results = {}
+    for ticker in tickers:
+        try:
+            df = fn.get_stock_prices(
+                ticker, start_date, end_date,
+                fmp_api_key=fmp_api_key, eodhd_api_key=eodhd_api_key,
+            )
+            df = df.rename(columns=_OHLCV_COLUMN_ALIASES)
+            missing = {"open", "high", "low", "close", "volume"} - set(df.columns)
+            if missing:
+                logger.warning("OHLCV fetch for %s missing columns %s -- skipping indicators for it.",
+                                ticker, missing)
+                continue
+            results[ticker] = df[["open", "high", "low", "close", "volume"]]
+        except Exception as e:
+            logger.warning("OHLCV fetch failed for %s, skipping indicators for it: %s", ticker, e)
+    return results
+
+
 def check_price_staleness(daily_prices: pd.DataFrame, max_staleness_minutes: int, exchange: str = "NYSE") -> dict:
     """
     Guards against trading on a frozen/stale price feed

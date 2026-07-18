@@ -15,7 +15,8 @@ import pytest
 
 from momentum_trading.interfaces.notifications import (
     NotificationCategory, should_send, send_action_email,
-    build_rebalance_summary_html, build_monthly_report_html,
+    build_rebalance_summary_html, build_monthly_report_html, build_daily_report_html,
+    build_comparison_bar_chart,
 )
 
 
@@ -54,6 +55,17 @@ class TestCategoryFiltering:
         assert should_send(NotificationCategory.STANDARD, {}) is True
         assert should_send(NotificationCategory.PERIODIC, {}) is True
         assert should_send(NotificationCategory.WARNING, {}) is True
+
+    def test_daily_defaults_to_NOT_sending_when_unconfigured(self):
+        # The one deliberate exception: DAILY defaults to OFF, unlike every other filterable
+        # category -- a real recurring compute/inbox-volume cost that must be an explicit
+        # opt-in, including for a config.yaml predating this feature that never mentions
+        # send_daily at all (not just one that explicitly sets it false).
+        assert should_send(NotificationCategory.DAILY, {}) is False
+
+    def test_daily_respects_explicit_config(self):
+        assert should_send(NotificationCategory.DAILY, {"send_daily": True}) is True
+        assert should_send(NotificationCategory.DAILY, {"send_daily": False}) is False
 
 
 class TestSendActionEmail:
@@ -149,7 +161,7 @@ class TestHTMLGeneration:
         })
         comparison = {"portfolio_cumulative_return": 0.10, "benchmark_cumulative_return": 0.05,
                       "outperformance": 0.05, "n_periods": 2}
-        html, chart = build_monthly_report_html("portfolio1", snap, comparison)
+        html, chart, _ = build_monthly_report_html("portfolio1", snap, comparison)
         assert "Outperformance" in html
         assert chart is not None  # matplotlib is available in this test environment
 
@@ -160,11 +172,11 @@ class TestHTMLGeneration:
             "date": pd.date_range("2026-01-01", periods=1, freq="ME"),
             "total_value": [1000], "cash": [1000], "unrealized_pnl": [0],
         })
-        html, chart = build_monthly_report_html("portfolio1", snap, {"error": "no data"})
+        html, chart, _ = build_monthly_report_html("portfolio1", snap, {"error": "no data"})
         assert "portfolio1" in html  # doesn't crash
 
     def test_monthly_report_handles_empty_snapshot(self):
-        html, chart = build_monthly_report_html("portfolio1", pd.DataFrame(), {"error": "no data"})
+        html, chart, _ = build_monthly_report_html("portfolio1", pd.DataFrame(), {"error": "no data"})
         assert "portfolio1" in html
         assert chart is None  # can't chart with no data, should be None not an exception
 
@@ -177,7 +189,7 @@ class TestHTMLGeneration:
         })
         real_pnl = {"realized_pnl": 40.0, "unrealized_pnl": 90.0, "total_pnl": 130.0,
                     "trade_count": 2, "total_return_pct": 0.13}
-        html, _ = build_monthly_report_html("portfolio1", snap, {"error": "no data"}, real_pnl)
+        html, _, _ = build_monthly_report_html("portfolio1", snap, {"error": "no data"}, real_pnl)
         assert "Actual P&L" in html
         assert "130.00" in html
         assert "+13.00%" in html
@@ -187,5 +199,101 @@ class TestHTMLGeneration:
             "date": pd.date_range("2026-01-01", periods=1, freq="ME"),
             "total_value": [1000], "cash": [1000], "unrealized_pnl": [0],
         })
-        html, _ = build_monthly_report_html("portfolio1", snap, {"error": "no data"})
+        html, _, _ = build_monthly_report_html("portfolio1", snap, {"error": "no data"})
         assert "Actual P&L" not in html
+
+    def test_monthly_report_includes_strategy_stats_when_provided(self):
+        snap = pd.DataFrame({
+            "date": pd.date_range("2026-01-01", periods=1, freq="ME"),
+            "total_value": [1000], "cash": [1000], "unrealized_pnl": [0],
+        })
+        since_inception = {
+            "inception_date": pd.Timestamp("2026-01-01"), "total_return": 0.05, "cagr": 0.12,
+            "max_drawdown": -0.03, "std_dev": 0.10, "sharpe_ratio": None, "sortino_ratio": None,
+        }
+        html, _, _ = build_monthly_report_html(
+            "portfolio1", snap, {"error": "no data"}, since_inception=since_inception,
+        )
+        assert "Strategy Performance (Since Inception)" in html
+        assert "+5.00%" in html  # total_return
+        assert "Not enough history yet" in html  # sharpe/sortino both None
+
+    def test_monthly_report_omits_strategy_stats_when_not_provided(self):
+        snap = pd.DataFrame({
+            "date": pd.date_range("2026-01-01", periods=1, freq="ME"),
+            "total_value": [1000], "cash": [1000], "unrealized_pnl": [0],
+        })
+        html, _, _ = build_monthly_report_html("portfolio1", snap, {"error": "no data"})
+        assert "Strategy Performance (Since Inception)" not in html
+
+    def test_monthly_report_includes_technical_indicators_when_provided(self):
+        snap = pd.DataFrame({
+            "date": pd.date_range("2026-01-01", periods=1, freq="ME"),
+            "total_value": [1000], "cash": [1000], "unrealized_pnl": [0],
+        })
+        indicators = {"SPY": {"sma_20": 500.0, "rsi_14": 55.5}, "QQQ": {}}  # QQQ: no history yet
+        html, _, _ = build_monthly_report_html(
+            "portfolio1", snap, {"error": "no data"}, indicators=indicators,
+        )
+        assert "Technical Indicators" in html
+        assert "SPY" in html
+        assert "QQQ" not in html  # empty indicator dict -- omitted, not shown blank
+
+    def test_monthly_report_omits_indicators_section_when_none_have_data(self):
+        snap = pd.DataFrame({
+            "date": pd.date_range("2026-01-01", periods=1, freq="ME"),
+            "total_value": [1000], "cash": [1000], "unrealized_pnl": [0],
+        })
+        html, _, _ = build_monthly_report_html(
+            "portfolio1", snap, {"error": "no data"}, indicators={"SPY": {}},
+        )
+        assert "Technical Indicators" not in html
+
+
+class TestBuildComparisonBarChart:
+    def test_returns_png_bytes_for_valid_window_data(self):
+        window_data = {
+            "1 Month": {"portfolio": 0.05, "benchmark": 0.03},
+            "3 Month": {"portfolio": 0.10, "benchmark": 0.08},
+            "as_of_date": "2026-07-01",
+        }
+        result = build_comparison_bar_chart(window_data, "Test Chart")
+        assert result is not None
+        assert result[:8] == b"\x89PNG\r\n\x1a\n"  # PNG file signature
+
+    def test_returns_none_for_no_plottable_windows(self):
+        assert build_comparison_bar_chart({"as_of_date": "2026-07-01", "error": "x"}, "Empty") is None
+
+    def test_returns_none_for_empty_dict(self):
+        assert build_comparison_bar_chart({}, "Empty") is None
+
+
+class TestBuildDailyReportHtml:
+    """build_daily_report_html() is a thin wrapper over the same _build_report_html() the
+    monthly report uses -- these tests just confirm the daily-specific framing (label, cadence
+    wording) and that it accepts daily_window_comparison()-shaped data correctly."""
+
+    def test_daily_report_has_daily_label_not_monthly(self):
+        snap = pd.DataFrame({
+            "date": pd.date_range("2026-07-01", periods=1, freq="D"),
+            "total_value": [1000], "cash": [1000], "unrealized_pnl": [0],
+        })
+        html, _, _ = build_daily_report_html("portfolio1", snap, {"error": "no data"})
+        assert "Daily Report: portfolio1" in html
+        assert "Monthly Report" not in html
+
+    def test_daily_report_charts_short_windows(self):
+        snap = pd.DataFrame({
+            "date": pd.date_range("2026-07-01", periods=2, freq="D"),
+            "total_value": [1000, 1010], "cash": [1000, 1010], "unrealized_pnl": [0, 0],
+        })
+        window_comparison = {
+            "1 Day": {"portfolio": 0.01, "benchmark": 0.005},
+            "as_of_date": "2026-07-02",
+        }
+        html, _, comparison_chart = build_daily_report_html(
+            "portfolio1", snap, {"error": "no data"}, window_comparison=window_comparison,
+        )
+        assert comparison_chart is not None
+        assert comparison_chart[:8] == b"\x89PNG\r\n\x1a\n"
+        assert 'cid:comparison_chart' in html

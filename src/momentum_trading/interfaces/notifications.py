@@ -36,7 +36,12 @@ logger = logging.getLogger("notifications")
 class NotificationCategory(str, Enum):
     CRITICAL = "critical"   # red -- always sent, not filterable
     STANDARD = "standard"   # green -- routine BUY/SELL/HOLD, filterable
-    PERIODIC = "periodic"   # blue -- scheduled reports, filterable
+    PERIODIC = "periodic"   # blue -- scheduled monthly report, filterable
+    DAILY = "daily"         # purple -- daily performance report, filterable via
+                             # notifications.send_daily (default False) -- separate from
+                             # PERIODIC/monthly on purpose, so the two cadences can be toggled
+                             # independently; should_send()'s f"send_{category.value}" key
+                             # derivation means this needed no changes there, just this entry.
     WARNING = "warning"     # amber -- non-fatal risk signals (multi-portfolio
                              # capital over-allocation, ticker overlap), filterable via
                              # notifications.send_warning -- unlike CRITICAL, these are review-
@@ -47,6 +52,7 @@ CATEGORY_COLORS = {
     NotificationCategory.CRITICAL: "#c0392b",  # red
     NotificationCategory.STANDARD: "#27ae60",  # green
     NotificationCategory.PERIODIC: "#2980b9",  # blue
+    NotificationCategory.DAILY: "#8e44ad",     # purple
     NotificationCategory.WARNING: "#e67e22",   # amber
 }
 
@@ -67,12 +73,19 @@ def should_send(category: NotificationCategory, notification_config: dict) -> bo
     CRITICAL is always sent regardless of config -- it is deliberately NOT
     made filterable, since suppressing a stop-loss/circuit-breaker alert is
     exactly the failure mode this whole notification system exists to prevent.
-    STANDARD and PERIODIC respect the config.yaml notifications: block.
+    STANDARD/PERIODIC/WARNING default to sending if unconfigured. DAILY is the one
+    exception -- it defaults to NOT sending if unconfigured, since it's a real recurring
+    cost/inbox-volume feature (full indicator dashboard, generated every day) that should be
+    a deliberate opt-in, not something a config.yaml predating this feature silently starts
+    doing. This must hold even if `send_daily` is entirely absent from notification_config,
+    not just explicitly set false -- hence the per-category default below rather than a single
+    shared default.
     """
     if category == NotificationCategory.CRITICAL:
         return True
     key = f"send_{category.value}"
-    return bool(notification_config.get(key, True))  # default to sending if unconfigured
+    default = category != NotificationCategory.DAILY
+    return bool(notification_config.get(key, default))
 
 
 def send_action_email(
@@ -209,15 +222,158 @@ def build_rebalance_summary_html(portfolio_name: str, orders: dict, dry_run: boo
     """
 
 
-def build_monthly_report_html(portfolio_name: str, snapshot_df: pd.DataFrame, comparison: dict,
-                               real_pnl: dict | None = None) -> tuple[str, bytes | None]:
+def build_comparison_bar_chart(window_data: dict, title: str) -> bytes | None:
     """
-    Builds the monthly report's HTML body plus an embedded chart (as PNG bytes
-    to attach inline). Returns (html_body, chart_png_bytes_or_None).
+    Grouped bar chart, portfolio vs. benchmark return per trailing window -- one bar-pair per
+    window label. Shared by both the monthly report (core/functions.py's trailing_returns(),
+    windows like "1 Month"/"3 Month"/"6 Month"/"YTD"/"1 Year") and the daily report
+    (core/functions_quant_extensions.py's daily_window_comparison(), windows like "1 Day"/
+    "1 Week"/"2 Week"/"3 Week") -- both are normalized to the same shape before reaching here:
+    {window_label: {"portfolio": fraction, "benchmark": fraction}, ...}, plus non-window keys
+    like "as_of_date"/"error" which are ignored (not plotted).
 
-    chart_png_bytes is None if matplotlib isn't available or snapshot_df is
-    too short to chart -- the HTML report still renders without the chart in
-    that case, degrading gracefully rather than failing the whole report.
+    Returns None (not an exception) if matplotlib is unavailable or there are no plottable
+    windows yet (e.g. a portfolio too new for even a "1 Month" comparison) -- same graceful-
+    degradation contract as the existing portfolio-value chart below.
+    """
+    labels = [k for k, v in window_data.items() if isinstance(v, dict) and "portfolio" in v]
+    if not labels:
+        return None
+
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import io
+
+        portfolio_vals = [window_data[l]["portfolio"] * 100 for l in labels]
+        benchmark_vals = [window_data[l]["benchmark"] * 100 for l in labels]
+
+        x = list(range(len(labels)))
+        width = 0.35
+        fig, ax = plt.subplots(figsize=(8, 4))
+        ax.bar([i - width / 2 for i in x], portfolio_vals, width, label="Portfolio", color="#2980b9")
+        ax.bar([i + width / 2 for i in x], benchmark_vals, width, label="Benchmark", color="#95a5a6")
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels)
+        ax.axhline(0, color="#333333", linewidth=0.8)
+        ax.set_ylabel("Return (%)")
+        ax.set_title(title)
+        ax.legend()
+        fig.tight_layout()
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", bbox_inches="tight")
+        plt.close(fig)
+        return buf.getvalue()
+    except ImportError:
+        logger.warning("matplotlib not available -- comparison chart omitted.")
+        return None
+
+
+def _build_value_chart(snapshot_df: pd.DataFrame, title: str) -> bytes | None:
+    """The portfolio-value-over-time line chart -- factored out so both the monthly and daily
+    report builders share the exact same charting code instead of two copies drifting apart."""
+    if len(snapshot_df) < 2:
+        return None
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import io
+
+        fig, ax = plt.subplots(figsize=(8, 4))
+        ax.plot(snapshot_df["date"], snapshot_df["total_value"], marker="o", color="#2980b9")
+        ax.set_title(title)
+        ax.set_ylabel("$")
+        fig.autofmt_xdate()
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", bbox_inches="tight")
+        plt.close(fig)
+        return buf.getvalue()
+    except ImportError:
+        logger.warning("matplotlib not available -- value chart omitted.")
+        return None
+
+
+def _strategy_stats_rows(since_inception: dict | None) -> str:
+    """Total Return/CAGR/Max Drawdown/Std Dev/Sharpe/Sortino table rows, shared by both report
+    builders. since_inception is functions_quant_extensions.py's since_inception_performance()
+    output -- any stat that's None (e.g. Sharpe/Sortino before a year of history exists) shows
+    as 'Not enough history yet' rather than a blank cell or a crash."""
+    if since_inception is None or "error" in since_inception:
+        return ""
+
+    def _fmt_pct(key: str) -> str:
+        v = since_inception.get(key)
+        return f"{v:+.2%}" if v is not None else "Not enough history yet"
+
+    def _fmt_ratio(key: str) -> str:
+        v = since_inception.get(key)
+        return f"{v:.2f}" if v is not None else "Not enough history yet"
+
+    inception = since_inception.get("inception_date")
+    inception_str = inception.strftime("%Y-%m-%d") if inception is not None else "?"
+    rows = f"""
+    <tr><td style='padding:4px 8px;'>Since Inception</td><td style='padding:4px 8px;'>{inception_str}</td></tr>
+    <tr><td style='padding:4px 8px;'>Total Return</td><td style='padding:4px 8px;'>{_fmt_pct('total_return')}</td></tr>
+    <tr><td style='padding:4px 8px;'>CAGR</td><td style='padding:4px 8px;'>{_fmt_pct('cagr')}</td></tr>
+    <tr><td style='padding:4px 8px;'>Max Drawdown</td><td style='padding:4px 8px;'>{_fmt_pct('max_drawdown')}</td></tr>
+    <tr><td style='padding:4px 8px;'>Standard Deviation (annualized)</td><td style='padding:4px 8px;'>{_fmt_pct('std_dev')}</td></tr>
+    <tr><td style='padding:4px 8px;'>Sharpe Ratio</td><td style='padding:4px 8px;'>{_fmt_ratio('sharpe_ratio')}</td></tr>
+    <tr><td style='padding:4px 8px;'>Sortino Ratio</td><td style='padding:4px 8px;'>{_fmt_ratio('sortino_ratio')}</td></tr>
+    """
+    return f"""
+    <h3>Strategy Performance (Since Inception)</h3>
+    <table style="border-collapse: collapse;">{rows}</table>
+    """
+
+
+def _technical_indicators_html(indicators: dict[str, dict] | None) -> str:
+    """One row per held ticker, one column per indicator -- indicators is
+    {ticker: core/technical_indicators.py's compute_latest_indicators() output}. Tickers with
+    too little OHLCV history to compute indicators yet (empty dict) are omitted from the table
+    entirely rather than shown with blank cells."""
+    if not indicators:
+        return ""
+    tickers_with_data = {t: v for t, v in indicators.items() if v}
+    if not tickers_with_data:
+        return ""
+
+    cols = ["sma_20", "ema_20", "rsi_14", "macd", "atr_14", "bollinger_upper", "bollinger_lower",
+            "std_dev_20", "adx_14", "vwap", "obv"]
+    header = "".join(f"<th style='padding:4px 8px; text-align:left;'>{c}</th>" for c in cols)
+    body_rows = ""
+    for ticker, vals in tickers_with_data.items():
+        cells = "".join(
+            f"<td style='padding:4px 8px;'>{vals[c]:,.2f}</td>" if c in vals else "<td></td>"
+            for c in cols
+        )
+        body_rows += f"<tr><td style='padding:4px 8px;'><b>{ticker}</b></td>{cells}</tr>"
+
+    return f"""
+    <h3>Technical Indicators (held positions)</h3>
+    <table style="border-collapse: collapse; font-size: 12px;">
+      <tr><th style='padding:4px 8px; text-align:left;'>Ticker</th>{header}</tr>
+      {body_rows}
+    </table>
+    """
+
+
+def _build_report_html(
+    portfolio_name: str, report_label: str, period_line: str, snapshot_df: pd.DataFrame,
+    comparison: dict, real_pnl: dict | None = None, since_inception: dict | None = None,
+    window_comparison: dict | None = None, indicators: dict[str, dict] | None = None,
+) -> tuple[str, bytes | None, bytes | None]:
+    """
+    Shared HTML/chart builder for both the monthly and daily reports (build_monthly_report_html()
+    / build_daily_report_html() below are thin wrappers over this) -- the two reports differ only
+    in cadence and which trailing windows their `comparison`/`window_comparison` dicts cover, not
+    in structure, so this stays as one implementation rather than two copies that could drift
+    apart. Returns (html_body, value_chart_bytes_or_None, comparison_chart_bytes_or_None).
+
+    Both chart_bytes values are None if matplotlib isn't available or there's not enough data
+    to chart yet -- the HTML report still renders without them in that case, degrading
+    gracefully rather than failing the whole report.
 
     real_pnl : dict, optional
         Output of execution/live_signal.py's measure_live_performance() --
@@ -225,27 +381,26 @@ def build_monthly_report_html(portfolio_name: str, snapshot_df: pd.DataFrame, co
         from "Current Position"'s unrealized_pnl below (which only marks
         currently-open positions from the latest snapshot, not cumulative
         realized gains from trades that have since closed). Omitted from the
-        report if not provided (e.g. no trade log exists yet this month).
+        report if not provided (e.g. no trade log exists yet this period).
+    since_inception : dict, optional
+        core/functions_quant_extensions.py's since_inception_performance() output -- Total
+        Return/CAGR/Max Drawdown/Std Dev/Sharpe/Sortino since the first snapshot. Omitted
+        section if not provided.
+    window_comparison : dict, optional
+        {window_label: {"portfolio": fraction, "benchmark": fraction}} -- e.g. trailing_returns()'s
+        "1 Month"/"3 Month"/etc. columns for the monthly report, or
+        daily_window_comparison()'s "1 Day"/"1 Week"/etc. for the daily report, reshaped into
+        this uniform dict shape. Charted via build_comparison_bar_chart(); omitted if not
+        provided or empty.
+    indicators : dict, optional
+        {ticker: core/technical_indicators.py's compute_latest_indicators() output} for the
+        portfolio's currently held positions. Omitted section if not provided.
     """
-    chart_bytes = None
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-        import io
-
-        if len(snapshot_df) >= 2:
-            fig, ax = plt.subplots(figsize=(8, 4))
-            ax.plot(snapshot_df["date"], snapshot_df["total_value"], marker="o", color="#2980b9")
-            ax.set_title(f"{portfolio_name}: Portfolio Value")
-            ax.set_ylabel("$")
-            fig.autofmt_xdate()
-            buf = io.BytesIO()
-            fig.savefig(buf, format="png", bbox_inches="tight")
-            plt.close(fig)
-            chart_bytes = buf.getvalue()
-    except ImportError:
-        logger.warning("matplotlib not available -- monthly report will omit the chart.")
+    value_chart_bytes = _build_value_chart(snapshot_df, f"{portfolio_name}: Portfolio Value")
+    comparison_chart_bytes = (
+        build_comparison_bar_chart(window_comparison, f"{portfolio_name}: vs. Benchmark")
+        if window_comparison else None
+    )
 
     latest = snapshot_df.iloc[-1] if not snapshot_df.empty else None
     summary_rows = ""
@@ -278,27 +433,72 @@ def build_monthly_report_html(portfolio_name: str, snapshot_df: pd.DataFrame, co
     <table style="border-collapse: collapse;">{real_pnl_rows}</table>
     """ if real_pnl is not None else ""
 
-    chart_html = '<img src="cid:portfolio_chart" style="max-width:100%;">' if chart_bytes else ""
+    value_chart_html = '<img src="cid:portfolio_chart" style="max-width:100%;">' if value_chart_bytes else ""
+    comparison_chart_html = '<img src="cid:comparison_chart" style="max-width:100%;">' if comparison_chart_bytes else ""
+    strategy_stats_html = _strategy_stats_rows(since_inception)
+    indicators_html = _technical_indicators_html(indicators)
 
     html = f"""
-    <h2>Monthly Report: {portfolio_name}</h2>
-    <p>Period ending {datetime.now().strftime('%Y-%m-%d')}</p>
-    {chart_html}
+    <h2>{report_label} Report: {portfolio_name}</h2>
+    <p>{period_line}</p>
+    {value_chart_html}
     <h3>Current Position</h3>
     <table style="border-collapse: collapse;">{summary_rows}</table>
     {real_pnl_html}
+    {strategy_stats_html}
     <h3>Performance vs. Benchmark</h3>
     <table style="border-collapse: collapse;">{comparison_rows}</table>
+    {comparison_chart_html}
+    {indicators_html}
     <p style="color:#999; font-size:11px;">This report reflects backtested/paper/live results as configured --
     verify which mode this portfolio is running in before treating these numbers as real returns.</p>
     """
-    return html, chart_bytes
+    return html, value_chart_bytes, comparison_chart_bytes
 
 
-def send_monthly_report(portfolio_name: str, snapshot_df: pd.DataFrame, comparison: dict,
-                         notification_config: dict, real_pnl: dict | None = None) -> bool:
+def build_monthly_report_html(
+    portfolio_name: str, snapshot_df: pd.DataFrame, comparison: dict,
+    real_pnl: dict | None = None, since_inception: dict | None = None,
+    window_comparison: dict | None = None, indicators: dict[str, dict] | None = None,
+) -> tuple[str, bytes | None, bytes | None]:
+    """Monthly cadence -- see _build_report_html() for the full parameter docs (shared)."""
+    return _build_report_html(
+        portfolio_name, "Monthly", f"Period ending {datetime.now().strftime('%Y-%m-%d')}",
+        snapshot_df, comparison, real_pnl, since_inception, window_comparison, indicators,
+    )
+
+
+def build_daily_report_html(
+    portfolio_name: str, snapshot_df: pd.DataFrame, comparison: dict,
+    real_pnl: dict | None = None, since_inception: dict | None = None,
+    window_comparison: dict | None = None, indicators: dict[str, dict] | None = None,
+) -> tuple[str, bytes | None, bytes | None]:
+    """
+    Daily cadence -- same content depth as the monthly report (technical indicators, since-
+    inception strategy stats, benchmark comparison chart), generated every day instead of
+    monthly. Gated behind config.yaml's notifications.send_daily (default False) precisely
+    because of this depth -- see docs/EMAIL_REPORTING.md. See _build_report_html() for the full
+    parameter docs (shared); window_comparison here is expected to be
+    core/functions_quant_extensions.py's daily_window_comparison() output ("1 Day"/"1 Week"/
+    "2 Week"/"3 Week"), not trailing_returns()'s monthly windows.
+    """
+    return _build_report_html(
+        portfolio_name, "Daily", f"As of {datetime.now().strftime('%Y-%m-%d')}",
+        snapshot_df, comparison, real_pnl, since_inception, window_comparison, indicators,
+    )
+
+
+def send_monthly_report(
+    portfolio_name: str, snapshot_df: pd.DataFrame, comparison: dict,
+    notification_config: dict, real_pnl: dict | None = None,
+    since_inception: dict | None = None, window_comparison: dict | None = None,
+    indicators: dict[str, dict] | None = None,
+) -> bool:
     """PERIODIC category -- filterable, but distinct from CRITICAL/STANDARD filtering."""
-    html, chart_bytes = build_monthly_report_html(portfolio_name, snapshot_df, comparison, real_pnl)
+    html, value_chart_bytes, comparison_chart_bytes = build_monthly_report_html(
+        portfolio_name, snapshot_df, comparison, real_pnl,
+        since_inception, window_comparison, indicators,
+    )
 
     if not should_send(NotificationCategory.PERIODIC, notification_config):
         logger.info("Monthly report filtered by config: %s", portfolio_name)
@@ -315,9 +515,13 @@ def send_monthly_report(portfolio_name: str, snapshot_df: pd.DataFrame, comparis
     msg["To"] = smtp["to"]
     msg["X-Momentum-Trading-Bot"] = "1"
     msg.attach(MIMEText(html, "html"))
-    if chart_bytes:
-        img = MIMEImage(chart_bytes)
+    if value_chart_bytes:
+        img = MIMEImage(value_chart_bytes)
         img.add_header("Content-ID", "<portfolio_chart>")
+        msg.attach(img)
+    if comparison_chart_bytes:
+        img = MIMEImage(comparison_chart_bytes)
+        img.add_header("Content-ID", "<comparison_chart>")
         msg.attach(img)
 
     try:
@@ -329,4 +533,56 @@ def send_monthly_report(portfolio_name: str, snapshot_df: pd.DataFrame, comparis
         return True
     except Exception as e:
         logger.error("Failed to send monthly report for %s: %s", portfolio_name, e)
+        return False
+
+
+def send_daily_report(
+    portfolio_name: str, snapshot_df: pd.DataFrame, comparison: dict,
+    notification_config: dict, real_pnl: dict | None = None,
+    since_inception: dict | None = None, window_comparison: dict | None = None,
+    indicators: dict[str, dict] | None = None,
+) -> bool:
+    """DAILY category -- filterable via notifications.send_daily, defaults to NOT sending
+    unless explicitly enabled (see should_send()'s per-category default). Structurally
+    identical to send_monthly_report() -- same graceful degradation, same two-image MIME
+    attachment pattern -- just a different category/subject and (typically) different-shaped
+    comparison/window_comparison inputs (daily windows, not monthly)."""
+    html, value_chart_bytes, comparison_chart_bytes = build_daily_report_html(
+        portfolio_name, snapshot_df, comparison, real_pnl,
+        since_inception, window_comparison, indicators,
+    )
+
+    if not should_send(NotificationCategory.DAILY, notification_config):
+        logger.info("Daily report filtered by config: %s", portfolio_name)
+        return False
+
+    smtp = _smtp_config()
+    if smtp is None:
+        logger.error("SMTP not configured -- daily report NOT SENT for %s", portfolio_name)
+        return False
+
+    msg = MIMEMultipart("related")
+    msg["Subject"] = f"[DAILY] Daily Report: {portfolio_name}"
+    msg["From"] = smtp["user"]
+    msg["To"] = smtp["to"]
+    msg["X-Momentum-Trading-Bot"] = "1"
+    msg.attach(MIMEText(html, "html"))
+    if value_chart_bytes:
+        img = MIMEImage(value_chart_bytes)
+        img.add_header("Content-ID", "<portfolio_chart>")
+        msg.attach(img)
+    if comparison_chart_bytes:
+        img = MIMEImage(comparison_chart_bytes)
+        img.add_header("Content-ID", "<comparison_chart>")
+        msg.attach(img)
+
+    try:
+        with smtplib.SMTP(smtp["host"], smtp["port"], timeout=15) as server:
+            server.starttls()
+            authenticate_smtp(server, smtp["user"], smtp["password"])
+            server.sendmail(smtp["user"], [smtp["to"]], msg.as_string())
+        logger.info("Daily report sent: %s", portfolio_name)
+        return True
+    except Exception as e:
+        logger.error("Failed to send daily report for %s: %s", portfolio_name, e)
         return False

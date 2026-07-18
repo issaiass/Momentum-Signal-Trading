@@ -14,7 +14,7 @@ metadata:
 
 # Email notification categories. CRITICAL (stop-loss executions,
 # circuit-breaker trips, the capital-allocation error that aborts a run) is ALWAYS
-# sent and cannot be disabled here -- only STANDARD, PERIODIC, and WARNING are filterable.
+# sent and cannot be disabled here -- only STANDARD, PERIODIC, DAILY, and WARNING are filterable.
 # Requires SMTP env vars set (see DEPLOYMENT.md). If sending via a Gmail account, SMTP_PASS
 # must be a Gmail App Password, NOT your normal account password -- generate one at
 # https://myaccount.google.com/apppasswords (requires 2-Step Verification enabled on the
@@ -23,6 +23,15 @@ notifications:
   send_standard: true             # routine rebalance BUY/SELL/HOLD summaries
   send_periodic: true             # monthly performance report
   monthly_report_day_of_month: 1  # null/omit to disable the monthly report entirely
+  send_daily: false               # daily performance report -- same content depth as the
+                                   # monthly report (technical indicators for held positions,
+                                   # since-inception Total Return/CAGR/Max Drawdown/Std Dev/
+                                   # Sharpe/Sortino, a benchmark comparison chart), generated
+                                   # EVERY day instead of monthly. Defaults to false (unlike
+                                   # every other notification flag here, which default to
+                                   # sending if omitted) because of the real recurring compute/
+                                   # inbox-volume cost -- an explicit, deliberate opt-in, not
+                                   # something you get by accident from an old config.yaml.
   send_warning: true              # multi-portfolio capital-safety warnings (fixed
                                    # allocations exceeding the real account, ticker overlap
                                    # across portfolios). Gates the EMAIL only -- the detailed

@@ -19,6 +19,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from . import functions as fn
 from .paths import data_dir
 
 
@@ -704,7 +705,201 @@ def compare_to_benchmark(name: str, snapshot_dir: str = str(data_dir())) -> dict
 
 
 # --------------------------------------------------------------------------- #
-# 12. EXTERNAL PORTFOLIO CORRELATION CHECK
+# 12. SINCE-INCEPTION STRATEGY PERFORMANCE INDICATORS
+# --------------------------------------------------------------------------- #
+def since_inception_performance(
+    name: str, snapshot_dir: str = str(data_dir()), risk_free_ticker: str = "BIL",
+) -> dict:
+    """
+    Total Return, CAGR, Max Drawdown, Standard Deviation, Sharpe Ratio, and Sortino Ratio from
+    write_portfolio_snapshot()'s log (live_signal.py), over the full history from the FIRST
+    recorded snapshot row -- the inception of this portfolio's tracked history -- through the
+    latest snapshot. Deliberately reuses functions.py's annualize_returns()/annualize_vol()/
+    max_drawdown()/sharpe_ratio()/sortino_ratio() -- the SAME functions the backtest engine's
+    tear_sheet() is built from -- rather than a separate implementation, so live and backtested
+    stats can never silently diverge (same principle as resolve_target_weights() being shared
+    between the backtest and live paths).
+
+    Deliberately does NOT call tear_sheet() itself: that function also computes calendar-year
+    returns, best/worst 12/36-month periods, and 3-year rolling outperformance -- none of which
+    can produce a meaningful result from a live portfolio that might only have weeks of history,
+    and tear_sheet() isn't written to degrade gracefully around that (several of its sub-calls
+    would raise or return nonsense on a short series). Calling the individual stat functions
+    directly, each independently guarded, means a portfolio too young for a real Sharpe Ratio
+    still gets Total Return/CAGR/Max Drawdown/Std Dev back correctly instead of the whole thing
+    failing or returning garbage.
+
+    Returns a dict of fractions (e.g. 0.05 = 5%), NOT the percentage-scale numbers the underlying
+    functions.py helpers return -- normalized here so report-building code can use the same
+    `:.2%` formatting already used for compare_to_benchmark()'s output. Any stat that can't be
+    computed yet is None, not an exception or a NaN silently rendered as "0%" -- Sharpe/Sortino
+    specifically need >= 1 year of daily rows (functions.py's own threshold) and are commonly
+    None for a portfolio that's simply too new; Sharpe also depends on a live network fetch for
+    the risk-free proxy and returns None (not a crash) if that fetch fails.
+    """
+    path = f"{snapshot_dir}/portfolio_snapshot_{name}.csv"
+    try:
+        df = pd.read_csv(path, parse_dates=["date"])
+    except FileNotFoundError:
+        return {"error": f"No snapshot log found at {path}"}
+
+    df = df.dropna(subset=["portfolio_period_return", "benchmark_period_return"]).sort_values("date")
+    if df.empty:
+        return {"error": "No snapshot rows with period returns yet -- need at least 2 runs."}
+
+    returns = df.set_index("date")[["portfolio_period_return", "benchmark_period_return"]].rename(
+        columns={"portfolio_period_return": "Portfolio", "benchmark_period_return": "SPY_Return"})
+    inception_date, latest_date = returns.index[0], returns.index[-1]
+
+    total_return = float((1 + returns["Portfolio"]).prod() - 1)
+
+    def _safe_stat(fn_call, divide_by_100: bool = True):
+        try:
+            result = fn_call()
+            if result is None:
+                return None
+            value = float(result.loc["Portfolio"].iloc[0])
+            return value / 100 if divide_by_100 else value
+        except Exception:
+            return None
+
+    cagr = _safe_stat(lambda: fn.annualize_returns(returns, frequency="D"))
+    std_dev = _safe_stat(lambda: fn.annualize_vol(returns, frequency="D"))
+    max_dd = _safe_stat(lambda: fn.max_drawdown(returns))
+    sharpe = _safe_stat(
+        lambda: fn.sharpe_ratio(returns, risk_free_ticker, str(inception_date.date()),
+                                 str(latest_date.date()), frequency="D"),
+        divide_by_100=False,  # already a ratio, not a percentage
+    )
+    sortino = _safe_stat(lambda: fn.sortino_ratio(returns, 0, "D"), divide_by_100=False)
+
+    return {
+        "inception_date": inception_date,
+        "as_of_date": latest_date,
+        "n_periods": len(returns),
+        "total_return": total_return,
+        "cagr": cagr,
+        "max_drawdown": max_dd,
+        "std_dev": std_dev,
+        "sharpe_ratio": sharpe,
+        "sortino_ratio": sortino,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# 13. SHORT-WINDOW BENCHMARK COMPARISON (daily report)
+# --------------------------------------------------------------------------- #
+def daily_window_comparison(name: str, snapshot_dir: str = str(data_dir())) -> dict:
+    """
+    Portfolio vs. benchmark cumulative return over short trailing windows (previous day, 1 week,
+    2 weeks, 3 weeks) -- the daily report's equivalent of trailing_returns()'s monthly windows
+    (1/3/6 month, YTD, 1 year), which don't fit a daily-cadence report's much shorter timescale.
+    Deliberately a separate, minimal implementation rather than generalizing functions.py's
+    trailing_returns() to accept arbitrary windows -- that function hardcodes its output columns
+    to a fixed 1/3/6-month-scale list (functions.py:852-863), so forcing it to also support
+    day/week-scale windows would mean modifying shared, notebook-relied-upon code for a case it
+    was never designed for; a small dedicated helper here is lower risk.
+
+    Returns {window_label: {"portfolio": fraction, "benchmark": fraction}} for each of
+    "1 Day"/"1 Week"/"2 Week"/"3 Week" -- a window is omitted entirely (not NaN) if the snapshot
+    log doesn't yet have a row far enough back to compute it, e.g. a portfolio in its first week
+    has no "3 Week" comparison yet.
+    """
+    path = f"{snapshot_dir}/portfolio_snapshot_{name}.csv"
+    try:
+        df = pd.read_csv(path, parse_dates=["date"])
+    except FileNotFoundError:
+        return {"error": f"No snapshot log found at {path}"}
+
+    df = df.dropna(subset=["portfolio_period_return", "benchmark_period_return"]).sort_values("date")
+    if df.empty:
+        return {"error": "No snapshot rows with period returns yet -- need at least 2 runs."}
+
+    df = df.set_index("date")
+    port_cgi = (1 + df["portfolio_period_return"]).cumprod()
+    bench_cgi = (1 + df["benchmark_period_return"]).cumprod()
+    latest_date = df.index[-1]
+
+    windows = {"1 Day": 1, "1 Week": 7, "2 Week": 14, "3 Week": 21}
+    result = {}
+    for label, days_back in windows.items():
+        target_date = latest_date - pd.Timedelta(days=days_back)
+        eligible = port_cgi.index[port_cgi.index <= target_date]
+        if len(eligible) == 0:
+            continue  # not enough history yet for this window
+        start_date = eligible[-1]
+        result[label] = {
+            "portfolio": float(port_cgi.loc[latest_date] / port_cgi.loc[start_date] - 1),
+            "benchmark": float(bench_cgi.loc[latest_date] / bench_cgi.loc[start_date] - 1),
+        }
+    result["as_of_date"] = latest_date
+    return result
+
+
+# --------------------------------------------------------------------------- #
+# 14. MONTHLY-WINDOW BENCHMARK COMPARISON (monthly report)
+# --------------------------------------------------------------------------- #
+def monthly_window_comparison(name: str, snapshot_dir: str = str(data_dir())) -> dict:
+    """
+    Portfolio vs. benchmark cumulative return over trailing windows for the monthly report --
+    "1 Month"/"3 Month"/"6 Month"/"YTD"/"1 Year" -- in the same uniform {window_label:
+    {"portfolio": fraction, "benchmark": fraction}} shape daily_window_comparison() above
+    already returns, so build_comparison_bar_chart() (interfaces/notifications.py) can chart
+    either report's comparison data without caring which one it is.
+
+    Deliberately does NOT reuse functions.py's trailing_returns()/return_period_dates(), despite
+    those already defining this exact window set -- confirmed by direct testing that they raise
+    a KeyError against a short, live daily-snapshot history: return_period_dates()'s "Since
+    Inception" window computes dt_start - BDay(), which routinely falls before the market
+    calendar schedule this function fetches (start_date to end_date only), and its "M"-frequency
+    branch skips holiday/weekend snapping entirely (assumes an already-monthly-indexed series).
+    That machinery was evidently only ever exercised against full multi-year backtest histories
+    in practice, not short-lived live data. Same lightweight cumulative-growth-index lookback
+    approach as daily_window_comparison() instead -- proven to work correctly against short
+    histories -- just with month-scale day offsets rather than week-scale ones.
+
+    A window is omitted from the result if the snapshot log doesn't yet have a row far enough
+    back to compute it (e.g. no "1 Year" comparison for a portfolio only a few months old).
+    """
+    path = f"{snapshot_dir}/portfolio_snapshot_{name}.csv"
+    try:
+        df = pd.read_csv(path, parse_dates=["date"])
+    except FileNotFoundError:
+        return {"error": f"No snapshot log found at {path}"}
+
+    df = df.dropna(subset=["portfolio_period_return", "benchmark_period_return"]).sort_values("date")
+    if df.empty:
+        return {"error": "No snapshot rows with period returns yet -- need at least 2 runs."}
+
+    df = df.set_index("date")
+    port_cgi = (1 + df["portfolio_period_return"]).cumprod()
+    bench_cgi = (1 + df["benchmark_period_return"]).cumprod()
+    latest_date = df.index[-1]
+
+    windows = {
+        "1 Month": latest_date - pd.DateOffset(months=1),
+        "3 Month": latest_date - pd.DateOffset(months=3),
+        "6 Month": latest_date - pd.DateOffset(months=6),
+        "YTD": pd.Timestamp(year=latest_date.year, month=1, day=1) - pd.Timedelta(days=1),
+        "1 Year": latest_date - pd.DateOffset(years=1),
+    }
+
+    result = {}
+    for label, target_date in windows.items():
+        eligible = port_cgi.index[port_cgi.index <= target_date]
+        if len(eligible) == 0:
+            continue  # not enough history yet for this window
+        start_date = eligible[-1]
+        result[label] = {
+            "portfolio": float(port_cgi.loc[latest_date] / port_cgi.loc[start_date] - 1),
+            "benchmark": float(bench_cgi.loc[latest_date] / bench_cgi.loc[start_date] - 1),
+        }
+    result["as_of_date"] = latest_date
+    return result
+
+
+# --------------------------------------------------------------------------- #
+# 15. EXTERNAL PORTFOLIO CORRELATION CHECK
 # --------------------------------------------------------------------------- #
 def check_external_correlation(
     strategy_returns: pd.Series, other_holdings_returns: dict,
@@ -756,7 +951,7 @@ def check_external_correlation(
 
 
 # --------------------------------------------------------------------------- #
-# 13. MULTI-LOOKBACK SIGNAL INTEGRATION
+# 16. MULTI-LOOKBACK SIGNAL INTEGRATION
 # --------------------------------------------------------------------------- #
 def blend_momentum_scores(
     daily_prices: pd.DataFrame, lookbacks: list[int] = [3, 6, 12], weights: list[float] | None = None,

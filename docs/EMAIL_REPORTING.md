@@ -8,6 +8,7 @@
 | **WARNING** | Amber | Yes (`notifications.send_warning`) | Fixed portfolio allocations exceeding the real account, ticker overlap across portfolios, a portfolio's `holding_period` configured faster than weekly |
 | **STANDARD** | Green | Yes (`notifications.send_standard`) | Routine rebalance BUY/SELL/HOLD summaries |
 | **PERIODIC** | Blue | Yes (`notifications.send_periodic`) | Monthly performance report |
+| **DAILY** | Purple | Yes (`notifications.send_daily`) — **defaults to OFF**, unlike every other category here | Daily performance report (same depth as the monthly report, generated every day) |
 
 CRITICAL cannot be disabled via config — this is deliberate. Suppressing a stop-loss or
 circuit-breaker alert is exactly the failure mode this system exists to prevent. See
@@ -20,6 +21,12 @@ their overlapping-ticker setup is intentional can quiet the recurring email. Dis
 email never disables the underlying log line, though (see below) -- the risk is never fully
 invisible even with `send_warning: false`.
 
+DAILY is the opposite exception: every other filterable category defaults to sending if
+`notifications:` is missing the key entirely, but DAILY defaults to **not** sending — a real
+recurring compute/inbox-volume cost (full indicator dashboard, generated every day) that must be
+a deliberate opt-in, including for a `config.yaml` written before this feature existed and that
+never mentions `send_daily` at all.
+
 ## Configuration
 
 In `config.yaml`:
@@ -29,6 +36,9 @@ notifications:
   send_standard: true             # routine rebalance summaries
   send_periodic: true             # monthly report
   monthly_report_day_of_month: 1  # day of month the report fires; omit/null to disable
+  send_daily: false               # daily report -- same content depth as the monthly report,
+                                   # generated every day. Defaults to false (see above);
+                                   # set true to opt in.
   send_warning: true              # multi-portfolio capital-safety warnings.
                                    # Must be a real bool -- a value like "false" (a truthy
                                    # non-empty string) is rejected at config-load time
@@ -110,24 +120,68 @@ since an intended BUY/SELL doesn't always actually fill. Built by
   one only marks currently-*open* positions from the latest snapshot, while this section also
   includes realized gains from trades that have since closed, and is filtered to rows matching
   the run's actual `dry_run`/`--live` mode (the two modes share one log file).
-- Cumulative return vs. benchmark (via `compare_to_benchmark()`)
+- **Strategy Performance (Since Inception)** — Total Return, CAGR, Max Drawdown, Standard
+  Deviation, Sharpe Ratio, Sortino Ratio, computed by
+  `core/functions_quant_extensions.py`'s `since_inception_performance()` from the FIRST row ever
+  written to `portfolio_snapshot_<name>.csv` through today. Reuses `functions.py`'s
+  `annualize_returns()`/`annualize_vol()`/`max_drawdown()`/`sharpe_ratio()`/`sortino_ratio()` --
+  the same functions the backtest engine's `tear_sheet()` is built from -- so live and
+  backtested stats can't silently diverge. Sharpe and Sortino specifically need at least a year
+  of daily snapshot rows and show "Not enough history yet" rather than a blank cell or a crash
+  for a portfolio that's simply too new; Sharpe additionally depends on a live fetch of a
+  risk-free proxy (`BIL` by default) and also degrades to "Not enough history yet" if that fetch
+  fails, rather than erroring.
+- Cumulative return vs. benchmark since the first snapshot (via `compare_to_benchmark()`), plus
+  a **trailing-window comparison chart** (portfolio vs. benchmark, grouped bars) for "1 Month" /
+  "3 Month" / "6 Month" / "YTD" / "1 Year" — from
+  `core/functions_quant_extensions.py`'s `monthly_window_comparison()`. A window is simply
+  omitted (not shown as zero or NaN) if the snapshot log doesn't go back far enough for it yet.
+- **Technical Indicators (held positions)** — for each currently-held ticker only (not the whole
+  configured universe): SMA(20)/EMA(20) (trend), ADX(14) (trend strength), RSI(14)/MACD
+  (momentum), ATR(14)/Bollinger Bands/rolling 20-period Std Dev (volatility), VWAP/OBV (volume)
+  -- from `core/technical_indicators.py`, computed on ~60 days of OHLCV fetched specifically for
+  this report (`execution/live_signal.py`'s `fetch_ohlcv_for_tickers()`, distinct from the
+  close-only prices fetched for the momentum signal itself). A ticker with too little OHLCV
+  history is omitted from the table rather than shown with blank cells; the whole section is
+  omitted if no ticker has enough data yet.
 
-Degrades gracefully: if there isn't enough snapshot history yet for a chart, benchmark
+Degrades gracefully throughout: if there isn't enough snapshot history yet for a chart, benchmark
 comparison data isn't available, or no trade log exists yet (`FileNotFoundError`, e.g. no
 rebalance has ever fired for this portfolio), those sections are simply omitted rather than
 causing the whole report to fail.
 
+**DAILY (daily report)** — structurally identical to the monthly report above (same Strategy
+Performance/Technical Indicators sections, same graceful degradation), generated every day
+instead of monthly, via `build_daily_report_html()`/`send_daily_report()`. The one real
+difference: its trailing-window comparison chart uses `daily_window_comparison()` instead of
+`monthly_window_comparison()` -- "1 Day" / "1 Week" / "2 Week" / "3 Week", the short-timescale
+windows that actually make sense at daily cadence, rather than the monthly report's 1/3/6-month
+windows. Off by default (`send_daily: false`) -- see the category table above for why.
+
 ## What's implemented vs. deferred
 
-**Implemented and tested** (`tests/interfaces/test_notifications.py`):
-- Category filtering logic (CRITICAL unsuppressable, STANDARD/PERIODIC/WARNING configurable)
-- HTML generation for rebalance summaries and monthly reports
-- Chart embedding via matplotlib
+**Implemented and tested** (`tests/interfaces/test_notifications.py`,
+`tests/core/test_technical_indicators.py`, `tests/core/test_functions_quant_extensions.py`):
+- Category filtering logic (CRITICAL unsuppressable, STANDARD/PERIODIC/DAILY/WARNING
+  configurable, DAILY defaulting to off unlike the others)
+- HTML generation for rebalance summaries, monthly reports, and daily reports
+- Chart embedding via matplotlib (portfolio value over time, trailing-window comparison bars)
+- Technical indicators (trend/momentum/volatility/volume) for held positions
+- Strategy performance indicators (Total Return, CAGR, Max Drawdown, Std Dev, Sharpe, Sortino)
+  since inception
 - Graceful degradation on missing/insufficient data
 
 **Deferred, not built in this pass** (flagged explicitly rather than delivered shallow):
-- **PDF attachment** for the monthly report — the HTML report covers the same content; a PDF
-  version would need a rendering library (e.g. `weasyprint` or `reportlab`) not currently a
+- **Fundamental indicators** (P/E, PEG, ROE, Debt-to-Equity, Current Ratio) and **macro
+  indicators** (Fed Funds Rate, CPI) — genuinely new data-sourcing surface, confirmed nothing in
+  this codebase fetches either today (`get_bulk_prices()`/`get_stock_prices()` are price-only).
+  Fundamentals would need FMP's fundamentals endpoints (unconfirmed whether your plan tier
+  includes them) or a similar vendor; macro data needs a separate source entirely (FRED -- the
+  Federal Reserve's own API, free but a new API key/integration). Deliberately deferred rather
+  than half-built against an unconfirmed data source -- would plug into a new
+  `core/fundamentals.py` module, following the same pattern as `core/technical_indicators.py`.
+- **PDF attachment** for the monthly/daily reports — the HTML report covers the same content; a
+  PDF version would need a rendering library (e.g. `weasyprint` or `reportlab`) not currently a
   dependency. Straightforward to add later using `build_monthly_report_html()`'s existing
   output as the source content.
 - **Pre-trade preview email** (1hr before rebalance) — would need either a second scheduled

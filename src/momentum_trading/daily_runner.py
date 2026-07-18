@@ -30,11 +30,12 @@ from .execution.live_signal import (
     is_rebalance_day, is_holding_period_too_frequent, run, run_multi_portfolio,
     get_ibkr_positions, get_ibkr_account_value, with_retry,
     place_orders_ibkr, log_orders, write_portfolio_snapshot, get_latest_snapshot,
-    derive_entry_date, measure_live_performance,
+    derive_entry_date, measure_live_performance, fetch_ohlcv_for_tickers,
 )
 from .core.smtp_auth import authenticate as authenticate_smtp, smtp_ready
 from .core.audit_log import log_alert, read_recent_alerts, ALERTS_LOG_PATH
 from .core.paths import data_dir, logs_dir
+from .core.technical_indicators import compute_latest_indicators
 from .backtest.momentum_backtest import BacktestConfig
 from .risk.circuit_breaker import (
     LOCK_DIR, check_circuit_breaker, resume_trading, get_effective_max_drawdown_pct,
@@ -42,7 +43,7 @@ from .risk.circuit_breaker import (
 )
 from .interfaces.notifications import (
     NotificationCategory, send_action_email, send_standard_action,
-    build_rebalance_summary_html, send_monthly_report,
+    build_rebalance_summary_html, send_monthly_report, send_daily_report,
 )
 from .interfaces.email_commands import (
     poll_and_process_commands, PauseCommand, ResumeCommand, LiquidateCommand,
@@ -835,6 +836,39 @@ def main():
             except Exception as e:
                 logger.warning("[%s] Portfolio snapshot skipped due to error (non-fatal): %s", name, e)
 
+            # --- Daily report, every day regardless of rebalance schedule -- gated by
+            #     notifications.send_daily (default False, see docs/EMAIL_REPORTING.md). Checked
+            #     BEFORE doing any of the underlying work (OHLCV fetch, indicator computation) so
+            #     a portfolio with this off pays zero extra cost for it. ---
+            notification_cfg = cfg_raw.get("notifications", {})
+            if notification_cfg.get("send_daily", False):
+                try:
+                    snapshot_path = str(data_dir() / f"portfolio_snapshot_{name}.csv")
+                    if os.path.isfile(snapshot_path):
+                        daily_snapshot_df = pd.read_csv(snapshot_path, parse_dates=["date"])
+                        daily_comparison = fnx.compare_to_benchmark(name)
+                        daily_since_inception = fnx.since_inception_performance(name)
+                        daily_windows = fnx.daily_window_comparison(name)
+                        held_tickers = list(current_positions.keys())
+                        daily_indicators = {}
+                        if held_tickers:
+                            ohlcv = fetch_ohlcv_for_tickers(held_tickers)
+                            daily_indicators = {t: compute_latest_indicators(df) for t, df in ohlcv.items()}
+                        try:
+                            daily_real_pnl = measure_live_performance(
+                                "1970-01-01", datetime.today().strftime("%Y-%m-%d"),
+                                latest_prices=latest_prices, log_path=trade_log_path,
+                                initial_capital=total_value, dry_run=not args.live,
+                            )
+                        except FileNotFoundError:
+                            daily_real_pnl = None
+                        send_daily_report(
+                            name, daily_snapshot_df, daily_comparison, notification_cfg,
+                            daily_real_pnl, daily_since_inception, daily_windows, daily_indicators,
+                        )
+                except Exception as e:
+                    logger.warning("[%s] Daily report skipped due to error (non-fatal): %s", name, e)
+
             # --- item 3: idempotent rebalance, item 2 rebalance gate ---
             if args.force_rebalance or is_rebalance_day(holding_period_months=cfg.holding_period):
                 if already_ran_today(f"rebalance_{name}") and not args.force_rebalance:
@@ -870,7 +904,6 @@ def main():
                 mark_ran_today(f"rebalance_{name}")
 
                 # --- STANDARD-category notification (filterable) ---
-                notification_cfg = cfg_raw.get("notifications", {})
                 if orders_result:
                     send_standard_action(
                         f"Rebalance executed: {name}",
@@ -885,6 +918,13 @@ def main():
                     if os.path.isfile(snapshot_path):
                         snapshot_df = pd.read_csv(snapshot_path, parse_dates=["date"])
                         comparison = fnx.compare_to_benchmark(name)
+                        since_inception = fnx.since_inception_performance(name)
+                        window_comparison = fnx.monthly_window_comparison(name)
+                        held_tickers = list(current_positions.keys())
+                        indicators = {}
+                        if held_tickers:
+                            ohlcv = fetch_ohlcv_for_tickers(held_tickers)
+                            indicators = {t: compute_latest_indicators(df) for t, df in ohlcv.items()}
                         # --- REAL realized+unrealized P&L from the trade log (FIFO),
                         #     distinct from the snapshot-based unrealized_pnl already in the
                         #     report -- this covers cumulative gains from trades that have since
@@ -900,7 +940,10 @@ def main():
                             )
                         except FileNotFoundError:
                             real_pnl = None
-                        send_monthly_report(name, snapshot_df, comparison, notification_cfg, real_pnl)
+                        send_monthly_report(
+                            name, snapshot_df, comparison, notification_cfg, real_pnl,
+                            since_inception, window_comparison, indicators,
+                        )
             else:
                 logger.info("[%s] Not a rebalance day -- stop-loss check complete only.", name)
 

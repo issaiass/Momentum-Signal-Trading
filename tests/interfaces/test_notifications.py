@@ -316,6 +316,60 @@ class TestHTMLGeneration:
         html, _, _ = build_monthly_report_html("portfolio1", snap, {"error": "no data"}, macro={})
         assert "Macro Context" not in html
 
+    def test_monthly_report_includes_position_performance_when_provided(self):
+        snap = pd.DataFrame({
+            "date": pd.date_range("2026-01-01", periods=1, freq="ME"),
+            "total_value": [1000], "cash": [1000], "unrealized_pnl": [0],
+        })
+        position_performance = {
+            "SPY": {
+                "entry_date": pd.Timestamp("2026-01-05"), "entry_price": 500.0,
+                "current_price": 550.0, "shares": 10.0, "return_pct": 0.10,
+                "market_value": 5500.0,
+            },
+        }
+        html, _, _ = build_monthly_report_html(
+            "portfolio1", snap, {"error": "no data"}, position_performance=position_performance,
+        )
+        assert "Position Performance" in html
+        assert "SPY" in html
+        assert "2026-01-05" in html
+        assert "+10.00%" in html
+
+    def test_monthly_report_shows_unknown_for_undeterminable_entry_date(self):
+        snap = pd.DataFrame({
+            "date": pd.date_range("2026-01-01", periods=1, freq="ME"),
+            "total_value": [1000], "cash": [1000], "unrealized_pnl": [0],
+        })
+        position_performance = {
+            "SPY": {
+                "entry_date": None, "entry_price": 500.0, "current_price": 550.0,
+                "shares": 10.0, "return_pct": 0.10, "market_value": 5500.0,
+            },
+        }
+        html, _, _ = build_monthly_report_html(
+            "portfolio1", snap, {"error": "no data"}, position_performance=position_performance,
+        )
+        assert "Unknown" in html
+
+    def test_monthly_report_omits_position_performance_section_when_not_provided(self):
+        snap = pd.DataFrame({
+            "date": pd.date_range("2026-01-01", periods=1, freq="ME"),
+            "total_value": [1000], "cash": [1000], "unrealized_pnl": [0],
+        })
+        html, _, _ = build_monthly_report_html("portfolio1", snap, {"error": "no data"})
+        assert "Position Performance" not in html
+
+    def test_monthly_report_omits_position_performance_section_when_empty_dict(self):
+        snap = pd.DataFrame({
+            "date": pd.date_range("2026-01-01", periods=1, freq="ME"),
+            "total_value": [1000], "cash": [1000], "unrealized_pnl": [0],
+        })
+        html, _, _ = build_monthly_report_html(
+            "portfolio1", snap, {"error": "no data"}, position_performance={},
+        )
+        assert "Position Performance" not in html
+
 
 class TestBuildComparisonBarChart:
     def test_returns_png_bytes_for_valid_window_data(self):

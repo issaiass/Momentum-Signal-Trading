@@ -53,7 +53,7 @@ pip install -r requirements-dev.txt
 pytest tests/ -v
 ```
 
-348 tests should pass cleanly. This only confirms code mechanics work on this machine
+359 tests should pass cleanly. This only confirms code mechanics work on this machine
 (dependencies installed correctly, no environment mismatch) — see `TESTING.md` for what the
 suite does and doesn't validate, and how to interpret a failure if one occurs.
 

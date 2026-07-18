@@ -420,11 +420,56 @@ def _macro_indicators_html(macro: dict | None) -> str:
     """
 
 
+def _position_performance_html(position_performance: dict[str, dict] | None) -> str:
+    """One row per held ticker -- position_performance is
+    execution/live_signal.py's build_position_performance() output: return since entry on the
+    CURRENTLY open position (unrealized, mark-to-market), distinct from the "Actual P&L"
+    section above (which is realized+unrealized P&L across the whole trade history, including
+    closed lots). Omitted entirely if not provided or empty -- e.g. dry-run mode, where
+    current_positions is never populated from a real broker connection."""
+    if not position_performance:
+        return ""
+
+    body_rows = ""
+    for ticker, vals in position_performance.items():
+        entry_date = vals.get("entry_date")
+        entry_date_str = entry_date.strftime("%Y-%m-%d") if entry_date is not None else "Unknown"
+        return_color = "#0a7d2c" if vals["return_pct"] >= 0 else "#c0392b"
+        body_rows += (
+            f"<tr>"
+            f"<td style='padding:4px 8px;'><b>{ticker}</b></td>"
+            f"<td style='padding:4px 8px;'>{entry_date_str}</td>"
+            f"<td style='padding:4px 8px;'>${vals['entry_price']:,.2f}</td>"
+            f"<td style='padding:4px 8px;'>${vals['current_price']:,.2f}</td>"
+            f"<td style='padding:4px 8px;'>{vals['shares']:,.4f}</td>"
+            f"<td style='padding:4px 8px; color:{return_color};'>{vals['return_pct']:+.2%}</td>"
+            f"<td style='padding:4px 8px;'>${vals['market_value']:,.2f}</td>"
+            f"</tr>"
+        )
+
+    return f"""
+    <h3>Position Performance (since entry)</h3>
+    <table style="border-collapse: collapse; font-size: 12px;">
+      <tr>
+        <th style='padding:4px 8px; text-align:left;'>Ticker</th>
+        <th style='padding:4px 8px; text-align:left;'>Entry Date</th>
+        <th style='padding:4px 8px; text-align:left;'>Entry Price</th>
+        <th style='padding:4px 8px; text-align:left;'>Current Price</th>
+        <th style='padding:4px 8px; text-align:left;'>Shares</th>
+        <th style='padding:4px 8px; text-align:left;'>Return</th>
+        <th style='padding:4px 8px; text-align:left;'>Market Value</th>
+      </tr>
+      {body_rows}
+    </table>
+    """
+
+
 def _build_report_html(
     portfolio_name: str, report_label: str, period_line: str, snapshot_df: pd.DataFrame,
     comparison: dict, real_pnl: dict | None = None, since_inception: dict | None = None,
     window_comparison: dict | None = None, indicators: dict[str, dict] | None = None,
     fundamentals: dict[str, dict] | None = None, macro: dict | None = None,
+    position_performance: dict[str, dict] | None = None,
 ) -> tuple[str, bytes | None, bytes | None]:
     """
     Shared HTML/chart builder for both the monthly and daily reports (build_monthly_report_html()
@@ -465,6 +510,13 @@ def _build_report_html(
         core/macro_data.py's get_cached_or_fetch_macro_indicators() output (Fed Funds Rate,
         CPI) -- portfolio-independent, the same dict is passed to every portfolio's report in a
         given run. Omitted section if not provided (e.g. FRED_API_KEY not configured).
+    position_performance : dict, optional
+        {ticker: execution/live_signal.py's build_position_performance() output} -- per-ticker
+        return since entry on the currently open position (entry date/price, current price,
+        shares, return %, market value). Distinct from real_pnl above (realized+unrealized P&L
+        across the whole trade history, including closed lots) -- this is unrealized,
+        mark-to-market return on what's open right now. Omitted section if not provided (e.g.
+        dry-run mode, where current_positions is never populated from a real broker).
     """
     value_chart_bytes = _build_value_chart(snapshot_df, f"{portfolio_name}: Portfolio Value")
     comparison_chart_bytes = (
@@ -509,6 +561,7 @@ def _build_report_html(
     indicators_html = _technical_indicators_html(indicators)
     fundamentals_html = _fundamental_indicators_html(fundamentals)
     macro_html = _macro_indicators_html(macro)
+    position_performance_html = _position_performance_html(position_performance)
 
     html = f"""
     <h2>{report_label} Report: {portfolio_name}</h2>
@@ -517,6 +570,7 @@ def _build_report_html(
     <h3>Current Position</h3>
     <table style="border-collapse: collapse;">{summary_rows}</table>
     {real_pnl_html}
+    {position_performance_html}
     {strategy_stats_html}
     <h3>Performance vs. Benchmark</h3>
     <table style="border-collapse: collapse;">{comparison_rows}</table>
@@ -535,12 +589,13 @@ def build_monthly_report_html(
     real_pnl: dict | None = None, since_inception: dict | None = None,
     window_comparison: dict | None = None, indicators: dict[str, dict] | None = None,
     fundamentals: dict[str, dict] | None = None, macro: dict | None = None,
+    position_performance: dict[str, dict] | None = None,
 ) -> tuple[str, bytes | None, bytes | None]:
     """Monthly cadence -- see _build_report_html() for the full parameter docs (shared)."""
     return _build_report_html(
         portfolio_name, "Monthly", f"Period ending {datetime.now().strftime('%Y-%m-%d')}",
         snapshot_df, comparison, real_pnl, since_inception, window_comparison, indicators,
-        fundamentals, macro,
+        fundamentals, macro, position_performance,
     )
 
 
@@ -549,6 +604,7 @@ def build_daily_report_html(
     real_pnl: dict | None = None, since_inception: dict | None = None,
     window_comparison: dict | None = None, indicators: dict[str, dict] | None = None,
     fundamentals: dict[str, dict] | None = None, macro: dict | None = None,
+    position_performance: dict[str, dict] | None = None,
 ) -> tuple[str, bytes | None, bytes | None]:
     """
     Daily cadence -- same content depth as the monthly report (technical indicators, since-
@@ -562,7 +618,7 @@ def build_daily_report_html(
     return _build_report_html(
         portfolio_name, "Daily", f"As of {datetime.now().strftime('%Y-%m-%d')}",
         snapshot_df, comparison, real_pnl, since_inception, window_comparison, indicators,
-        fundamentals, macro,
+        fundamentals, macro, position_performance,
     )
 
 
@@ -572,11 +628,13 @@ def send_monthly_report(
     since_inception: dict | None = None, window_comparison: dict | None = None,
     indicators: dict[str, dict] | None = None,
     fundamentals: dict[str, dict] | None = None, macro: dict | None = None,
+    position_performance: dict[str, dict] | None = None,
 ) -> bool:
     """PERIODIC category -- filterable, but distinct from CRITICAL/STANDARD filtering."""
     html, value_chart_bytes, comparison_chart_bytes = build_monthly_report_html(
         portfolio_name, snapshot_df, comparison, real_pnl,
         since_inception, window_comparison, indicators, fundamentals, macro,
+        position_performance,
     )
 
     if not should_send(NotificationCategory.PERIODIC, notification_config):
@@ -621,6 +679,7 @@ def send_daily_report(
     since_inception: dict | None = None, window_comparison: dict | None = None,
     indicators: dict[str, dict] | None = None,
     fundamentals: dict[str, dict] | None = None, macro: dict | None = None,
+    position_performance: dict[str, dict] | None = None,
 ) -> bool:
     """DAILY category -- filterable via notifications.send_daily, defaults to NOT sending
     unless explicitly enabled (see should_send()'s per-category default). Structurally
@@ -630,6 +689,7 @@ def send_daily_report(
     html, value_chart_bytes, comparison_chart_bytes = build_daily_report_html(
         portfolio_name, snapshot_df, comparison, real_pnl,
         since_inception, window_comparison, indicators, fundamentals, macro,
+        position_performance,
     )
 
     if not should_send(NotificationCategory.DAILY, notification_config):

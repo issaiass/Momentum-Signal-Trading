@@ -44,13 +44,15 @@ so on purpose.
   showing the real fill outcome per ticker (filled, dropped, rejected, still open, dry-run), not
   just the intended signal action
 - Monthly and (opt-in, off by default) daily performance reports per portfolio — technical
-  indicators (trend/momentum/volatility/volume) for currently held positions, strategy
+  indicators (trend/momentum/volatility/volume) and fundamental indicators (P/E, PEG, ROE,
+  Debt-to-Equity, Current Ratio) for currently held positions, macro context (Fed Funds Rate,
+  CPI), per-ticker position performance since entry (`--live` mode only), strategy
   performance indicators since inception (Total Return, CAGR, Max Drawdown, Std Dev, Sharpe,
   Sortino), and trailing-window benchmark comparison charts (1/3/6-month/YTD/1-year for the
   monthly report, 1-day/1/2/3-week for the daily report)
 - Dockerized, self-scheduling deployment (`docker compose up -d`, internal cron, no manual
   triggering needed for normal operation)
-- 319-test pytest suite covering code mechanics — order sizing, config validation, audit-log
+- 359-test pytest suite covering code mechanics — order sizing, config validation, audit-log
   integrity, multi-portfolio capital math — entirely on synthetic/mocked data, no live broker
   required to run it
 
@@ -133,7 +135,8 @@ momentum-trading/
 │   │   └── live_signal.py           live signal generation, order generation, IBKR
 │   │                                 integration (with connection retry), multi-portfolio
 │   │                                 orchestration, real P&L measurement, stale-price and
-│   │                                 slippage-tolerance checks
+│   │                                 slippage-tolerance checks, per-ticker position
+│   │                                 performance since entry (build_position_performance())
 │   │
 │   ├── risk/
 │   │   ├── circuit_breaker.py       portfolio-level circuit breaker (%  and $ thresholds,
@@ -154,7 +157,7 @@ momentum-trading/
 │       └── email_diagnostics.py     backs `daily-runner --test-email` -- live SMTP+IMAP
 │                                     check independent of config.yaml
 │
-└── tests/                         pytest suite (348 tests), mirrors src/ layout where a
+└── tests/                         pytest suite (359 tests), mirrors src/ layout where a
     ├── conftest.py                  test's primary subject is a single sub-package;
     ├── test_architecture.py         cross-cutting/integration tests stay at tests/ root
     ├── test_daily_runner.py

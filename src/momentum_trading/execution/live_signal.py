@@ -794,6 +794,43 @@ def derive_entry_date(ticker: str, trade_log_path: str = TRADE_LOG_PATH) -> pd.T
     return streak_start
 
 
+def build_position_performance(
+    current_positions: dict, latest_prices: dict, trade_log_path: str = TRADE_LOG_PATH,
+) -> dict[str, dict]:
+    """
+    Per-ticker return-since-entry for the reports' "Position Performance" section -- distinct
+    from measure_live_performance()'s aggregate/per_ticker_realized P&L (closed-lot gains):
+    this is unrealized return on the CURRENTLY open position, from its entry date to now.
+    Reuses avg_entry_price already tracked in current_positions (the same field
+    check_and_handle_stop_losses() compares against) and derive_entry_date() (the same
+    FIFO entry-date derivation check_and_handle_time_stops() uses) -- both already computed
+    live for stop-loss/time-stop gating today, just not previously surfaced in a report.
+
+    Returns {ticker: {"entry_date", "entry_price", "current_price", "shares", "return_pct",
+    "market_value"}}. A ticker missing a valid avg_entry_price, with non-positive shares, or
+    without a known current price is omitted entirely -- same graceful-degradation contract
+    used throughout this module. "entry_date" may be None (trade log doesn't cover this
+    position's full history) even when the other fields are present -- the row still renders,
+    just with entry date shown as unknown rather than being dropped.
+    """
+    result = {}
+    for ticker, pos in current_positions.items():
+        entry_price = pos.get("avg_entry_price")
+        shares = pos.get("shares", 0)
+        if not entry_price or shares <= 0 or ticker not in latest_prices:
+            continue
+        current_price = latest_prices[ticker]
+        result[ticker] = {
+            "entry_date": derive_entry_date(ticker, trade_log_path),
+            "entry_price": entry_price,
+            "current_price": current_price,
+            "shares": shares,
+            "return_pct": (current_price - entry_price) / entry_price,
+            "market_value": shares * current_price,
+        }
+    return result
+
+
 # --------------------------------------------------------------------------- #
 # 4c. MULTIPLE PORTFOLIOS, SAME STRATEGY
 # --------------------------------------------------------------------------- #

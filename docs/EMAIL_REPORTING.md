@@ -120,6 +120,18 @@ since an intended BUY/SELL doesn't always actually fill. Built by
   one only marks currently-*open* positions from the latest snapshot, while this section also
   includes realized gains from trades that have since closed, and is filtered to rows matching
   the run's actual `dry_run`/`--live` mode (the two modes share one log file).
+- **Position Performance (since entry)** — for each currently-held ticker: entry date, entry
+  price, current price, shares, return %, market value — from
+  `execution/live_signal.py`'s `build_position_performance()`. This is *unrealized*,
+  mark-to-market return on the position that's open **right now** — distinct from "Actual P&L"
+  above, which is realized+unrealized P&L across the *whole* trade history including closed
+  lots. Reuses `avg_entry_price` (already tracked in `current_positions` for stop-loss gating)
+  and `derive_entry_date()` (already used for time-stop gating) — no new data source. A ticker
+  missing a valid entry price, with zero shares, or without a known current price is omitted; a
+  ticker whose entry date can't be determined from the trade log still shows (as "Unknown"
+  entry date) rather than being dropped. **Only populated in `--live` mode** — `current_positions`
+  is never fetched from a real broker in dry-run, so this section is empty there, same as
+  Technical/Fundamental Indicators.
 - **Strategy Performance (Since Inception)** — Total Return, CAGR, Max Drawdown, Standard
   Deviation, Sharpe Ratio, Sortino Ratio, computed by
   `core/functions_quant_extensions.py`'s `since_inception_performance()` from the FIRST row ever
@@ -169,7 +181,8 @@ windows. Off by default (`send_daily: false`) -- see the category table above fo
 
 **Implemented and tested** (`tests/interfaces/test_notifications.py`,
 `tests/core/test_technical_indicators.py`, `tests/core/test_functions_quant_extensions.py`,
-`tests/core/test_fundamentals.py`, `tests/core/test_macro_data.py`):
+`tests/core/test_fundamentals.py`, `tests/core/test_macro_data.py`,
+`tests/execution/test_live_signal.py::TestBuildPositionPerformance`):
 - Category filtering logic (CRITICAL unsuppressable, STANDARD/PERIODIC/DAILY/WARNING
   configurable, DAILY defaulting to off unlike the others)
 - HTML generation for rebalance summaries, monthly reports, and daily reports
@@ -193,6 +206,12 @@ windows. Off by default (`send_daily: false`) -- see the category table above fo
   run, not per-ticker). If `FRED_API_KEY` is unset, the whole section is simply omitted — same
   opt-in-by-not-configuring pattern as the email-commanded remote actions IMAP block. File-cached
   30 days at `data/macro_cache.json`.
+- **Position Performance (since entry)** — per-ticker return since entry (entry date/price,
+  current price, shares, return %, market value), via `execution/live_signal.py`'s
+  `build_position_performance()`. Reuses `avg_entry_price`/`derive_entry_date()`, both already
+  computed live for stop-loss/time-stop gating — no new data source. Unrealized/mark-to-market
+  on the currently open position, distinct from "Actual P&L"'s realized+unrealized-across-full-
+  history figures. Only populated in `--live` mode (dry-run never fetches real positions).
 - Graceful degradation on missing/insufficient data
 
 **Deferred, not built in this pass** (flagged explicitly rather than delivered shallow):

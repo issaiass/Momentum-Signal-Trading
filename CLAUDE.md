@@ -126,6 +126,16 @@ that tests enforce — don't casually violate these when editing:
   email's "What Actually Happened" column depends on every ticker having *some* recorded
   outcome. Any new drop path added to `place_orders_ibkr()` should record into `dropped_orders`
   the same way, not just `continue`.
+  `build_position_performance()` feeds the reports' "Position Performance (since entry)" section
+  — reuses `avg_entry_price` (already tracked in `current_positions` for
+  `check_and_handle_stop_losses()`'s gating) and `derive_entry_date()` (already used by
+  `check_and_handle_time_stops()`), both previously computed live and discarded after the
+  stop-loss/time-stop check, never surfaced anywhere before this. It's unrealized/mark-to-market
+  return on the *currently open* position — distinct from `measure_live_performance()`'s
+  aggregate/`per_ticker_realized` P&L (realized+unrealized across the *whole* trade history,
+  including closed lots). Only populated in `--live` mode: `current_positions` is `{}` in
+  dry-run (`daily_runner.py` never calls `get_ibkr_positions()` without a real connection), so
+  this section is empty there — same as Technical/Fundamental Indicators, not a new gap.
 - **`risk/circuit_breaker.py`** — extracted from `daily_runner.py` with alerting
   dependency-injected (`alert_fn` param) specifically so `risk/` has zero import dependency on
   `interfaces/` — enforced by an AST-based test

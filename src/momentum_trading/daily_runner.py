@@ -31,6 +31,7 @@ from .execution.live_signal import (
     get_ibkr_positions, get_ibkr_account_value, with_retry,
     place_orders_ibkr, log_orders, write_portfolio_snapshot, get_latest_snapshot,
     derive_entry_date, measure_live_performance, fetch_ohlcv_for_tickers,
+    build_position_performance,
 )
 from .core.smtp_auth import authenticate as authenticate_smtp, smtp_ready
 from .core.audit_log import log_alert, read_recent_alerts, ALERTS_LOG_PATH
@@ -870,6 +871,9 @@ def main():
                                 )
                                 for t in held_tickers
                             }
+                        daily_position_performance = build_position_performance(
+                            current_positions, latest_prices, trade_log_path,
+                        )
                         try:
                             daily_real_pnl = measure_live_performance(
                                 "1970-01-01", datetime.today().strftime("%Y-%m-%d"),
@@ -881,7 +885,7 @@ def main():
                         send_daily_report(
                             name, daily_snapshot_df, daily_comparison, notification_cfg,
                             daily_real_pnl, daily_since_inception, daily_windows, daily_indicators,
-                            daily_fundamentals, macro_indicators,
+                            daily_fundamentals, macro_indicators, daily_position_performance,
                         )
                 except Exception as e:
                     logger.warning("[%s] Daily report skipped due to error (non-fatal): %s", name, e)
@@ -950,6 +954,9 @@ def main():
                                 )
                                 for t in held_tickers
                             }
+                        position_performance = build_position_performance(
+                            current_positions, latest_prices, trade_log_path,
+                        )
                         # --- REAL realized+unrealized P&L from the trade log (FIFO),
                         #     distinct from the snapshot-based unrealized_pnl already in the
                         #     report -- this covers cumulative gains from trades that have since
@@ -968,7 +975,7 @@ def main():
                         send_monthly_report(
                             name, snapshot_df, comparison, notification_cfg, real_pnl,
                             since_inception, window_comparison, indicators,
-                            fundamentals, macro_indicators,
+                            fundamentals, macro_indicators, position_performance,
                         )
             else:
                 logger.info("[%s] Not a rebalance day -- stop-loss check complete only.", name)

@@ -21,7 +21,7 @@ import momentum_trading.execution.live_signal as live_signal
 from momentum_trading.execution.live_signal import (
     generate_orders, log_orders, measure_live_performance, run_multi_portfolio, get_top_etfs,
     compute_aggregate_drift, derive_entry_date, compute_target_weights,
-    is_rebalance_day, is_holding_period_too_frequent,
+    is_rebalance_day, is_holding_period_too_frequent, build_position_performance,
 )
 from momentum_trading.core.audit_log import read_recent_alerts
 
@@ -375,6 +375,90 @@ class TestDeriveEntryDate:
     def test_no_rows_for_ticker_returns_none(self, tmp_path):
         path = self._write_log(tmp_path, [["2026-01-05T09:35:00", "QQQ", "BUY", 5]])
         assert derive_entry_date("XLK", path) is None
+
+
+class TestBuildPositionPerformance:
+    """
+    build_position_performance() surfaces per-ticker return-since-entry for the reports'
+    "Position Performance" section -- reusing avg_entry_price (already tracked in
+    current_positions for stop-loss gating) and derive_entry_date() (already used for
+    time-stop gating), just not previously rendered anywhere.
+    """
+
+    def _write_log(self, tmp_path, rows):
+        path = tmp_path / "log.csv"
+        with open(path, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["timestamp", "ticker", "action", "shares"])
+            w.writerows(rows)
+        return str(path)
+
+    def test_computes_return_since_entry(self, tmp_path):
+        log_path = self._write_log(tmp_path, [["2026-01-05T09:35:00", "XLK", "BUY", 10]])
+        current_positions = {"XLK": {"shares": 10, "avg_entry_price": 50.0}}
+        latest_prices = {"XLK": 55.0}
+
+        result = build_position_performance(current_positions, latest_prices, log_path)
+
+        assert result["XLK"]["entry_date"] == pd.Timestamp("2026-01-05T09:35:00")
+        assert result["XLK"]["entry_price"] == 50.0
+        assert result["XLK"]["current_price"] == 55.0
+        assert result["XLK"]["shares"] == 10
+        assert result["XLK"]["return_pct"] == pytest.approx(0.10)
+        assert result["XLK"]["market_value"] == pytest.approx(550.0)
+
+    def test_ticker_missing_entry_price_is_omitted(self, tmp_path):
+        log_path = self._write_log(tmp_path, [])
+        current_positions = {"XLK": {"shares": 10, "avg_entry_price": None}}
+        latest_prices = {"XLK": 55.0}
+        result = build_position_performance(current_positions, latest_prices, log_path)
+        assert result == {}
+
+    def test_ticker_with_zero_shares_is_omitted(self, tmp_path):
+        log_path = self._write_log(tmp_path, [])
+        current_positions = {"XLK": {"shares": 0, "avg_entry_price": 50.0}}
+        latest_prices = {"XLK": 55.0}
+        result = build_position_performance(current_positions, latest_prices, log_path)
+        assert result == {}
+
+    def test_ticker_missing_from_latest_prices_is_omitted(self, tmp_path):
+        log_path = self._write_log(tmp_path, [])
+        current_positions = {"XLK": {"shares": 10, "avg_entry_price": 50.0}}
+        latest_prices = {}
+        result = build_position_performance(current_positions, latest_prices, log_path)
+        assert result == {}
+
+    def test_undeterminable_entry_date_does_not_omit_the_row(self, tmp_path):
+        # Trade log doesn't cover this ticker's history (e.g. predates the log) -- the row
+        # still renders with entry_date=None rather than being dropped entirely.
+        log_path = self._write_log(tmp_path, [])
+        current_positions = {"XLK": {"shares": 10, "avg_entry_price": 50.0}}
+        latest_prices = {"XLK": 55.0}
+        result = build_position_performance(current_positions, latest_prices, log_path)
+        assert "XLK" in result
+        assert result["XLK"]["entry_date"] is None
+
+    def test_negative_return_computed_correctly(self, tmp_path):
+        log_path = self._write_log(tmp_path, [["2026-01-05T09:35:00", "XLK", "BUY", 10]])
+        current_positions = {"XLK": {"shares": 10, "avg_entry_price": 50.0}}
+        latest_prices = {"XLK": 45.0}
+        result = build_position_performance(current_positions, latest_prices, log_path)
+        assert result["XLK"]["return_pct"] == pytest.approx(-0.10)
+
+    def test_multiple_tickers_independent(self, tmp_path):
+        log_path = self._write_log(tmp_path, [
+            ["2026-01-05T09:35:00", "XLK", "BUY", 10],
+            ["2026-02-01T09:35:00", "XLF", "BUY", 20],
+        ])
+        current_positions = {
+            "XLK": {"shares": 10, "avg_entry_price": 50.0},
+            "XLF": {"shares": 20, "avg_entry_price": 30.0},
+        }
+        latest_prices = {"XLK": 55.0, "XLF": 27.0}
+        result = build_position_performance(current_positions, latest_prices, log_path)
+        assert set(result.keys()) == {"XLK", "XLF"}
+        assert result["XLK"]["return_pct"] == pytest.approx(0.10)
+        assert result["XLF"]["return_pct"] == pytest.approx(-0.10)
 
 
 class TestCorrelationSpikeScaling:

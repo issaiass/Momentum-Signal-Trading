@@ -43,7 +43,7 @@ can verify the signal/sizing/order output without waiting for a real rebalance d
 ## 2. Multiple portfolios with different capital
 
 Add more entries under `portfolios:`. Each portfolio has its own signal, sizing, orders, and
-trade log (`logs/live_trades_log_<name>.csv`) -- but if two or more portfolios trade through
+trade log (`logs/live_trades_log_<name>.csv`) — but if two or more portfolios trade through
 the **same real IBKR account** (the normal case: one `--port`, one TWS/Gateway login), their
 capital and positions are NOT automatically kept independent. The system makes this safe rather
 than silently wrong; see the capital and ticker-overlap notes below before running more than
@@ -61,38 +61,38 @@ portfolios:
     custom_weights: {XLF: 0.4, XLE: 0.3, GLD: 0.2, TLT: 0.1}
     total_value: 2500.0      # this portfolio uses a fixed $2,500 regardless of account value
     risk_overrides:
-      top_n: 3                # holds only its top 3 of 4 tickers each rebalance --
+      top_n: 3                # holds only its top 3 of 4 tickers each rebalance —
                                # independent of default_risk.top_n or any other portfolio
 ```
 
-- `total_value: null` → **not** "pull the full account value" -- it's the real account's
+- `total_value: null` → **not** "pull the full account value" — it's the real account's
   NetLiquidation *minus every other portfolio's fixed `total_value`* (only meaningful with
   `--live`; dry-run uses a flat $1000 placeholder instead, unaffected by other portfolios,
   since dry-run tests signal/order logic, not real capital math). At most **one** portfolio in
-  the whole file may be `null` -- `daily-runner` refuses to start otherwise (the "remainder" is
+  the whole file may be `null` — `daily-runner` refuses to start otherwise (the "remainder" is
   ambiguous with more than one candidate). If the other portfolios' fixed allocations already
   consume the whole account, the run aborts with an alert email rather than proceeding with
   zero/negative capital.
 - `total_value: <number>` → uses that fixed dollar amount every run, useful for allocating a
   specific slice of a larger account to one strategy variant, or for sub-account-style testing.
   If every portfolio uses a fixed number and they sum to more than the real account value,
-  `daily-runner` sends a warning alert (non-fatal -- the broker will reject/reduce individual
+  `daily-runner` sends a warning alert (non-fatal — the broker will reject/reduce individual
   orders rather than overdraw, but review it).
 - Different `custom_weights` per portfolio let you compare algorithmic sizing against a
   hand-specified allocation side by side, on the same schedule, same run.
 - **Ticker overlap across portfolios** (e.g. both portfolios above hold XLF/XLE/GLD/TLT) is
-  checked once at the start of every run and triggers a warning email + log line if found --
+  checked once at the start of every run and triggers a warning email + log line if found —
   each portfolio computes and submits its own orders independently, so a shared ticker on a
   shared account risks uncoordinated, conflicting orders against the same real position. This
   is a warning, not a blocking error (some setups intentionally run different weightings on the
-  same tickers across portfolios, like the example above) -- review the warning, don't ignore it.
+  same tickers across portfolios, like the example above) — review the warning, don't ignore it.
 - `top_n` (how many top-momentum-ranked tickers to actually hold) is a normal
-  `default_risk`/`risk_overrides` field like any other -- give each portfolio its own value
+  `default_risk`/`risk_overrides` field like any other — give each portfolio its own value
   the same way you'd override `stop_loss_pct`. There is no limit on the number of portfolios,
   and each one's `top_n` (and every other risk field) resolves completely independently of
-  the others -- see `config.example.yaml` for a second worked example.
+  the others — see `config.example.yaml` for a second worked example.
 - Automated `risk_monitor.py` coverage in Docker is a **separate** setting
-  (`RISK_MONITOR_PORTFOLIOS` in `.env`) from the `portfolios:` list here -- adding a portfolio
+  (`RISK_MONITOR_PORTFOLIOS` in `.env`) from the `portfolios:` list here — adding a portfolio
   to `config.yaml` alone does not automatically monitor it. See `docs/DEPLOYMENT.md`.
 
 Same test command works for all portfolios in the file at once:
@@ -206,7 +206,7 @@ metadata:
 **Circuit breaker.** If `max_portfolio_drawdown_pct` is set (e.g. `0.20` = 20%) in a
 portfolio's risk config, the system tracks peak equity and halts new rebalancing once
 drawdown from that peak is breached. Important: **it does not force-liquidate existing
-positions** (that's still only the per-ticker `stop_loss_pct`'s job) -- it only stops
+positions** (that's still only the per-ticker `stop_loss_pct`'s job) — it only stops
 rotating into *new* risk. It also does **not auto-resume** even if equity recovers; a human
 must explicitly clear it:
 
@@ -230,8 +230,11 @@ get_latest_snapshot("portfolio1")
 ```
 
 For a chart and cumulative return vs. benchmark, open `portfolio_snapshot_report.ipynb` —
-intentionally minimal (one chart, one table), meant for a quick investor-facing check, not
-a replacement for the full trade log or `measure_live_performance()`.
+an investor-facing check, not a replacement for the full trade log or
+`measure_live_performance()`. Beyond the original chart/table, it also demonstrates every
+measure the email reports show (position performance since entry, technical/fundamental
+indicators, macro context, since-inception stats, trailing-window comparison chart) using the
+same underlying functions, so you can see exactly how each report section is computed.
 
 ## 4.7. Staged Operational Rollout
 
@@ -318,7 +321,7 @@ the config (new `approved_date`), and continue the ongoing discipline in 4.8 bel
 **Kill criteria — decide these in advance, in writing, before you need them:**
 Write your own numbers here; examples only:
 ```yaml
-# NOT a config.yaml field -- a personal policy document, e.g. kill_criteria.md
+# NOT a config.yaml field — a personal policy document, e.g. kill_criteria.md
 kill_criteria:
   max_acceptable_drawdown: 0.25       # halt entirely, don't just circuit-break, above this
   max_live_vs_backtest_sharpe_gap: 0.5  # if live Sharpe is this much worse than backtest, stop and re-diagnose
@@ -385,7 +388,7 @@ every 2 weeks, `0.75` = every 3 weeks) — see `STRATEGY_THEORY.md` for the theo
 ## 4.13. Order execution: cash vs. margin IBKR accounts
 
 `place_orders_ibkr()` always submits SELL orders first and waits for them to reach a terminal
-status (filled, cancelled, or errored) before submitting any BUY -- not configurable, since
+status (filled, cancelled, or errored) before submitting any BUY — not configurable, since
 there's no valid reason to interleave them. This matters because of how the two common IBKR
 account types actually handle a BUY that depends on proceeds from a same-cycle SELL:
 
@@ -400,19 +403,19 @@ Independent of account type, after sells clear `default_risk.auto_reduce_buys_on
 fresh from IBKR after the sells settle):
 - `false` (default): log + always-visible warning naming the shortfall; BUYs submit at their
   originally computed size regardless. IBKR's own fill/partial-fill/reject behavior is the
-  actual backstop -- already surfaced via the existing "did not confirm as Filled" log line.
+  actual backstop — already surfaced via the existing "did not confirm as Filled" log line.
 - `true`: proportionally scale down every BUY's share count (floored to whole shares) so the
   total fits within real available cash. An order that floors to 0 shares is dropped rather
   than submitted as a no-op.
 
-This is LIVE-only -- dry-run never calls `place_orders_ibkr()` at all, so there's nothing to
+This is LIVE-only — dry-run never calls `place_orders_ibkr()` at all, so there's nothing to
 configure or observe here until you actually run `--live`.
 
 ## 4.14. Extended-hours (pre-market/after-hours) trading
 
 A rebalance running at or right after market close submits plain MKT orders, which IBKR/
 exchanges reject outright: `IBKR error 201: Order rejected - reason:Exchange is closed`. This is
-**normal, expected behavior, not a bug** -- MKT orders only work during regular trading hours
+**normal, expected behavior, not a bug** — MKT orders only work during regular trading hours
 (9:30am-4:00pm ET), full stop, confirmed against IBKR's own TWS API docs.
 
 To actually place orders in NASDAQ's standard extended sessions (pre-market 4:00-9:30am ET,
@@ -423,7 +426,7 @@ known price plus/minus a small buffer (favors getting filled over exact price). 
 price is available for a ticker that run, it silently falls back to a regular MKT (RTH-only)
 order instead of submitting unpriced.
 
-**This is a genuine economic trade-off, not just a technical toggle** -- extended-hours
+**This is a genuine economic trade-off, not just a technical toggle** — extended-hours
 liquidity is thinner than regular hours, so expect a real chance of no fill, a partial fill, or
 a materially worse price than the same order would get during RTH. Off (`false`) by default;
 LIVE-only, no effect on the backtest (which is daily-close based and has no concept of session

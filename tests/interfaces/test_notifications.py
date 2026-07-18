@@ -5,7 +5,7 @@ Covers the categorized email notification system: CRITICAL cannot be
 filtered (the whole point of the category), STANDARD/PERIODIC respect
 config.yaml, and HTML/chart generation degrades gracefully rather than
 crashing when data is missing. No actual SMTP send is tested (would require
-a real or mocked mail server) -- these test the filtering LOGIC and content
+a real or mocked mail server) — these test the filtering LOGIC and content
 generation, which is where a real bug would most likely hide.
 
 Run with: pytest tests/test_notifications.py -v
@@ -43,14 +43,14 @@ class TestCategoryFiltering:
 
     def test_warning_respects_explicit_config(self):
         # Unlike CRITICAL, the multi-portfolio capital-safety warnings ARE
-        # meant to be filterable -- they're review-when-convenient risk signals, not
+        # meant to be filterable — they're review-when-convenient risk signals, not
         # run-blocking failures.
         assert should_send(NotificationCategory.WARNING, {"send_warning": False}) is False
         assert should_send(NotificationCategory.WARNING, {"send_warning": True}) is True
 
     def test_unconfigured_defaults_to_sending(self):
         # Absence of a notifications: block in config.yaml should not silently
-        # suppress everything -- default to "send" so a missing config section
+        # suppress everything — default to "send" so a missing config section
         # doesn't accidentally go dark.
         assert should_send(NotificationCategory.STANDARD, {}) is True
         assert should_send(NotificationCategory.PERIODIC, {}) is True
@@ -58,7 +58,7 @@ class TestCategoryFiltering:
 
     def test_daily_defaults_to_NOT_sending_when_unconfigured(self):
         # The one deliberate exception: DAILY defaults to OFF, unlike every other filterable
-        # category -- a real recurring compute/inbox-volume cost that must be an explicit
+        # category — a real recurring compute/inbox-volume cost that must be an explicit
         # opt-in, including for a config.yaml predating this feature that never mentions
         # send_daily at all (not just one that explicitly sets it false).
         assert should_send(NotificationCategory.DAILY, {}) is False
@@ -71,7 +71,7 @@ class TestCategoryFiltering:
 class TestSendActionEmail:
     def test_filtered_notification_returns_false_without_attempting_smtp(self, monkeypatch):
         # Confirms a filtered STANDARD notification short-circuits before
-        # ever touching SMTP config/connection -- verified indirectly by not
+        # ever touching SMTP config/connection — verified indirectly by not
         # requiring any SMTP env vars to be set for this test to pass.
         result = send_action_email(NotificationCategory.STANDARD, "test", "<p>x</p>", {"send_standard": False})
         assert result is False
@@ -86,7 +86,7 @@ class TestSendActionEmail:
 class TestHTMLGeneration:
     """
     Content-generation functions must produce something coherent even from
-    edge-case inputs (empty orders, missing comparison data) -- a report that
+    edge-case inputs (empty orders, missing comparison data) — a report that
     crashes on a rebalance day with zero trades would be worse than one that
     just renders an empty table.
     """
@@ -110,7 +110,7 @@ class TestHTMLGeneration:
         assert "Dry-run" in html
 
     def test_rebalance_summary_hold_shows_no_outcome(self):
-        # HOLD never reaches place_orders_ibkr() at all -- the outcome column should
+        # HOLD never reaches place_orders_ibkr() at all — the outcome column should
         # be a neutral placeholder, not "no order sent" (which implies one was intended).
         orders = {"QQQ": {"action": "HOLD", "shares": 0, "reason": "no drift"}}
         html = build_rebalance_summary_html("portfolio1", orders, dry_run=False)
@@ -118,7 +118,7 @@ class TestHTMLGeneration:
 
     def test_rebalance_summary_shows_real_fill(self):
         # execution/live_signal.py's run() merges fill_status/fill_price/fill_shares
-        # onto each order after a live place_orders_ibkr() call -- confirm the email
+        # onto each order after a live place_orders_ibkr() call — confirm the email
         # surfaces the REAL fill, not just the intended action.
         orders = {"SPY": {"action": "BUY", "shares": 2, "reason": "drift",
                            "fill_status": "Filled", "fill_price": 601.23, "fill_shares": 2.0}}
@@ -128,7 +128,7 @@ class TestHTMLGeneration:
     def test_rebalance_summary_shows_dropped_fractional_order(self):
         # place_orders_ibkr() now tracks orders dropped for flooring to 0 whole shares
         # (IBKR has no fractional equity API support) separately via dropped_orders,
-        # since they never get a real IBKR orderId -- confirm that surfaces here too.
+        # since they never get a real IBKR orderId — confirm that surfaces here too.
         orders = {"GLD": {"action": "BUY", "shares": 0.4, "reason": "drift",
                            "fill_status": "DROPPED_FRACTIONAL", "fill_price": 0.0, "fill_shares": 0.0}}
         html = build_rebalance_summary_html("portfolio1", orders, dry_run=False)
@@ -147,7 +147,7 @@ class TestHTMLGeneration:
         assert "Rejected" in html and "Order rejected" in html
 
     def test_rebalance_summary_shows_still_open_order(self):
-        # fill_poll_timeout expired before a terminal status arrived -- e.g. a limit
+        # fill_poll_timeout expired before a terminal status arrived — e.g. a limit
         # order still working outside RTH. Should read as "still open", not "filled".
         orders = {"XLF": {"action": "BUY", "shares": 4, "reason": "drift",
                            "fill_status": "PreSubmitted", "fill_price": 0.0, "fill_shares": 0.0}}
@@ -167,7 +167,7 @@ class TestHTMLGeneration:
 
     def test_monthly_report_handles_missing_comparison_gracefully(self):
         # comparison with an "error" key (e.g. no snapshot log yet) should not
-        # crash the report -- it should just omit that section.
+        # crash the report — it should just omit that section.
         snap = pd.DataFrame({
             "date": pd.date_range("2026-01-01", periods=1, freq="ME"),
             "total_value": [1000], "cash": [1000], "unrealized_pnl": [0],
@@ -181,7 +181,7 @@ class TestHTMLGeneration:
         assert chart is None  # can't chart with no data, should be None not an exception
 
     def test_monthly_report_includes_real_pnl_when_provided(self):
-        # real_pnl comes from execution/live_signal.py's measure_live_performance() --
+        # real_pnl comes from execution/live_signal.py's measure_live_performance() —
         # distinct from the snapshot-based unrealized_pnl already in the report.
         snap = pd.DataFrame({
             "date": pd.date_range("2026-01-01", periods=1, freq="ME"),
@@ -237,7 +237,7 @@ class TestHTMLGeneration:
         )
         assert "Technical Indicators" in html
         assert "SPY" in html
-        assert "QQQ" not in html  # empty indicator dict -- omitted, not shown blank
+        assert "QQQ" not in html  # empty indicator dict — omitted, not shown blank
 
     def test_monthly_report_omits_indicators_section_when_none_have_data(self):
         snap = pd.DataFrame({
@@ -264,7 +264,7 @@ class TestHTMLGeneration:
         )
         assert "Fundamental Indicators" in html
         assert "SPY" in html
-        assert "QQQ" not in html  # empty dict -- omitted, not shown blank
+        assert "QQQ" not in html  # empty dict — omitted, not shown blank
 
     def test_monthly_report_omits_fundamentals_section_when_not_provided(self):
         snap = pd.DataFrame({
@@ -391,7 +391,7 @@ class TestBuildComparisonBarChart:
 
 class TestBuildDailyReportHtml:
     """build_daily_report_html() is a thin wrapper over the same _build_report_html() the
-    monthly report uses -- these tests just confirm the daily-specific framing (label, cadence
+    monthly report uses — these tests just confirm the daily-specific framing (label, cadence
     wording) and that it accepts daily_window_comparison()-shaped data correctly."""
 
     def test_daily_report_has_daily_label_not_monthly(self):

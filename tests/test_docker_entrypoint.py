@@ -4,8 +4,8 @@ tests/test_docker_entrypoint.py
 docker-entrypoint.sh generates /etc/cron.d/momentum-cron at CONTAINER
 START from env vars (DAILY_RUNNER_CRON, RISK_MONITOR_CRON, RISK_MONITOR_PORTFOLIOS)
 instead of baking a fixed schedule into the image at build time. These tests run the
-REAL script via subprocess (not a reimplementation of its logic) -- the same
-philosophy as test_architecture.py's path-resolution tests -- with two things
+REAL script via subprocess (not a reimplementation of its logic) — the same
+philosophy as test_architecture.py's path-resolution tests — with two things
 overridden purely for testability:
   - CRONTAB_PATH points at a temp file instead of /etc/cron.d/momentum-cron, which
     doesn't exist/isn't writable outside the real container.
@@ -14,7 +14,7 @@ overridden purely for testability:
     otherwise abort before writing anything.
 
 Skipped entirely if `sh` isn't on PATH (e.g. a bare Windows machine with no Git Bash/
-WSL) -- this script only ever actually runs inside the Linux container, so that's a
+WSL) — this script only ever actually runs inside the Linux container, so that's a
 reasonable, narrow skip condition, not a gap in real coverage.
 """
 import os
@@ -60,7 +60,7 @@ def run_entrypoint(stub_bin_dir, tmp_path, extra_env=None):
 
 
 class TestDefaultSchedule:
-    """No env vars set at all -- must match the original hardcoded schedule exactly,
+    """No env vars set at all — must match the original hardcoded schedule exactly,
     since this is what every existing deployment gets on upgrade."""
 
     def test_default_produces_single_portfolio1_line(self, stub_bin_dir, tmp_path):
@@ -73,7 +73,7 @@ class TestDefaultSchedule:
 
     def test_date_expression_stays_literal(self, stub_bin_dir, tmp_path):
         # Regression guard: $(date ...) must NOT be evaluated when the crontab is
-        # generated -- it has to stay literal so cron's own shell evaluates it fresh
+        # generated — it has to stay literal so cron's own shell evaluates it fresh
         # every time the job fires, not once at container startup.
         crontab = run_entrypoint(stub_bin_dir, tmp_path)
         assert "$(date +%Y%m%d)" in crontab
@@ -92,7 +92,7 @@ class TestConfigurableSchedule:
 
 class TestMultiPortfolioRiskMonitoring:
     """RISK_MONITOR_PORTFOLIOS controls how many risk_monitor.py cron
-    entries get generated -- previously always exactly one, hardcoded to
+    entries get generated — previously always exactly one, hardcoded to
     "portfolio1", regardless of how many portfolios config.yaml actually defined."""
 
     def test_single_portfolio_default(self, stub_bin_dir, tmp_path):
@@ -111,7 +111,7 @@ class TestMultiPortfolioRiskMonitoring:
 
     def test_each_portfolio_gets_its_own_log_file(self, stub_bin_dir, tmp_path):
         # Sharing one log file across portfolios would interleave/garble concurrent
-        # output -- each entry must write to a distinct, portfolio-named log path.
+        # output — each entry must write to a distinct, portfolio-named log path.
         crontab = run_entrypoint(stub_bin_dir, tmp_path, extra_env={
             "RISK_MONITOR_PORTFOLIOS": "portfolio1 portfolio2",
         })

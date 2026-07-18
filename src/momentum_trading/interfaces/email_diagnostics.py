@@ -1,15 +1,15 @@
 """
 interfaces/email_diagnostics.py
 
-`daily-runner --test-email` -- a live, end-to-end check of both email features
+`daily-runner --test-email` — a live, end-to-end check of both email features
 (SMTP notifications, IMAP email commands) run once, deliberately, right after creating/editing
 `.env` on any machine (new or existing). Actually connects and authenticates rather than just
-checking env var presence -- presence-only checks would not have caught either of the two real
+checking env var presence — presence-only checks would not have caught either of the two real
 failure modes this exists to catch: a Gmail password used instead of an App Password, or IMAP/SMTP
 credentials that are simply wrong on a freshly-cloned machine. See docs/DEPLOYMENT.md's "Verify
 before you trust it" section.
 
-Deliberately NOT a pytest-only concern -- the whole point is a human runs this once against real
+Deliberately NOT a pytest-only concern — the whole point is a human runs this once against real
 credentials before trusting cron/`--live` with them, the same "verify before you trust it" pattern
 this project already uses for paper-trading before going live.
 """
@@ -29,7 +29,7 @@ GMAIL_APP_PASSWORD_HINT = (
 )
 OUTLOOK_OAUTH_HINT = (
     "Outlook.com/Hotmail/Microsoft 365 reject password-based SMTP AUTH entirely. Set "
-    "SMTP_PROVIDER=outlook and configure MS_OAUTH_CLIENT_ID -- see docs/DEPLOYMENT.md's "
+    "SMTP_PROVIDER=outlook and configure MS_OAUTH_CLIENT_ID — see docs/DEPLOYMENT.md's "
     "Outlook OAuth2 section."
 )
 
@@ -42,7 +42,7 @@ def _check_smtp() -> bool:
     to_addr = os.environ.get("ALERT_TO_EMAIL")
 
     if not smtp_ready(host, user, to_addr, password):
-        print("SMTP: SKIPPED -- SMTP_HOST/SMTP_USER/ALERT_TO_EMAIL/SMTP_PASS (or "
+        print("SMTP: SKIPPED — SMTP_HOST/SMTP_USER/ALERT_TO_EMAIL/SMTP_PASS (or "
               "MS_OAUTH_CLIENT_ID for outlook) not fully configured.")
         return True
 
@@ -62,13 +62,13 @@ def _check_smtp() -> bool:
             server.sendmail(user, [to_addr], msg.as_string())
     except smtplib.SMTPAuthenticationError as e:
         hint = GMAIL_APP_PASSWORD_HINT if get_provider() == "gmail" else OUTLOOK_OAUTH_HINT
-        print(f"SMTP: FAILED -- authentication rejected ({e}). {hint}")
+        print(f"SMTP: FAILED — authentication rejected ({e}). {hint}")
         return False
     except Exception as e:
-        print(f"SMTP: FAILED -- {e}")
+        print(f"SMTP: FAILED — {e}")
         return False
 
-    print(f"SMTP: OK -- test email sent to {to_addr}. Check that inbox to confirm delivery.")
+    print(f"SMTP: OK — test email sent to {to_addr}. Check that inbox to confirm delivery.")
     return True
 
 
@@ -81,7 +81,7 @@ def _check_imap() -> bool:
     trusted_sender = os.environ.get("TRUSTED_SENDER_EMAIL")
 
     if not all([imap_host, imap_user, imap_password, trusted_sender]):
-        print("IMAP: SKIPPED -- email-commanded remote actions not configured "
+        print("IMAP: SKIPPED — email-commanded remote actions not configured "
               "(IMAP_HOST/IMAP_USER/IMAP_PASS/TRUSTED_SENDER_EMAIL not all set).")
         return True
 
@@ -90,15 +90,15 @@ def _check_imap() -> bool:
         conn.login(imap_user, imap_password)
         conn.logout()
     except imaplib.IMAP4.error as e:
-        print(f"IMAP: FAILED -- login rejected ({e}). Check IMAP_USER/IMAP_PASS -- for Gmail "
+        print(f"IMAP: FAILED — login rejected ({e}). Check IMAP_USER/IMAP_PASS — for Gmail "
               f"this must be an App Password, same as SMTP_PASS. {GMAIL_APP_PASSWORD_HINT}")
         return False
     except Exception as e:
-        print(f"IMAP: FAILED -- {e}")
+        print(f"IMAP: FAILED — {e}")
         return False
 
-    print(f"IMAP: OK -- logged in as {imap_user}. TRUSTED_SENDER_EMAIL is set to "
-          f"{trusted_sender!r} -- confirm that's the exact address you'll send commands from.")
+    print(f"IMAP: OK — logged in as {imap_user}. TRUSTED_SENDER_EMAIL is set to "
+          f"{trusted_sender!r} — confirm that's the exact address you'll send commands from.")
     return True
 
 
@@ -111,5 +111,5 @@ def run_email_diagnostics() -> bool:
     if smtp_ok and imap_ok:
         print("Result: OK")
     else:
-        print("Result: FAILED -- see above for the specific check(s) that failed.")
+        print("Result: FAILED — see above for the specific check(s) that failed.")
     return smtp_ok and imap_ok

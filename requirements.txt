@@ -1,4 +1,4 @@
-# Generated export of pyproject.toml's [project.dependencies] -- for
+# Generated export of pyproject.toml's [project.dependencies] — for
 # environments using plain pip/Docker without `uv sync` or an editable
 # install. Keep this in sync with pyproject.toml; don't hand-maintain
 # a divergent version list here.

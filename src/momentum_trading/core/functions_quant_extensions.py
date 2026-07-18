@@ -10,7 +10,7 @@ Import alongside functions.py:
     from momentum_trading.core import functions as fn
     from momentum_trading.core import functions_quant_extensions as fnx
 
-These are additive -- nothing in functions.py or momentum_backtest.py is modified,
+These are additive — nothing in functions.py or momentum_backtest.py is modified,
 so existing notebook cells keep working unchanged.
 """
 
@@ -38,18 +38,18 @@ def liquidity_filter(
     average daily dollar volume falls below `min_avg_dollar_volume`.
 
     Without this, decile/top_n analysis can select ETFs that are too thin to
-    actually trade at the assumed size -- a common way backtests overstate
+    actually trade at the assumed size — a common way backtests overstate
     real-world achievable returns.
 
     Parameters
     ----------
     df_ranks : pd.DataFrame
-        Output of assign_ranks() -- index=month-end dates, columns=tickers.
+        Output of assign_ranks() — index=month-end dates, columns=tickers.
     df_prices : pd.DataFrame
         Daily close prices, columns=tickers (same universe as df_ranks).
     df_volume : pd.DataFrame, optional
         Daily share volume, columns=tickers. If None, the filter is a no-op
-        (returns df_ranks unchanged) -- you cannot assess liquidity without
+        (returns df_ranks unchanged) — you cannot assess liquidity without
         volume data, so this makes the missing-data case explicit rather than
         silently skipping the check.
     min_avg_dollar_volume : float
@@ -82,12 +82,12 @@ def check_capacity(
 ) -> dict:
     """
     Flags any position whose target size would exceed
-    max_pct_of_adv (average daily dollar volume) -- a proxy for market impact
+    max_pct_of_adv (average daily dollar volume) — a proxy for market impact
     risk. Institutions typically cap single-day participation well under 10%
     of ADV to avoid moving the price against themselves; 5% is a conservative
     retail-scale default here.
 
-    This is advisory (returns flags), not a hard block -- wire the result into
+    This is advisory (returns flags), not a hard block — wire the result into
     daily_runner.py as a pre-trade warning, or make it a hard block once
     you've decided on your own risk tolerance for this.
 
@@ -144,7 +144,7 @@ def walk_forward_lookback_holding(
     (lookback, holding) combo using ONLY the training slice, then evaluate that
     choice on the immediately following, unseen test slice. This is the direct
     fix for "tuning params on the full 2005-2025 sample and backtesting on the
-    same sample" -- every reported test-period number here is out-of-sample.
+    same sample" — every reported test-period number here is out-of-sample.
 
     Parameters
     ----------
@@ -169,7 +169,7 @@ def walk_forward_lookback_holding(
     pd.DataFrame
         One row per walk-forward fold: chosen params, train metric, test metric.
         A real edge should show test metrics that are positive and reasonably
-        close to train metrics -- a big train/test gap is the signature of
+        close to train metrics — a big train/test gap is the signature of
         overfitting the parameter grid.
     """
     dates = df_prices_monthly.index
@@ -291,7 +291,7 @@ def pre_registered_split(
     """
     Commit to a single train/holdout split BEFORE any parameter scanning.
 
-    This is the fix for "scan the full-sample heatmap, then pick the best combo" --
+    This is the fix for "scan the full-sample heatmap, then pick the best combo" —
     the heatmap in Notebook 1 should only ever be built on `train`, and `holdout`
     should not be touched (not even glanced at) until the final chosen config is
     locked in. Report holdout performance exactly once.
@@ -439,14 +439,14 @@ def bootstrap_spread_significance(
     """
     Tests whether the strategy's mean monthly outperformance vs. the benchmark
     is distinguishable from zero, via block bootstrap on the return SPREAD
-    (not each series separately -- this correctly accounts for their
+    (not each series separately — this correctly accounts for their
     correlation, which a naive two-sample t-test would ignore).
 
     Returns
     -------
     dict with mean_monthly_spread, ci_low, ci_high, p_value_two_sided
     (fraction of bootstrap resamples where the spread's sign flips relative to
-    the point estimate -- a simple, robust proxy for significance).
+    the point estimate — a simple, robust proxy for significance).
     """
     aligned = pd.concat(
         [strategy_monthly_returns.rename("s"), benchmark_monthly_returns.rename("b")], axis=1
@@ -480,7 +480,7 @@ def bootstrap_spread_significance(
 
 
 # --------------------------------------------------------------------------- #
-# 8. ABSOLUTE MOMENTUM OVERLAY (dual momentum -- Antonacci-style)
+# 8. ABSOLUTE MOMENTUM OVERLAY (dual momentum — Antonacci-style)
 # --------------------------------------------------------------------------- #
 def absolute_momentum_overlay(
     monthly_picks: pd.Series,
@@ -489,7 +489,7 @@ def absolute_momentum_overlay(
 ) -> pd.Series:
     """
     Relative momentum (picking the top-N by rank) says nothing about whether
-    those winners are actually winning in absolute terms -- in a broad
+    those winners are actually winning in absolute terms — in a broad
     drawdown (2008, 2022), the "top 10" can still all have negative trailing
     returns, and the strategy holds them anyway. This is the single most
     common real-world fix (Antonacci's "dual momentum" / GEM approach):
@@ -501,9 +501,9 @@ def absolute_momentum_overlay(
     Parameters
     ----------
     monthly_picks : pd.Series
-        Output of get_top_etfs() -- index=dates, values=list of tickers.
+        Output of get_top_etfs() — index=dates, values=list of tickers.
     momentum_scores : pd.DataFrame
-        Output of calculate_period_returns() -- same index/columns universe,
+        Output of calculate_period_returns() — same index/columns universe,
         trailing return used to rank. Must share monthly_picks' date index.
     defensive_ticker : str
         Ticker to substitute in for any pick with negative absolute momentum.
@@ -541,7 +541,7 @@ def scheduled_revalidation_check(
     """
     Simple helper to track whether a fresh walk-forward/holdout re-validation
     (Notebook 1's walk-forward cells) is due. The original walk-forward check
-    was a one-time run -- this turns it into a periodic cadence so parameter
+    was a one-time run — this turns it into a periodic cadence so parameter
     drift/overfitting gets caught on an ongoing basis rather than assumed to
     hold forever after a single historical check.
 
@@ -549,12 +549,12 @@ def scheduled_revalidation_check(
     ----------
     last_validation_date : str/Timestamp/None
         When the walk-forward/holdout validation was last actually run. If
-        None, treated as "never run" -- always due.
+        None, treated as "never run" — always due.
     revalidation_interval_days : int
         How often re-validation should happen (default ~quarterly).
     log_path : str
         CSV appended to (date, is_due, days_since_last) each time this is
-        called with due=True and then acted upon -- call log_revalidation_run()
+        called with due=True and then acted upon — call log_revalidation_run()
         below after actually completing a re-validation to reset the clock.
 
     Returns
@@ -592,14 +592,14 @@ def historical_var_cvar(
     returns: pd.Series, confidence: float = 0.95, portfolio_value: float | None = None,
 ) -> dict:
     """
-    Historical (non-parametric) VaR and CVaR from a returns series -- monthly
+    Historical (non-parametric) VaR and CVaR from a returns series — monthly
     or daily, whatever frequency `returns` is in; the output is in the same
     period units unless portfolio_value is supplied for a dollar figure.
 
     VaR: the loss threshold not expected to be exceeded with `confidence`
     probability, based on the empirical distribution (no normality assumption).
     CVaR (a.k.a. Expected Shortfall): the average loss GIVEN that the VaR
-    threshold was breached -- more informative for tail risk since it captures
+    threshold was breached — more informative for tail risk since it captures
     how bad the bad case actually is, not just its threshold.
 
     Returns
@@ -626,10 +626,10 @@ def scenario_shock(
     current_weights: dict, shock_returns: dict, portfolio_value: float,
 ) -> dict:
     """
-    Applies a specified return shock per ticker to current position weights --
+    Applies a specified return shock per ticker to current position weights —
     e.g. "what if each holding dropped by its worst historical week's return
     tomorrow." This is a deterministic scenario test, distinct from VaR's
-    probabilistic framing -- useful for board/risk-committee-style "what if X
+    probabilistic framing — useful for board/risk-committee-style "what if X
     happens" questions that don't require assuming a return distribution.
 
     Parameters
@@ -666,11 +666,11 @@ def compare_to_benchmark(name: str, snapshot_dir: str = str(data_dir())) -> dict
     """
     Reads write_portfolio_snapshot()'s log (live_signal.py) and returns
     cumulative portfolio return vs. cumulative benchmark return since the
-    first snapshot -- a quick "how are we doing vs. SPY" answer without
+    first snapshot — a quick "how are we doing vs. SPY" answer without
     needing to open a notebook or replay the trade log.
 
     Requires the snapshot rows to have portfolio_period_return and
-    benchmark_period_return populated (both optional fields -- if a run
+    benchmark_period_return populated (both optional fields — if a run
     didn't supply them, those rows are skipped in the cumulative product).
 
     Returns
@@ -713,15 +713,15 @@ def since_inception_performance(
     """
     Total Return, CAGR, Max Drawdown, Standard Deviation, Sharpe Ratio, and Sortino Ratio from
     write_portfolio_snapshot()'s log (live_signal.py), over the full history from the FIRST
-    recorded snapshot row -- the inception of this portfolio's tracked history -- through the
+    recorded snapshot row — the inception of this portfolio's tracked history — through the
     latest snapshot. Deliberately reuses functions.py's annualize_returns()/annualize_vol()/
-    max_drawdown()/sharpe_ratio()/sortino_ratio() -- the SAME functions the backtest engine's
-    tear_sheet() is built from -- rather than a separate implementation, so live and backtested
+    max_drawdown()/sharpe_ratio()/sortino_ratio() — the SAME functions the backtest engine's
+    tear_sheet() is built from — rather than a separate implementation, so live and backtested
     stats can never silently diverge (same principle as resolve_target_weights() being shared
     between the backtest and live paths).
 
     Deliberately does NOT call tear_sheet() itself: that function also computes calendar-year
-    returns, best/worst 12/36-month periods, and 3-year rolling outperformance -- none of which
+    returns, best/worst 12/36-month periods, and 3-year rolling outperformance — none of which
     can produce a meaningful result from a live portfolio that might only have weeks of history,
     and tear_sheet() isn't written to degrade gracefully around that (several of its sub-calls
     would raise or return nonsense on a short series). Calling the individual stat functions
@@ -730,9 +730,9 @@ def since_inception_performance(
     failing or returning garbage.
 
     Returns a dict of fractions (e.g. 0.05 = 5%), NOT the percentage-scale numbers the underlying
-    functions.py helpers return -- normalized here so report-building code can use the same
+    functions.py helpers return — normalized here so report-building code can use the same
     `:.2%` formatting already used for compare_to_benchmark()'s output. Any stat that can't be
-    computed yet is None, not an exception or a NaN silently rendered as "0%" -- Sharpe/Sortino
+    computed yet is None, not an exception or a NaN silently rendered as "0%" — Sharpe/Sortino
     specifically need >= 1 year of daily rows (functions.py's own threshold) and are commonly
     None for a portfolio that's simply too new; Sharpe also depends on a live network fetch for
     the risk-free proxy and returns None (not a crash) if that fetch fails.
@@ -745,7 +745,7 @@ def since_inception_performance(
 
     df = df.dropna(subset=["portfolio_period_return", "benchmark_period_return"]).sort_values("date")
     if df.empty:
-        return {"error": "No snapshot rows with period returns yet -- need at least 2 runs."}
+        return {"error": "No snapshot rows with period returns yet — need at least 2 runs."}
 
     returns = df.set_index("date")[["portfolio_period_return", "benchmark_period_return"]].rename(
         columns={"portfolio_period_return": "Portfolio", "benchmark_period_return": "SPY_Return"})
@@ -792,16 +792,16 @@ def since_inception_performance(
 def daily_window_comparison(name: str, snapshot_dir: str = str(data_dir())) -> dict:
     """
     Portfolio vs. benchmark cumulative return over short trailing windows (previous day, 1 week,
-    2 weeks, 3 weeks) -- the daily report's equivalent of trailing_returns()'s monthly windows
+    2 weeks, 3 weeks) — the daily report's equivalent of trailing_returns()'s monthly windows
     (1/3/6 month, YTD, 1 year), which don't fit a daily-cadence report's much shorter timescale.
     Deliberately a separate, minimal implementation rather than generalizing functions.py's
-    trailing_returns() to accept arbitrary windows -- that function hardcodes its output columns
+    trailing_returns() to accept arbitrary windows — that function hardcodes its output columns
     to a fixed 1/3/6-month-scale list (functions.py:852-863), so forcing it to also support
     day/week-scale windows would mean modifying shared, notebook-relied-upon code for a case it
     was never designed for; a small dedicated helper here is lower risk.
 
     Returns {window_label: {"portfolio": fraction, "benchmark": fraction}} for each of
-    "1 Day"/"1 Week"/"2 Week"/"3 Week" -- a window is omitted entirely (not NaN) if the snapshot
+    "1 Day"/"1 Week"/"2 Week"/"3 Week" — a window is omitted entirely (not NaN) if the snapshot
     log doesn't yet have a row far enough back to compute it, e.g. a portfolio in its first week
     has no "3 Week" comparison yet.
     """
@@ -813,7 +813,7 @@ def daily_window_comparison(name: str, snapshot_dir: str = str(data_dir())) -> d
 
     df = df.dropna(subset=["portfolio_period_return", "benchmark_period_return"]).sort_values("date")
     if df.empty:
-        return {"error": "No snapshot rows with period returns yet -- need at least 2 runs."}
+        return {"error": "No snapshot rows with period returns yet — need at least 2 runs."}
 
     df = df.set_index("date")
     port_cgi = (1 + df["portfolio_period_return"]).cumprod()
@@ -841,22 +841,22 @@ def daily_window_comparison(name: str, snapshot_dir: str = str(data_dir())) -> d
 # --------------------------------------------------------------------------- #
 def monthly_window_comparison(name: str, snapshot_dir: str = str(data_dir())) -> dict:
     """
-    Portfolio vs. benchmark cumulative return over trailing windows for the monthly report --
-    "1 Month"/"3 Month"/"6 Month"/"YTD"/"1 Year" -- in the same uniform {window_label:
+    Portfolio vs. benchmark cumulative return over trailing windows for the monthly report —
+    "1 Month"/"3 Month"/"6 Month"/"YTD"/"1 Year" — in the same uniform {window_label:
     {"portfolio": fraction, "benchmark": fraction}} shape daily_window_comparison() above
     already returns, so build_comparison_bar_chart() (interfaces/notifications.py) can chart
     either report's comparison data without caring which one it is.
 
     Deliberately does NOT reuse functions.py's trailing_returns()/return_period_dates(), despite
-    those already defining this exact window set -- confirmed by direct testing that they raise
+    those already defining this exact window set — confirmed by direct testing that they raise
     a KeyError against a short, live daily-snapshot history: return_period_dates()'s "Since
     Inception" window computes dt_start - BDay(), which routinely falls before the market
     calendar schedule this function fetches (start_date to end_date only), and its "M"-frequency
     branch skips holiday/weekend snapping entirely (assumes an already-monthly-indexed series).
     That machinery was evidently only ever exercised against full multi-year backtest histories
     in practice, not short-lived live data. Same lightweight cumulative-growth-index lookback
-    approach as daily_window_comparison() instead -- proven to work correctly against short
-    histories -- just with month-scale day offsets rather than week-scale ones.
+    approach as daily_window_comparison() instead — proven to work correctly against short
+    histories — just with month-scale day offsets rather than week-scale ones.
 
     A window is omitted from the result if the snapshot log doesn't yet have a row far enough
     back to compute it (e.g. no "1 Year" comparison for a portfolio only a few months old).
@@ -869,7 +869,7 @@ def monthly_window_comparison(name: str, snapshot_dir: str = str(data_dir())) ->
 
     df = df.dropna(subset=["portfolio_period_return", "benchmark_period_return"]).sort_values("date")
     if df.empty:
-        return {"error": "No snapshot rows with period returns yet -- need at least 2 runs."}
+        return {"error": "No snapshot rows with period returns yet — need at least 2 runs."}
 
     df = df.set_index("date")
     port_cgi = (1 + df["portfolio_period_return"]).cumprod()
@@ -906,7 +906,7 @@ def check_external_correlation(
 ) -> dict:
     """
     Reports correlation between THIS strategy's returns and a user-supplied set
-    of your OTHER holdings' returns -- e.g. an existing S&P 500 index fund, a
+    of your OTHER holdings' returns — e.g. an existing S&P 500 index fund, a
     bond fund, individual stock positions held outside this system.
 
     Why this matters: this strategy's own internal correlation penalty
@@ -919,7 +919,7 @@ def check_external_correlation(
     Parameters
     ----------
     strategy_returns : pd.Series
-        This strategy's periodic (e.g. monthly) returns -- from a backtest
+        This strategy's periodic (e.g. monthly) returns — from a backtest
         tearsheet, or real returns derived from portfolio_snapshot_*.csv via
         compare_to_benchmark()-style period returns.
     other_holdings_returns : dict {holding_name: pd.Series}
@@ -943,7 +943,7 @@ def check_external_correlation(
         results[name] = {"correlation": corr, "n_overlapping_periods": len(aligned)}
         if pd.notna(corr) and abs(corr) > 0.7:
             warnings.append(
-                f"{name}: correlation {corr:.2f} -- this strategy may not be meaningfully "
+                f"{name}: correlation {corr:.2f} — this strategy may not be meaningfully "
                 f"diversifying your exposure to {name}."
             )
 
@@ -959,10 +959,10 @@ def blend_momentum_scores(
     """
     Blends momentum scores across multiple lookback windows instead of relying
     on a single one (e.g. only 12-month). Rationale: different lookbacks
-    capture different regimes of momentum -- shorter windows (3mo) react
+    capture different regimes of momentum — shorter windows (3mo) react
     faster to regime changes but are noisier; longer windows (12mo) are the
     classic academic momentum window but react slowly to reversals. A blend
-    is a reasonable middle ground, not a guaranteed improvement -- validate
+    is a reasonable middle ground, not a guaranteed improvement — validate
     with a real backtest comparison before trusting it over a single lookback
     (see the Notebook 2 demo cell for exactly that comparison).
 
@@ -973,7 +973,7 @@ def blend_momentum_scores(
     lookbacks : list[int]
         Lookback periods in months (assumes monthly-resampled data; if you
         pass daily data directly, these are interpreted as periods in
-        whatever frequency daily_prices is at -- resample to monthly first
+        whatever frequency daily_prices is at — resample to monthly first
         for the conventional "N-month momentum" meaning).
     weights : list[float], optional
         Weight per lookback, same length as `lookbacks`. Defaults to equal
@@ -983,7 +983,7 @@ def blend_momentum_scores(
     -------
     pd.DataFrame
         Blended momentum score per ticker per date, same shape as a single
-        calculate_period_returns() output -- drop-in compatible with
+        calculate_period_returns() output — drop-in compatible with
         assign_ranks()/get_top_etfs() from the existing signal pipeline.
     """
     if weights is None:

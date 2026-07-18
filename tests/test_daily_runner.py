@@ -27,11 +27,11 @@ class TestConfigSchemaValidation:
     """
     validate_config_schema() exists specifically to catch a bad config.yaml
     BEFORE it's used to build a BacktestConfig deep inside the rebalance loop
-    -- these tests confirm each specific mistake (empty tickers, a
+    — these tests confirm each specific mistake (empty tickers, a
     custom_weights key that doesn't match the ticker list, weights summing
     over 1.0, a negative dollar value) produces a clear, field-specific error
-    naming the offending portfolio, rather than a generic crash or -- worse
-    -- a silently-wrong sizing decision.
+    naming the offending portfolio, rather than a generic crash or — worse
+    — a silently-wrong sizing decision.
     """
 
     def test_valid_config_passes(self, sample_config_dict):
@@ -48,7 +48,7 @@ class TestConfigSchemaValidation:
 
     def test_custom_weight_for_unknown_ticker_raises(self):
         # A stale custom_weights entry (referencing a ticker no longer in the
-        # portfolio) would otherwise be silently ignored -- this forces the
+        # portfolio) would otherwise be silently ignored — this forces the
         # mismatch to be caught and fixed rather than quietly producing a
         # different allocation than intended.
         bad = {"portfolios": {"p1": {"tickers": ["SPY"], "custom_weights": {"QQQ": 0.5}}}}
@@ -70,7 +70,7 @@ class TestConfigSchemaValidation:
 
     def test_two_null_total_values_raises(self):
         # total_value: null means "account remainder", which is
-        # ambiguous with more than one candidate -- must fail at load time, not
+        # ambiguous with more than one candidate — must fail at load time, not
         # silently double-count real capital across portfolios sharing an account.
         bad = {"portfolios": {
             "p1": {"tickers": ["SPY"], "total_value": None},
@@ -88,7 +88,7 @@ class TestConfigSchemaValidation:
 
     def test_non_bool_send_warning_raises(self):
         # send_warning: "false" is a truthy non-empty string in
-        # Python -- would otherwise silently mean "send" via default truthiness, the
+        # Python — would otherwise silently mean "send" via default truthiness, the
         # opposite of what someone writing that value almost certainly intended. This
         # field gates whether a real capital-safety risk reaches you by email at all,
         # so a bad value here must fail loudly, not silently do the wrong thing.
@@ -113,7 +113,7 @@ class TestLoadConfig:
     build a BacktestConfig per portfolio. These tests confirm the happy path
     works end-to-end from a real file on disk (not just an in-memory dict,
     which TestConfigSchemaValidation covers), and that an invalid
-    risk_override surfaces the PORTFOLIO NAME in the error -- with multiple
+    risk_override surfaces the PORTFOLIO NAME in the error — with multiple
     portfolios in one config.yaml, a generic "invalid config" error would be
     much harder to act on than one that says which portfolio is broken.
     """
@@ -143,13 +143,13 @@ class TestLoadConfig:
 
     def test_top_n_independent_per_portfolio(self, tmp_path):
         # Confirms top_n is genuinely per-portfolio, not a single value
-        # shared across a config.yaml with several portfolios -- four portfolios,
+        # shared across a config.yaml with several portfolios — four portfolios,
         # four different top_n values, each resolved independently via
         # risk_overrides on top of one shared default_risk.top_n.
         cfg = {
             "default_risk": {"holding_period": 1, "top_n": 3},   # portfolio1 uses this as-is
             "portfolios": {
-                # Explicit total_value on every portfolio here -- unrelated to what
+                # Explicit total_value on every portfolio here — unrelated to what
                 # this test checks (top_n independence), but required since more than
                 # one portfolio with total_value: null (unset defaults to null) in
                 # the same config.yaml is forbidden.
@@ -174,7 +174,7 @@ class TestLoadConfig:
             )
 
     def test_lookback_period_independent_per_portfolio(self, tmp_path):
-        # Mirrors test_top_n_independent_per_portfolio -- confirms lookback_period
+        # Mirrors test_top_n_independent_per_portfolio — confirms lookback_period
         # (the trailing-months momentum ranking window) resolves per-portfolio via
         # risk_overrides on top of one shared default_risk.lookback_period, the same
         # way every other BacktestConfig field already does.
@@ -198,7 +198,7 @@ class TestLoadConfig:
 class TestIdempotency:
     """
     Guards against a duplicate same-day rebalance (e.g. a cron retry firing
-    twice, or a manual run overlapping a scheduled one) -- without this,
+    twice, or a manual run overlapping a scheduled one) — without this,
     the system could place the same intended trade twice.
     """
 
@@ -218,7 +218,7 @@ class TestIdempotency:
 class TestAlertFallback:
     """
     If SMTP isn't configured, an alert must still be VISIBLE (as an ERROR log
-    line) rather than silently disappearing -- a failed unattended run with
+    line) rather than silently disappearing — a failed unattended run with
     no notification at all is the worst-case outcome this test guards against.
     """
 
@@ -231,7 +231,7 @@ class TestAlertFallback:
 class TestCircuitBreaker:
     """
     The circuit breaker's most important, least obvious behavioral
-    requirement is that it does NOT auto-resume after a drawdown recovers --
+    requirement is that it does NOT auto-resume after a drawdown recovers —
     a human must explicitly clear it. This is deliberate: a brief recovery
     during a volatile period shouldn't silently re-enable trading without
     review. test_trips_on_drawdown_and_persists_despite_recovery is the test
@@ -245,7 +245,7 @@ class TestCircuitBreaker:
         monkeypatch.setattr(circuit_breaker, "LOCK_DIR", tmp_path / "data")
         monkeypatch.setattr(daily_runner, "LOCK_DIR", tmp_path / "data")
         # Tripping/resuming the breaker also calls log_alert(), which resolves via
-        # the module-global ALERTS_LOG_PATH -- isolate it so this test doesn't
+        # the module-global ALERTS_LOG_PATH — isolate it so this test doesn't
         # write into the real project's logs/alerts_log.csv.
         monkeypatch.setattr(circuit_breaker, "ALERTS_LOG_PATH", str(tmp_path / "data" / "alerts_log.csv"))
         from momentum_trading.daily_runner import check_circuit_breaker, resume_trading
@@ -261,7 +261,7 @@ class TestCircuitBreaker:
 
     def test_disabled_by_default(self, tmp_path, monkeypatch):
         # Confirms max_portfolio_drawdown_pct=0.0 (the default) genuinely
-        # disables the feature -- an existing config.yaml without this field
+        # disables the feature — an existing config.yaml without this field
         # set should NOT unexpectedly start halting trades.
         monkeypatch.chdir(tmp_path)
         import momentum_trading.daily_runner as daily_runner
@@ -277,7 +277,7 @@ class TestCircuitBreaker:
 
 class TestMaxDrawdownEmailOverride:
     """
-    SET_MAX_DRAWDOWN's core safety property -- the
+    SET_MAX_DRAWDOWN's core safety property — the
     override can only TIGHTEN the effective breaker threshold, never loosen
     it, enforced at the point of USE (get_effective_max_drawdown_pct), not
     at email-parse time. A regression here would mean a malformed or
@@ -309,7 +309,7 @@ class TestMaxDrawdownEmailOverride:
 
     def test_looser_override_is_ignored(self, tmp_path, monkeypatch):
         # THE critical test: an override requesting a LOOSER threshold than
-        # config must be ignored -- the configured (tighter) value wins.
+        # config must be ignored — the configured (tighter) value wins.
         monkeypatch.chdir(tmp_path)
         import momentum_trading.daily_runner as daily_runner
         import momentum_trading.risk.circuit_breaker as circuit_breaker
@@ -327,7 +327,7 @@ class TestMaxDrawdownEmailOverride:
         import momentum_trading.risk.circuit_breaker as circuit_breaker
         monkeypatch.setattr(circuit_breaker, "LOCK_DIR", tmp_path / "data")
         monkeypatch.setattr(daily_runner, "LOCK_DIR", tmp_path / "data")
-        # Tripping the breaker also calls log_alert() -- isolate ALERTS_LOG_PATH too.
+        # Tripping the breaker also calls log_alert() — isolate ALERTS_LOG_PATH too.
         monkeypatch.setattr(circuit_breaker, "ALERTS_LOG_PATH", str(tmp_path / "data" / "alerts_log.csv"))
         from momentum_trading.daily_runner import check_circuit_breaker, _max_drawdown_override_path
         from momentum_trading.backtest.momentum_backtest import BacktestConfig
@@ -344,7 +344,7 @@ class TestMaxDrawdownEmailOverride:
 class TestTimeStops:
     """
     Live-trading equivalent of the backtest's
-    max_holding_days -- independent of and in addition to the price-based
+    max_holding_days — independent of and in addition to the price-based
     stop-loss (check_and_handle_stop_losses), sharing its auto_execute_stop_loss
     flag rather than a second config field.
     """
@@ -355,7 +355,7 @@ class TestTimeStops:
         # log_alert(), which resolves its path via the module-global
         # ALERTS_LOG_PATH (imported from core.audit_log, resolved once at
         # import time into logs_dir()/alerts_log.csv, same pattern as every
-        # other daily_runner.py path constant) -- without patching it, these
+        # other daily_runner.py path constant) — without patching it, these
         # tests would write TIME_STOP_TRIGGERED rows into the real project's
         # logs/alerts_log.csv instead of tmp_path.
         monkeypatch.setattr(daily_runner, "LOCK_DIR", tmp_path / "data")
@@ -447,7 +447,7 @@ class TestStopLossCheck:
     check_and_handle_stop_losses() had no dedicated test
     at all before now (only exercised indirectly). Added alongside the
     log_alert() wiring to confirm STOP_LOSS_TRIGGERED actually
-    lands in the alert log with the right portfolio tag -- not just that the
+    lands in the alert log with the right portfolio tag — not just that the
     ticker gets flagged.
     """
 
@@ -485,7 +485,7 @@ class TestStopLossCheck:
 class TestAlertsReportEmailCommand:
     """
     ALERTS_REPORT is handled specially in
-    check_and_apply_email_commands() -- BEFORE the normal per-portfolio
+    check_and_apply_email_commands() — BEFORE the normal per-portfolio
     targets loop, since PORTFOLIO here means "filter to this portfolio's
     alerts" (a query), not "apply this action to these portfolios" like every
     other command. These tests exercise the full path: a canned parsed
@@ -497,7 +497,7 @@ class TestAlertsReportEmailCommand:
     def _isolate_alerts_log(self, tmp_path, monkeypatch):
         # Without this, check_and_apply_email_commands()'s ALERTS_REPORT handler
         # would read the REAL project's logs/alerts_log.csv (via the module-global
-        # ALERTS_LOG_PATH) instead of an empty tmp path -- e.g. test_alerts_report_
+        # ALERTS_LOG_PATH) instead of an empty tmp path — e.g. test_alerts_report_
         # no_alerts_replies_gracefully asserts "No alerts recorded", which only
         # holds if this is genuinely isolated from whatever real alerts exist.
         monkeypatch.setattr(daily_runner, "LOCK_DIR", tmp_path / "data")
@@ -589,9 +589,9 @@ class TestSameInboxWarning:
     """
     TRUSTED_SENDER_EMAIL == IMAP_USER is a fully supported, common setup (see
     docs/EMAIL_COMMANDS.md), but it means ordinary correspondence from that address gets
-    treated as a failed command attempt and replied to once (by design -- see
+    treated as a failed command attempt and replied to once (by design — see
     tests/interfaces/test_email_commands.py::TestReplyCascadeGuard for why this can no longer
-    cascade). This visibility warning exists so that tradeoff isn't silent -- it must fire when
+    cascade). This visibility warning exists so that tradeoff isn't silent — it must fire when
     the addresses match and stay silent otherwise.
     """
 
@@ -623,7 +623,7 @@ class TestSameInboxWarning:
 class TestTestEmailFlag:
     """
     --test-email must exit immediately based on run_email_diagnostics()'s result,
-    before any config.yaml loading or portfolio logic runs -- it's a pure email-setup check,
+    before any config.yaml loading or portfolio logic runs — it's a pure email-setup check,
     usable even with no config.yaml present at all.
     """
 
@@ -650,7 +650,7 @@ class TestTestEmailFlag:
 class TestResolveTotalValues:
     """
     total_value: null must mean "account value minus every
-    OTHER portfolio's fixed total_value" -- the OLD behavior (each null portfolio
+    OTHER portfolio's fixed total_value" — the OLD behavior (each null portfolio
     independently pulling the FULL account value) silently double/triple-counted the
     same real capital across portfolios sharing one IBKR account. These tests use an
     injected account_value_fn so no real IBKR connection is needed.
@@ -667,7 +667,7 @@ class TestResolveTotalValues:
         assert resolved == {"portfolio2": 2500.0, "portfolio1": 7500.0}
 
     def test_live_remainder_at_or_below_zero_raises(self):
-        # Fixed portfolios already consume the whole (or more than the) account --
+        # Fixed portfolios already consume the whole (or more than the) account —
         # proceeding with zero/negative real capital must never happen silently.
         portfolios = {
             "portfolio1": {"total_value": None, "tickers": ["SPY"]},
@@ -685,7 +685,7 @@ class TestResolveTotalValues:
         assert resolved == {"p1": 100.0, "p2": 200.0}
 
     def test_dry_run_null_portfolio_gets_flat_placeholder_not_a_real_remainder(self):
-        # Dry-run tests signal/order-generation LOGIC, not real capital math -- the
+        # Dry-run tests signal/order-generation LOGIC, not real capital math — the
         # null portfolio must get a simple flat placeholder, NOT reduced by other
         # portfolios' fixed total_value, so dry-run testing a config that's perfectly
         # valid live (e.g. a fixed portfolio bigger than $1000) doesn't spuriously fail.
@@ -707,7 +707,7 @@ class TestResolveTotalValues:
 class TestCheckTickerOverlap:
     """
     Portfolios sharing a ticker on the same real IBKR account
-    would each independently compute and submit orders against the same position --
+    would each independently compute and submit orders against the same position —
     this is surfaced as a warning (not blocking, per explicit product decision), so
     it must correctly identify exactly which tickers and portfolios are involved.
     """

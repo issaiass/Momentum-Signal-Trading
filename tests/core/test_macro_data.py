@@ -1,8 +1,8 @@
 """
 tests/core/test_macro_data.py
 
-Covers core/macro_data.py -- FRED-sourced Fed Funds Rate / CPI, gated on FRED_API_KEY being
-set, plus its file cache. Network calls are never made in this suite -- _fetch_fred_series() is
+Covers core/macro_data.py — FRED-sourced Fed Funds Rate / CPI, gated on FRED_API_KEY being
+set, plus its file cache. Network calls are never made in this suite — _fetch_fred_series() is
 monkeypatched at the module level rather than mocking urlopen, matching the approach in
 tests/core/test_fundamentals.py.
 
@@ -58,7 +58,7 @@ class TestFetchMacroIndicators:
         assert macro_data.fetch_macro_indicators("fred-key") == {}
 
     def test_missing_value_marker_is_treated_as_no_observation(self, monkeypatch):
-        # FRED uses "." for not-yet-released observations -- _fetch_fred_series() should
+        # FRED uses "." for not-yet-released observations — _fetch_fred_series() should
         # return None for that series rather than raising or fabricating a value.
         def fake_fetch(series_id, key):
             return None if series_id == "FEDFUNDS" else FAKE_CPI

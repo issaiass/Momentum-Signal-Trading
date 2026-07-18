@@ -95,7 +95,11 @@ momentum-trading/
 │       ├── daily_runner_walkthrough.ipynb
 │       ├── email_commands_walkthrough.ipynb
 │       ├── portfolio_snapshot_report.ipynb   investor-facing view: positions,
-│       │                           value over time, benchmark comparison
+│       │                           value over time, benchmark comparison, plus every measure
+│       │                           the email reports show — position performance since entry
+│       │                           (real, FIFO-reconstructed from the trade log, and an
+│       │                           illustrative example), technical/fundamental indicators,
+│       │                           macro context, since-inception stats, trailing-window chart
 │       └── live_vs_backtest_reconciliation.ipynb   real live P&L vs. backtested P&L
 │
 ├── src/momentum_trading/          installable package (`pip install -e .`)
@@ -110,18 +114,18 @@ momentum-trading/
 │   │   │                             factor decomposition, regime breakdown, dual momentum,
 │   │   │                             VaR/CVaR, scenario shocks, capacity checks, multi-lookback,
 │   │   │                             since-inception + trailing-window live performance stats
-│   │   ├── technical_indicators.py  hand-rolled SMA/EMA/RSI/MACD/ATR/Bollinger/ADX/VWAP/OBV --
+│   │   ├── technical_indicators.py  hand-rolled SMA/EMA/RSI/MACD/ATR/Bollinger/ADX/VWAP/OBV —
 │   │   │                             not pandas-ta (dependency-conflicts with pandas>=3.0.3)
 │   │   ├── fundamentals.py          P/E, PEG, ROE, Debt-to-Equity, Current Ratio for held
-│   │   │                             positions -- FMP `/stable/` first, EODHD fallback, file-cached
-│   │   ├── macro_data.py            Fed Funds Rate, CPI via FRED -- needs FRED_API_KEY,
+│   │   │                             positions — FMP `/stable/` first, EODHD fallback, file-cached
+│   │   ├── macro_data.py            Fed Funds Rate, CPI via FRED — needs FRED_API_KEY,
 │   │   │                             portfolio-wide (one fetch per run), file-cached
-│   │   ├── paths.py                 PROJECT_ROOT resolution -- single source of truth for
+│   │   ├── paths.py                 PROJECT_ROOT resolution — single source of truth for
 │   │   │                             where config.yaml/data/logs live, regardless of CWD
-│   │   ├── smtp_auth.py             shared SMTP auth for email sending -- password-based
+│   │   ├── smtp_auth.py             shared SMTP auth for email sending — password-based
 │   │   │                             (Gmail) or XOAUTH2 (Outlook/Microsoft 365)
 │   │   └── audit_log.py             shared hash-chain append helper + the alert log
-│   │                                 (logs/alerts_log.csv) -- every alert/warning event,
+│   │                                 (logs/alerts_log.csv) — every alert/warning event,
 │   │                                 kept separate from the trade log and email command log
 │   │
 │   ├── backtest/
@@ -140,21 +144,21 @@ momentum-trading/
 │   │
 │   ├── risk/
 │   │   ├── circuit_breaker.py       portfolio-level circuit breaker (%  and $ thresholds,
-│   │   │                             email-override tightening-only enforcement) --
+│   │   │                             email-override tightening-only enforcement) —
 │   │   │                             extracted from daily_runner.py so risk logic has no
 │   │   │                             dependency on interfaces/ (alerting is dependency-injected)
-│   │   └── risk_monitor.py          independent, read-only oversight process -- watches
+│   │   └── risk_monitor.py          independent, read-only oversight process — watches
 │   │                                 trade logs, can halt trading, cannot place orders
 │   │
 │   └── interfaces/
 │       ├── notifications.py         categorized email notifications (CRITICAL/STANDARD/
 │       │                             PERIODIC/DAILY/WARNING) + monthly & daily HTML report
-│       │                             generation (shared builder -- see CLAUDE.md)
+│       │                             generation (shared builder — see CLAUDE.md)
 │       ├── email_commands.py        pydantic-validated, fail-safe remote email commands
 │       │                             (PAUSE/RESUME/LIQUIDATE/SKIP_NEXT_REBALANCE/
 │       │                             TRIGGER_REPORT/ADJUST_PARAM/STATUS/SET_MAX_DRAWDOWN/
 │       │                             ALERTS_REPORT)
-│       └── email_diagnostics.py     backs `daily-runner --test-email` -- live SMTP+IMAP
+│       └── email_diagnostics.py     backs `daily-runner --test-email` — live SMTP+IMAP
 │                                     check independent of config.yaml
 │
 └── tests/                         pytest suite (359 tests), mirrors src/ layout where a

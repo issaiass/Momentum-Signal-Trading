@@ -34,17 +34,17 @@ logger = logging.getLogger("notifications")
 
 
 class NotificationCategory(str, Enum):
-    CRITICAL = "critical"   # red -- always sent, not filterable
-    STANDARD = "standard"   # green -- routine BUY/SELL/HOLD, filterable
-    PERIODIC = "periodic"   # blue -- scheduled monthly report, filterable
-    DAILY = "daily"         # purple -- daily performance report, filterable via
-                             # notifications.send_daily (default False) -- separate from
+    CRITICAL = "critical"   # red — always sent, not filterable
+    STANDARD = "standard"   # green — routine BUY/SELL/HOLD, filterable
+    PERIODIC = "periodic"   # blue — scheduled monthly report, filterable
+    DAILY = "daily"         # purple — daily performance report, filterable via
+                             # notifications.send_daily (default False) — separate from
                              # PERIODIC/monthly on purpose, so the two cadences can be toggled
                              # independently; should_send()'s f"send_{category.value}" key
                              # derivation means this needed no changes there, just this entry.
-    WARNING = "warning"     # amber -- non-fatal risk signals (multi-portfolio
+    WARNING = "warning"     # amber — non-fatal risk signals (multi-portfolio
                              # capital over-allocation, ticker overlap), filterable via
-                             # notifications.send_warning -- unlike CRITICAL, these are review-
+                             # notifications.send_warning — unlike CRITICAL, these are review-
                              # when-convenient risks, not run-blocking failures
 
 
@@ -70,15 +70,15 @@ def _smtp_config() -> dict | None:
 
 def should_send(category: NotificationCategory, notification_config: dict) -> bool:
     """
-    CRITICAL is always sent regardless of config -- it is deliberately NOT
+    CRITICAL is always sent regardless of config — it is deliberately NOT
     made filterable, since suppressing a stop-loss/circuit-breaker alert is
     exactly the failure mode this whole notification system exists to prevent.
     STANDARD/PERIODIC/WARNING default to sending if unconfigured. DAILY is the one
-    exception -- it defaults to NOT sending if unconfigured, since it's a real recurring
+    exception — it defaults to NOT sending if unconfigured, since it's a real recurring
     cost/inbox-volume feature (full indicator dashboard, generated every day) that should be
     a deliberate opt-in, not something a config.yaml predating this feature silently starts
     doing. This must hold even if `send_daily` is entirely absent from notification_config,
-    not just explicitly set false -- hence the per-category default below rather than a single
+    not just explicitly set false — hence the per-category default below rather than a single
     shared default.
     """
     if category == NotificationCategory.CRITICAL:
@@ -94,7 +94,7 @@ def send_action_email(
 ) -> bool:
     """
     Sends a categorized HTML email. Returns True if actually sent, False if
-    filtered out by config or if SMTP isn't configured (logged either way --
+    filtered out by config or if SMTP isn't configured (logged either way —
     a filtered CRITICAL email should never happen, logged loudly if it does).
     """
     notification_config = notification_config or {}
@@ -104,7 +104,7 @@ def send_action_email(
 
     smtp = _smtp_config()
     if smtp is None:
-        logger.error("SMTP env vars not fully configured -- NOTIFICATION NOT SENT (category=%s). "
+        logger.error("SMTP env vars not fully configured — NOTIFICATION NOT SENT (category=%s). "
                      "Subject: %s", category.value, subject)
         return False
 
@@ -142,7 +142,7 @@ def send_action_email(
 
 
 def send_critical_action(subject: str, body_html: str, plain_text_fallback: str | None = None) -> bool:
-    """Convenience wrapper -- always sends, no config needed since CRITICAL is never filterable."""
+    """Convenience wrapper — always sends, no config needed since CRITICAL is never filterable."""
     return send_action_email(NotificationCategory.CRITICAL, subject, body_html, {}, plain_text_fallback)
 
 
@@ -158,7 +158,7 @@ def _describe_fill_outcome(order: dict, dry_run: bool) -> tuple[str, str]:
     as distinct from what the signal *intended* (order['action']/order['reason']).
 
     Reads the fill_status/fill_price/fill_shares fields that execution/live_signal.py's
-    run() merges back onto each order after place_orders_ibkr() returns (live mode only) --
+    run() merges back onto each order after place_orders_ibkr() returns (live mode only) —
     including the "dropped before ever reaching IBKR" statuses (DROPPED_FRACTIONAL,
     DROPPED_INSUFFICIENT_CASH) that place_orders_ibkr() now tracks separately since those
     tickers never get a real IBKR orderId and would otherwise be silently missing here.
@@ -192,7 +192,7 @@ def build_rebalance_summary_html(portfolio_name: str, orders: dict, dry_run: boo
     """
     Standard-category HTML table summarizing a rebalance's BUY/SELL/HOLD decisions, plus
     a "What Actually Happened" column showing the REAL execution outcome per ticker (filled,
-    dropped, still open, rejected, dry-run, ...) -- distinct from the signal's intended
+    dropped, still open, rejected, dry-run, ...) — distinct from the signal's intended
     action/reason, since a live order can be intended but never actually fill.
 
     dry_run should be True whenever this rebalance ran without --live (no orders were ever
@@ -224,16 +224,16 @@ def build_rebalance_summary_html(portfolio_name: str, orders: dict, dry_run: boo
 
 def build_comparison_bar_chart(window_data: dict, title: str) -> bytes | None:
     """
-    Grouped bar chart, portfolio vs. benchmark return per trailing window -- one bar-pair per
+    Grouped bar chart, portfolio vs. benchmark return per trailing window — one bar-pair per
     window label. Shared by both the monthly report (core/functions.py's trailing_returns(),
     windows like "1 Month"/"3 Month"/"6 Month"/"YTD"/"1 Year") and the daily report
     (core/functions_quant_extensions.py's daily_window_comparison(), windows like "1 Day"/
-    "1 Week"/"2 Week"/"3 Week") -- both are normalized to the same shape before reaching here:
+    "1 Week"/"2 Week"/"3 Week") — both are normalized to the same shape before reaching here:
     {window_label: {"portfolio": fraction, "benchmark": fraction}, ...}, plus non-window keys
     like "as_of_date"/"error" which are ignored (not plotted).
 
     Returns None (not an exception) if matplotlib is unavailable or there are no plottable
-    windows yet (e.g. a portfolio too new for even a "1 Month" comparison) -- same graceful-
+    windows yet (e.g. a portfolio too new for even a "1 Month" comparison) — same graceful-
     degradation contract as the existing portfolio-value chart below.
     """
     labels = [k for k, v in window_data.items() if isinstance(v, dict) and "portfolio" in v]
@@ -266,12 +266,12 @@ def build_comparison_bar_chart(window_data: dict, title: str) -> bytes | None:
         plt.close(fig)
         return buf.getvalue()
     except ImportError:
-        logger.warning("matplotlib not available -- comparison chart omitted.")
+        logger.warning("matplotlib not available — comparison chart omitted.")
         return None
 
 
 def _build_value_chart(snapshot_df: pd.DataFrame, title: str) -> bytes | None:
-    """The portfolio-value-over-time line chart -- factored out so both the monthly and daily
+    """The portfolio-value-over-time line chart — factored out so both the monthly and daily
     report builders share the exact same charting code instead of two copies drifting apart."""
     if len(snapshot_df) < 2:
         return None
@@ -291,14 +291,14 @@ def _build_value_chart(snapshot_df: pd.DataFrame, title: str) -> bytes | None:
         plt.close(fig)
         return buf.getvalue()
     except ImportError:
-        logger.warning("matplotlib not available -- value chart omitted.")
+        logger.warning("matplotlib not available — value chart omitted.")
         return None
 
 
 def _strategy_stats_rows(since_inception: dict | None) -> str:
     """Total Return/CAGR/Max Drawdown/Std Dev/Sharpe/Sortino table rows, shared by both report
     builders. since_inception is functions_quant_extensions.py's since_inception_performance()
-    output -- any stat that's None (e.g. Sharpe/Sortino before a year of history exists) shows
+    output — any stat that's None (e.g. Sharpe/Sortino before a year of history exists) shows
     as 'Not enough history yet' rather than a blank cell or a crash."""
     if since_inception is None or "error" in since_inception:
         return ""
@@ -329,7 +329,7 @@ def _strategy_stats_rows(since_inception: dict | None) -> str:
 
 
 def _technical_indicators_html(indicators: dict[str, dict] | None) -> str:
-    """One row per held ticker, one column per indicator -- indicators is
+    """One row per held ticker, one column per indicator — indicators is
     {ticker: core/technical_indicators.py's compute_latest_indicators() output}. Tickers with
     too little OHLCV history to compute indicators yet (empty dict) are omitted from the table
     entirely rather than shown with blank cells."""
@@ -360,9 +360,9 @@ def _technical_indicators_html(indicators: dict[str, dict] | None) -> str:
 
 
 def _fundamental_indicators_html(fundamentals: dict[str, dict] | None) -> str:
-    """One row per held ticker, one column per indicator -- fundamentals is
+    """One row per held ticker, one column per indicator — fundamentals is
     {ticker: core/fundamentals.py's get_cached_or_fetch_fundamentals() output}. A ticker with no
-    fundamentals access from either vendor (empty dict -- e.g. your FMP/EODHD plan doesn't
+    fundamentals access from either vendor (empty dict — e.g. your FMP/EODHD plan doesn't
     include fundamentals) is omitted from the table entirely, same contract as
     _technical_indicators_html() above. The whole section is omitted if no ticker has any data."""
     if not fundamentals:
@@ -392,7 +392,7 @@ def _fundamental_indicators_html(fundamentals: dict[str, dict] | None) -> str:
 
 
 def _macro_indicators_html(macro: dict | None) -> str:
-    """Portfolio-independent -- one Fed Funds Rate / CPI reading per report, not per ticker,
+    """Portfolio-independent — one Fed Funds Rate / CPI reading per report, not per ticker,
     since macro conditions apply market-wide. macro is core/macro_data.py's
     get_cached_or_fetch_macro_indicators() output: {"fed_funds_rate": {"value":..., "date":...},
     "cpi": {"value":..., "date":...}}. Omitted entirely if empty (FRED_API_KEY not configured,
@@ -421,11 +421,11 @@ def _macro_indicators_html(macro: dict | None) -> str:
 
 
 def _position_performance_html(position_performance: dict[str, dict] | None) -> str:
-    """One row per held ticker -- position_performance is
+    """One row per held ticker — position_performance is
     execution/live_signal.py's build_position_performance() output: return since entry on the
     CURRENTLY open position (unrealized, mark-to-market), distinct from the "Actual P&L"
     section above (which is realized+unrealized P&L across the whole trade history, including
-    closed lots). Omitted entirely if not provided or empty -- e.g. dry-run mode, where
+    closed lots). Omitted entirely if not provided or empty — e.g. dry-run mode, where
     current_positions is never populated from a real broker connection."""
     if not position_performance:
         return ""
@@ -473,28 +473,28 @@ def _build_report_html(
 ) -> tuple[str, bytes | None, bytes | None]:
     """
     Shared HTML/chart builder for both the monthly and daily reports (build_monthly_report_html()
-    / build_daily_report_html() below are thin wrappers over this) -- the two reports differ only
+    / build_daily_report_html() below are thin wrappers over this) — the two reports differ only
     in cadence and which trailing windows their `comparison`/`window_comparison` dicts cover, not
     in structure, so this stays as one implementation rather than two copies that could drift
     apart. Returns (html_body, value_chart_bytes_or_None, comparison_chart_bytes_or_None).
 
     Both chart_bytes values are None if matplotlib isn't available or there's not enough data
-    to chart yet -- the HTML report still renders without them in that case, degrading
+    to chart yet — the HTML report still renders without them in that case, degrading
     gracefully rather than failing the whole report.
 
     real_pnl : dict, optional
-        Output of execution/live_signal.py's measure_live_performance() --
+        Output of execution/live_signal.py's measure_live_performance() —
         REAL realized+unrealized P&L from FIFO-matched trade log rows, distinct
         from "Current Position"'s unrealized_pnl below (which only marks
         currently-open positions from the latest snapshot, not cumulative
         realized gains from trades that have since closed). Omitted from the
         report if not provided (e.g. no trade log exists yet this period).
     since_inception : dict, optional
-        core/functions_quant_extensions.py's since_inception_performance() output -- Total
+        core/functions_quant_extensions.py's since_inception_performance() output — Total
         Return/CAGR/Max Drawdown/Std Dev/Sharpe/Sortino since the first snapshot. Omitted
         section if not provided.
     window_comparison : dict, optional
-        {window_label: {"portfolio": fraction, "benchmark": fraction}} -- e.g. trailing_returns()'s
+        {window_label: {"portfolio": fraction, "benchmark": fraction}} — e.g. trailing_returns()'s
         "1 Month"/"3 Month"/etc. columns for the monthly report, or
         daily_window_comparison()'s "1 Day"/"1 Week"/etc. for the daily report, reshaped into
         this uniform dict shape. Charted via build_comparison_bar_chart(); omitted if not
@@ -508,13 +508,13 @@ def _build_report_html(
         has any data (e.g. your FMP/EODHD plan doesn't include fundamentals access).
     macro : dict, optional
         core/macro_data.py's get_cached_or_fetch_macro_indicators() output (Fed Funds Rate,
-        CPI) -- portfolio-independent, the same dict is passed to every portfolio's report in a
+        CPI) — portfolio-independent, the same dict is passed to every portfolio's report in a
         given run. Omitted section if not provided (e.g. FRED_API_KEY not configured).
     position_performance : dict, optional
-        {ticker: execution/live_signal.py's build_position_performance() output} -- per-ticker
+        {ticker: execution/live_signal.py's build_position_performance() output} — per-ticker
         return since entry on the currently open position (entry date/price, current price,
         shares, return %, market value). Distinct from real_pnl above (realized+unrealized P&L
-        across the whole trade history, including closed lots) -- this is unrealized,
+        across the whole trade history, including closed lots) — this is unrealized,
         mark-to-market return on what's open right now. Omitted section if not provided (e.g.
         dry-run mode, where current_positions is never populated from a real broker).
     """
@@ -578,7 +578,7 @@ def _build_report_html(
     {indicators_html}
     {fundamentals_html}
     {macro_html}
-    <p style="color:#999; font-size:11px;">This report reflects backtested/paper/live results as configured --
+    <p style="color:#999; font-size:11px;">This report reflects backtested/paper/live results as configured —
     verify which mode this portfolio is running in before treating these numbers as real returns.</p>
     """
     return html, value_chart_bytes, comparison_chart_bytes
@@ -591,7 +591,7 @@ def build_monthly_report_html(
     fundamentals: dict[str, dict] | None = None, macro: dict | None = None,
     position_performance: dict[str, dict] | None = None,
 ) -> tuple[str, bytes | None, bytes | None]:
-    """Monthly cadence -- see _build_report_html() for the full parameter docs (shared)."""
+    """Monthly cadence — see _build_report_html() for the full parameter docs (shared)."""
     return _build_report_html(
         portfolio_name, "Monthly", f"Period ending {datetime.now().strftime('%Y-%m-%d')}",
         snapshot_df, comparison, real_pnl, since_inception, window_comparison, indicators,
@@ -607,10 +607,10 @@ def build_daily_report_html(
     position_performance: dict[str, dict] | None = None,
 ) -> tuple[str, bytes | None, bytes | None]:
     """
-    Daily cadence -- same content depth as the monthly report (technical indicators, since-
+    Daily cadence — same content depth as the monthly report (technical indicators, since-
     inception strategy stats, benchmark comparison chart), generated every day instead of
     monthly. Gated behind config.yaml's notifications.send_daily (default False) precisely
-    because of this depth -- see docs/EMAIL_REPORTING.md. See _build_report_html() for the full
+    because of this depth — see docs/EMAIL_REPORTING.md. See _build_report_html() for the full
     parameter docs (shared); window_comparison here is expected to be
     core/functions_quant_extensions.py's daily_window_comparison() output ("1 Day"/"1 Week"/
     "2 Week"/"3 Week"), not trailing_returns()'s monthly windows.
@@ -630,7 +630,7 @@ def send_monthly_report(
     fundamentals: dict[str, dict] | None = None, macro: dict | None = None,
     position_performance: dict[str, dict] | None = None,
 ) -> bool:
-    """PERIODIC category -- filterable, but distinct from CRITICAL/STANDARD filtering."""
+    """PERIODIC category — filterable, but distinct from CRITICAL/STANDARD filtering."""
     html, value_chart_bytes, comparison_chart_bytes = build_monthly_report_html(
         portfolio_name, snapshot_df, comparison, real_pnl,
         since_inception, window_comparison, indicators, fundamentals, macro,
@@ -643,7 +643,7 @@ def send_monthly_report(
 
     smtp = _smtp_config()
     if smtp is None:
-        logger.error("SMTP not configured -- monthly report NOT SENT for %s", portfolio_name)
+        logger.error("SMTP not configured — monthly report NOT SENT for %s", portfolio_name)
         return False
 
     msg = MIMEMultipart("related")
@@ -681,10 +681,10 @@ def send_daily_report(
     fundamentals: dict[str, dict] | None = None, macro: dict | None = None,
     position_performance: dict[str, dict] | None = None,
 ) -> bool:
-    """DAILY category -- filterable via notifications.send_daily, defaults to NOT sending
+    """DAILY category — filterable via notifications.send_daily, defaults to NOT sending
     unless explicitly enabled (see should_send()'s per-category default). Structurally
-    identical to send_monthly_report() -- same graceful degradation, same two-image MIME
-    attachment pattern -- just a different category/subject and (typically) different-shaped
+    identical to send_monthly_report() — same graceful degradation, same two-image MIME
+    attachment pattern — just a different category/subject and (typically) different-shaped
     comparison/window_comparison inputs (daily windows, not monthly)."""
     html, value_chart_bytes, comparison_chart_bytes = build_daily_report_html(
         portfolio_name, snapshot_df, comparison, real_pnl,
@@ -698,7 +698,7 @@ def send_daily_report(
 
     smtp = _smtp_config()
     if smtp is None:
-        logger.error("SMTP not configured -- daily report NOT SENT for %s", portfolio_name)
+        logger.error("SMTP not configured — daily report NOT SENT for %s", portfolio_name)
         return False
 
     msg = MIMEMultipart("related")

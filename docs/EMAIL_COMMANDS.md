@@ -93,7 +93,7 @@ PORTFOLIO: <portfolio_name or ALL>
 
 | Command | Auto-applied? | Extra fields | Example |
 |---|---|---|---|
-| `PAUSE` | Yes (only in `--live` mode -- see note below) | — | `ACTION: PAUSE`<br>`PORTFOLIO: portfolio1` |
+| `PAUSE` | Yes (only in `--live` mode — see note below) | — | `ACTION: PAUSE`<br>`PORTFOLIO: portfolio1` |
 | `RESUME` | Yes (only in `--live` mode) | — | `ACTION: RESUME`<br>`PORTFOLIO: portfolio1` |
 | `SKIP_NEXT_REBALANCE` | Yes (only in `--live` mode) | — | `ACTION: SKIP_NEXT_REBALANCE`<br>`PORTFOLIO: portfolio1` |
 | `STATUS` | Yes — read-only, always applies | — | `ACTION: STATUS`<br>`PORTFOLIO: portfolio1` |
@@ -118,7 +118,7 @@ under the pseudo-portfolio name `ALL`) — a query filter, not "apply this actio
 portfolios" like the other commands. See `docs/ALERT_LOG.md` for what `alert_type`s exist.
 
 **Important note on when commands actually apply:** `daily_runner.py` reuses its own
-`dry_run = not args.live` state for email commands too -- state-changing commands (PAUSE,
+`dry_run = not args.live` state for email commands too — state-changing commands (PAUSE,
 RESUME, SKIP_NEXT_REBALANCE, SET_MAX_DRAWDOWN) are parsed, validated, logged, and replied to
 normally even when running without `--live`, but are only actually *applied* when the bot is
 running in `--live` mode. This was a deliberate choice (not a separate new flag) to keep the

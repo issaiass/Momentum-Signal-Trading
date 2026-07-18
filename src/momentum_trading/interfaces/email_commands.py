@@ -9,21 +9,21 @@ SECURITY MODEL (read before enabling this):
   - Only commands from a SINGLE, explicitly configured trusted sender address
     are ever parsed. Every other sender's email is ignored entirely, logged,
     and never even reaches the pydantic parsing step.
-  - ADJUST_PARAM is intentionally NOT open-ended -- only a small allowlist of
+  - ADJUST_PARAM is intentionally NOT open-ended — only a small allowlist of
     fields, each with hard-coded valid bounds, can be changed this way. This
     is deliberate: an open "change any config field via email" surface is a
     real fat-finger/spoofing risk. Anything outside the allowlist requires
     editing config.yaml directly, going through the existing approval gate.
   - FAIL-SAFE: any email that isn't from the trusted sender, or that IS from
     the trusted sender but doesn't parse as a valid recognized command, is
-    ignored -- the bot continues running with its CURRENT configuration. It
+    ignored — the bot continues running with its CURRENT configuration. It
     never partially applies a malformed command, never crashes the run, and
-    (for the first such email in a thread -- see BOT_SUBJECT_MARKER below)
+    (for the first such email in a thread — see BOT_SUBJECT_MARKER below)
     always sends a reply explaining what happened, to ALERT_TO_EMAIL
     specifically (not conditionally to whoever sent it).
   - ANTI-CASCADE: a reply to the trusted sender is itself new mail FROM the
     trusted sender if TRUSTED_SENDER_EMAIL == IMAP_USER (a common, supported
-    setup) -- X-Momentum-Trading-Bot (on the bot's own replies) and
+    setup) — X-Momentum-Trading-Bot (on the bot's own replies) and
     BOT_SUBJECT_MARKER (on any reply further downstream, including a human's)
     together guarantee this can never cascade past one reply. See
     docs/EMAIL_COMMANDS.md's "Self-generated emails" section for the full
@@ -35,7 +35,7 @@ SECURITY MODEL (read before enabling this):
 This module implements PARSING and VALIDATION. Actual IMAP polling wiring
 into daily_runner.py's scheduled loop, and actual application of PAUSE/
 RESUME/LIQUIDATE (reusing the existing circuit-breaker halt-flag mechanism)
-are separate integration steps -- see docs/EMAIL_COMMANDS.md.
+are separate integration steps — see docs/EMAIL_COMMANDS.md.
 """
 
 from __future__ import annotations
@@ -57,20 +57,20 @@ PROCESSED_COMMAND_IDS_PATH = str(data_dir() / "processed_command_ids.txt")
 
 # Every outbound email this bot sends (daily_runner.py's send_alert_email()) prefixes its
 # subject with this literal marker. Any INBOUND email whose subject already contains it is
-# therefore, provably, a continuation of a thread the bot itself started -- see
+# therefore, provably, a continuation of a thread the bot itself started — see
 # _is_bot_thread()'s use in poll_and_process_commands() for why this matters independently of
 # the X-Momentum-Trading-Bot header check.
 BOT_SUBJECT_MARKER = "[momentum-trading]"
 
 
 def _is_bot_thread(subject: str) -> bool:
-    """True if `subject` already carries this bot's own outbound marker -- i.e. this message
+    """True if `subject` already carries this bot's own outbound marker — i.e. this message
     is a reply (bot-generated or human) somewhere downstream of an email the bot itself sent."""
     return BOT_SUBJECT_MARKER in (subject or "")
 
 
 # --------------------------------------------------------------------------- #
-# ALLOWLISTED ADJUST_PARAM FIELDS -- deliberately small, with hard bounds.
+# ALLOWLISTED ADJUST_PARAM FIELDS — deliberately small, with hard bounds.
 # Anything not listed here CANNOT be changed via email, by design.
 # --------------------------------------------------------------------------- #
 ADJUSTABLE_PARAMS = {
@@ -105,14 +105,14 @@ class StatusCommand(CommandBase):
     Read-only, zero-risk. Requests an immediate reply
     with current state (halted/active, last rebalance date, latest snapshot)
     instead of waiting for the next scheduled monthly report. No special
-    validation needed -- it can't change anything.
+    validation needed — it can't change anything.
     """
     action: Literal["STATUS"] = "STATUS"
 
 
 class SetMaxDrawdownCommand(CommandBase):
     """
-    A SCOPED, one-directional variant of ADJUST_PARAM --
+    A SCOPED, one-directional variant of ADJUST_PARAM —
     can only TIGHTEN max_portfolio_drawdown_pct (make the circuit breaker
     more sensitive), never loosen it. This is deliberately safer than a
     general ADJUST_PARAM entry for this field: in a fast-moving situation
@@ -120,7 +120,7 @@ class SetMaxDrawdownCommand(CommandBase):
     can only ever make the bot MORE conservative, never accidentally less.
 
     Validation against the CURRENT configured value happens where this is
-    applied (daily_runner.py), not here -- this model only validates the
+    applied (daily_runner.py), not here — this model only validates the
     requested value is a sane fraction; the "can only tighten" check needs
     the live config to compare against, which isn't available at parse time.
     """
@@ -142,7 +142,7 @@ class LiquidateCommand(CommandBase):
     @field_validator("confirmation_phrase")
     @classmethod
     def must_match_exact_phrase(cls, v: str) -> str:
-        # Extra friction for the single most destructive command -- must be
+        # Extra friction for the single most destructive command — must be
         # typed out deliberately, not just implied by sending "LIQUIDATE".
         if v.strip().upper() != "I CONFIRM LIQUIDATION":
             raise ValueError('confirmation_phrase must be exactly "I CONFIRM LIQUIDATION"')
@@ -175,12 +175,12 @@ class AdjustParamCommand(CommandBase):
 
 class AlertsReportCommand(CommandBase):
     """
-    Read-only, zero-risk, mirrors StatusCommand -- emails
+    Read-only, zero-risk, mirrors StatusCommand — emails
     back the most recent rows from the alert log (core/audit_log.py's
     data/alerts_log.csv) instead of waiting to notice a problem from
     console/cron output. PORTFOLIO here means "filter to this portfolio's
     alerts" (or ALL for every portfolio, including cross-portfolio alerts
-    like TICKER_OVERLAP that are logged under the pseudo-portfolio "ALL") --
+    like TICKER_OVERLAP that are logged under the pseudo-portfolio "ALL") —
     a query filter, not "apply this action to these portfolios" like the
     mutating commands above.
     """
@@ -209,7 +209,7 @@ COMMAND_MODELS = {
 
 
 # --------------------------------------------------------------------------- #
-# PARSING -- simple line-based syntax, deliberately not free-form natural
+# PARSING — simple line-based syntax, deliberately not free-form natural
 # language (ambiguity in parsing a command that can move real money is a
 # risk in itself).
 #
@@ -243,7 +243,7 @@ class ParsedCommandResult(BaseModel):
 def parse_command(sender: str, trusted_sender: str, body: str) -> ParsedCommandResult:
     """
     FAIL-SAFE entry point. Returns a ParsedCommandResult that is ALWAYS safe
-    to inspect -- never raises. Any failure (untrusted sender, malformed
+    to inspect — never raises. Any failure (untrusted sender, malformed
     body, unknown action, validation error) produces success=False with a
     human-readable error, never a partially-applied command and never an
     exception that could crash the caller's loop.
@@ -297,12 +297,12 @@ def log_command_attempt(
     sender: str, result: ParsedCommandResult, log_path: str = EMAIL_COMMANDS_LOG_PATH,
 ) -> None:
     """
-    Every parsed attempt -- accepted or rejected -- is
+    Every parsed attempt — accepted or rejected — is
     logged to a dedicated, hash-chained audit trail, using the SAME
     hash-chain pattern as the trade log (live_signal.py's log_orders) for
     consistency: tampering with this log is detectable the same way tampering
     with the trade log is. This was a real gap in the original email-commands
-    implementation -- console logging alone doesn't survive a log rotation
+    implementation — console logging alone doesn't survive a log rotation
     or give you a queryable history of who tried what, when.
     """
     import csv
@@ -359,17 +359,17 @@ def build_reply_body(result: ParsedCommandResult) -> str:
         f"Command REJECTED at {ts}\n\n"
         f"Reason: {result.error}\n\n"
         f"The bot's current configuration is UNCHANGED. No action was taken. "
-        f"Nothing about this rejection affects scheduled operation -- the next "
+        f"Nothing about this rejection affects scheduled operation — the next "
         f"run will proceed normally with the existing config."
     )
 
 
 # --------------------------------------------------------------------------- #
-# IMAP POLLING -- retrieves unread emails, filters to trusted sender, parses.
+# IMAP POLLING — retrieves unread emails, filters to trusted sender, parses.
 #
 # NOTE: this function is structurally complete but has NOT been tested
 # against a real IMAP server in this environment (no network access to a
-# mail provider from this sandbox) -- same limitation as the IBKR
+# mail provider from this sandbox) — same limitation as the IBKR
 # integration elsewhere in this project. Test against your real mailbox
 # (a dedicated inbox for this purpose, not your primary email) before
 # relying on it, per docs/EMAIL_COMMANDS.md.
@@ -402,8 +402,8 @@ def poll_and_process_commands(
         If True, commands are parsed, logged, and replied to normally, but
         this function marks the email as read WITHOUT any caller-side state
         change happening (the caller is responsible for not applying results
-        when dry_run=True -- this flag mainly exists to let you test the full
-        email round-trip -- fetch, parse, log, reply -- safely before trusting
+        when dry_run=True — this flag mainly exists to let you test the full
+        email round-trip — fetch, parse, log, reply — safely before trusting
         it to actually flip halt flags).
 
     processed_ids_path : str
@@ -416,7 +416,7 @@ def poll_and_process_commands(
 
     send_reply_fn : callable(to_address: str, subject: str, body: str) -> None
         Injected rather than hardcoded to smtplib here, so this function can
-        be unit-tested without a real SMTP connection -- see
+        be unit-tested without a real SMTP connection — see
         tests/test_email_commands.py for the parsing tests; this function
         itself is integration-level and not covered by the automated suite.
     """
@@ -431,11 +431,11 @@ def poll_and_process_commands(
         conn.login(imap_user, imap_password)
         conn.select("INBOX")
 
-        # Filtered server-side to trusted_sender, not just "UNSEEN" -- an unfiltered search
+        # Filtered server-side to trusted_sender, not just "UNSEEN" — an unfiltered search
         # would fetch, log, auto-reply to, and mark-as-read EVERY unread email in the inbox
         # (newsletters, notifications, anything), not just command attempts. parse_command()
         # below still re-checks the sender itself as the real security boundary (IMAP FROM
-        # search is a header substring match, not cryptographic) -- this is a defense-in-depth
+        # search is a header substring match, not cryptographic) — this is a defense-in-depth
         # / noise-reduction prefilter, not a replacement for it.
         status, message_ids = conn.search(None, "UNSEEN", "FROM", f'"{trusted_sender}"')
         if status != "OK":
@@ -449,19 +449,19 @@ def poll_and_process_commands(
             msg = email_lib.message_from_bytes(msg_data[0][1])
             sender = email_lib.utils.parseaddr(msg.get("From", ""))[1]
 
-            # Two guards against a same-mailbox reply cascade, needed together -- neither alone
+            # Two guards against a same-mailbox reply cascade, needed together — neither alone
             # is sufficient. When trusted_sender is the SAME mailbox that receives alerts (a
             # common, explicitly supported setup), every outbound alert/reply lands back in this
             # inbox as new unread mail FROM the trusted sender:
             #   1. X-Momentum-Trading-Bot header (send_alert_email, notifications.py,
             #      risk_monitor.py all set it): catches the bot's OWN generated replies directly
-            #      -- these always carry the header, so this alone stops the bot from ever
+            #      — these always carry the header, so this alone stops the bot from ever
             #      replying to a message it just sent itself.
-            #   2. Subject marker (_is_bot_thread(), BOT_SUBJECT_MARKER): catches the NEXT hop --
+            #   2. Subject marker (_is_bot_thread(), BOT_SUBJECT_MARKER): catches the NEXT hop —
             #      a human replying to the bot's reply. A human-authored reply is a brand-new
             #      message the mail client generates; it never carries the custom header, so the
             #      header check alone would let it through, get parsed (still not a real
-            #      command), and get ANOTHER rejection reply -- round 2, doubling "Re: Re:" in
+            #      command), and get ANOTHER rejection reply — round 2, doubling "Re: Re:" in
             #      the subject. The subject marker persists across replies even when the header
             #      doesn't, so this guard catches what the header check structurally cannot.
             if msg.get("X-Momentum-Trading-Bot") or _is_bot_thread(msg.get("Subject", "")):

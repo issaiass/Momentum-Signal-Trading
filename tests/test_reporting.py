@@ -25,7 +25,7 @@ import momentum_trading.core.functions_quant_extensions as fnx
 class TestPortfolioSnapshot:
     """
     write_portfolio_snapshot() auto-computes period returns by comparing to
-    the PRIOR row -- these tests confirm the first-ever snapshot correctly
+    the PRIOR row — these tests confirm the first-ever snapshot correctly
     has no period return (nothing to compare against yet) and that the
     second snapshot's return is computed correctly against the first, by
     hand-verifiable math.
@@ -59,10 +59,10 @@ class TestPortfolioSnapshot:
 class TestSignalContextInOrders:
     """
     rank/signal_score are optional metadata carried alongside each order
-    purely for later human review ("why was XLK bought -- it was rank 2 of
+    purely for later human review ("why was XLK bought — it was rank 2 of
     10"). These tests confirm the values actually flow through the full
     pipeline (generate_orders -> log_orders -> the CSV), default to None
-    gracefully when not supplied, and -- critically -- that adding these new
+    gracefully when not supplied, and — critically — that adding these new
     columns to the trade log schema did NOT break measure_live_performance()'s
     existing FIFO P&L parsing, which reads specific named columns and should
     be unaffected by extra ones.
@@ -116,7 +116,7 @@ class TestSignalContextInOrders:
 class TestBenchmarkComparison:
     """
     compare_to_benchmark() chains consecutive period returns from the
-    snapshot log into a cumulative figure -- the math is checked by hand
+    snapshot log into a cumulative figure — the math is checked by hand
     ((1.05)*(1.0476)-1 style compounding, not simple addition) since a
     common mistake in this kind of function is summing returns instead of
     compounding them, which understates real cumulative performance.
@@ -144,7 +144,7 @@ class TestBenchmarkComparison:
 class TestExternalCorrelationCheck:
     """
     check_external_correlation() exists because this strategy's OWN internal
-    correlation penalty only looks at correlation among its own picks -- it
+    correlation penalty only looks at correlation among its own picks — it
     has no visibility into a user's other holdings. These tests confirm the
     warning threshold (0.7) actually discriminates: a deliberately-constructed
     highly-correlated series is flagged, an independent one is not, and too

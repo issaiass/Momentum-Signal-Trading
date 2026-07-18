@@ -3,7 +3,7 @@ tests/interfaces/test_email_diagnostics.py
 
 Covers run_email_diagnostics() (`daily-runner --test-email`): the live SMTP/IMAP
 check a user runs once after creating/editing .env on any machine, before trusting cron/--live
-with those credentials. Mocks smtplib.SMTP and imaplib.IMAP4_SSL -- no real network involved --
+with those credentials. Mocks smtplib.SMTP and imaplib.IMAP4_SSL — no real network involved —
 so these tests confirm the pass/fail/skip logic and the targeted remediation hints, not actual
 delivery (see docs/DEPLOYMENT.md's "Verify before you trust it" for the real, live check).
 
@@ -153,7 +153,7 @@ class TestRunEmailDiagnostics:
         assert diag.run_email_diagnostics() is True
 
     def test_nothing_configured_returns_true_all_skipped(self):
-        # Neither feature configured -- both checks skip, overall result is still "OK" since
+        # Neither feature configured — both checks skip, overall result is still "OK" since
         # nothing failed (matches the opt-in, no-noise-if-unused convention used elsewhere).
         assert diag.run_email_diagnostics() is True
 

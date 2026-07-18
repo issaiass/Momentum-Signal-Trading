@@ -1,70 +1,70 @@
 # config.example.yaml
 # Copy to config.yaml and edit. config.yaml should NOT be committed to version
-# control if it ever contains anything sensitive -- keep secrets (API keys,
+# control if it ever contains anything sensitive — keep secrets (API keys,
 # SMTP credentials) in environment variables (.env for Docker, User env vars
 # on native Windows) as documented in DEPLOYMENT.md, not in this file.
 
-# Required before --live runs (not enforced in dry-run) --
+# Required before --live runs (not enforced in dry-run) —
 # a lightweight paper trail that a human reviewed and approved this exact
 # config before it was used to trade real money.
 metadata:
   version: "1.0.0"
-  approved_by: null      # e.g. "your name" -- must be non-null for --live
-  approved_date: null    # e.g. "2026-07-11" -- must be non-null for --live
+  approved_by: null      # e.g. "your name" — must be non-null for --live
+  approved_date: null    # e.g. "2026-07-11" — must be non-null for --live
 
 # Email notification categories. CRITICAL (stop-loss executions,
 # circuit-breaker trips, the capital-allocation error that aborts a run) is ALWAYS
-# sent and cannot be disabled here -- only STANDARD, PERIODIC, DAILY, and WARNING are filterable.
+# sent and cannot be disabled here — only STANDARD, PERIODIC, DAILY, and WARNING are filterable.
 # Requires SMTP env vars set (see DEPLOYMENT.md). If sending via a Gmail account, SMTP_PASS
-# must be a Gmail App Password, NOT your normal account password -- generate one at
+# must be a Gmail App Password, NOT your normal account password — generate one at
 # https://myaccount.google.com/apppasswords (requires 2-Step Verification enabled on the
 # account first).
 notifications:
   send_standard: true             # routine rebalance BUY/SELL/HOLD summaries
   send_periodic: true             # monthly performance report
   monthly_report_day_of_month: 1  # null/omit to disable the monthly report entirely
-  send_daily: false               # daily performance report -- same content depth as the
+  send_daily: false               # daily performance report — same content depth as the
                                    # monthly report (technical indicators for held positions,
                                    # since-inception Total Return/CAGR/Max Drawdown/Std Dev/
                                    # Sharpe/Sortino, a benchmark comparison chart), generated
                                    # EVERY day instead of monthly. Defaults to false (unlike
                                    # every other notification flag here, which default to
                                    # sending if omitted) because of the real recurring compute/
-                                   # inbox-volume cost -- an explicit, deliberate opt-in, not
+                                   # inbox-volume cost — an explicit, deliberate opt-in, not
                                    # something you get by accident from an old config.yaml.
   send_warning: true              # multi-portfolio capital-safety warnings (fixed
                                    # allocations exceeding the real account, ticker overlap
-                                   # across portfolios). Gates the EMAIL only -- the detailed
+                                   # across portfolios). Gates the EMAIL only — the detailed
                                    # log line for each of these always fires regardless of
                                    # this setting, so the risk is never fully invisible even
                                    # with this set to false. Must be true/false, not a string
-                                   # -- validated at load time.
+                                   # — validated at load time.
 
 # Email-commanded remote actions (PAUSE/RESUME/SKIP_NEXT_REBALANCE
 # auto-applied; LIQUIDATE/ADJUST_PARAM parsed+validated but require manual
-# follow-through). Opt-in -- entirely inactive unless the IMAP_HOST, IMAP_USER,
+# follow-through). Opt-in — entirely inactive unless the IMAP_HOST, IMAP_USER,
 # IMAP_PASS, TRUSTED_SENDER_EMAIL env vars are all set. See EMAIL_COMMANDS.md.
-# Nothing to configure here in config.yaml itself -- env vars only, kept out
+# Nothing to configure here in config.yaml itself — env vars only, kept out
 # of this file so the trusted sender address isn't committed anywhere.
 
 # Every field below is a BacktestConfig field (src/momentum_trading/backtest/momentum_backtest.py)
-# -- config.yaml's default_risk/risk_overrides pass straight through to it, so any field defined
+# — config.yaml's default_risk/risk_overrides pass straight through to it, so any field defined
 # there is automatically accepted here too; this is a curated subset of the ones most worth
 # tuning, not an exhaustive list of every BacktestConfig field.
 default_risk:
-  holding_period: 1               # months between forced rebalances -- accepts fractional values
+  holding_period: 1               # months between forced rebalances — accepts fractional values
                                    # that map onto weeks: 0.25 = every week, 0.5 = every 2 weeks,
                                    # 0.75 = every 3 weeks, 1.0 = every month (default), integers
                                    # >1 = every N months. Values below 0.25 (faster than weekly)
                                    # are allowed but trigger a non-blocking WARNING log + email
-                                   # every run -- not recommended, since the momentum signal is
+                                   # every run — not recommended, since the momentum signal is
                                    # computed over a monthly-scale lookback_period, so trading
                                    # faster than weekly adds cost without improving the signal.
-  lookback_period: 12             # trailing months of returns used to RANK tickers by momentum --
+  lookback_period: 12             # trailing months of returns used to RANK tickers by momentum —
                                    # distinct from holding_period above (how OFTEN you rebalance,
                                    # not how far back the signal looks). LIVE-ONLY, has no effect
                                    # on the backtest engine (which receives pre-computed picks).
-  commission: 0.0                 # flat $ commission charged per trade -- BACKTEST-ONLY,
+  commission: 0.0                 # flat $ commission charged per trade — BACKTEST-ONLY,
                                    # has no effect on --live (real commission is already
                                    # reflected in your broker's real account balance)
   drift_threshold: 0.03           # only trade a name if |target_weight - current_weight| exceeds this
@@ -86,7 +86,7 @@ default_risk:
   allow_fractional_shares: false   # true = size positions to 4dp fractional shares in the
                                     # BACKTEST and in sizing/drift math. LIVE execution against
                                     # IBKR always floors to whole shares at order-submission
-                                    # time regardless of this setting -- IBKR's API does not
+                                    # time regardless of this setting — IBKR's API does not
                                     # support fractional EQUITY/ETF orders under any circumstances
                                     # (confirmed: not even via cashQty, which only works for
                                     # forex/CASH-pair orders). See DEPLOYMENT.md's
@@ -95,7 +95,7 @@ default_risk:
                                     # unaffected either way.
 
   # LIVE ONLY. place_orders_ibkr() always submits SELLs first and waits for them
-  # to clear before submitting BUYs (not configurable -- there's no valid reason to skip
+  # to clear before submitting BUYs (not configurable — there's no valid reason to skip
   # this). This field controls what happens if BUYs would still exceed real available cash
   # AFTER sells clear: false (default) = warn (always logged) and submit as computed, IBKR's
   # own fill/reject is the backstop. true = proportionally scale down BUY share counts
@@ -106,19 +106,19 @@ default_risk:
 
   # LIVE ONLY, no effect on the backtest. A rebalance running at or after market close submits
   # plain MKT orders that IBKR/exchanges reject outright ("Order rejected - reason:Exchange is
-  # closed", IBKR error 201) -- true switches every live order to LMT with outsideRth=True
+  # closed", IBKR error 201) — true switches every live order to LMT with outsideRth=True
   # instead, which IBKR DOES accept outside regular trading hours (MKT orders never work outside
-  # RTH, confirmed against IBKR's own TWS API docs -- this is a real order-type change, not just
+  # RTH, confirmed against IBKR's own TWS API docs — this is a real order-type change, not just
   # a flag). Limit price is the last known price +/- a small buffer favoring fill likelihood.
   # Covers NASDAQ's standard extended sessions: pre-market 4:00-9:30am ET, after-hours
-  # 4:00-8:00pm ET. Extended-hours liquidity is thinner than regular hours -- expect a real
+  # 4:00-8:00pm ET. Extended-hours liquidity is thinner than regular hours — expect a real
   # chance of no fill, a partial fill, or a worse price than the same order placed during RTH;
   # this is a genuine economic trade-off, not just a technical toggle. See DEPLOYMENT.md's
   # "Troubleshooting: IBKR order placement".
   allow_extended_hours: false
 
   # Selection: how many top-momentum-ranked tickers to actually hold each rebalance
-  # (clamped to the portfolio's own tickers list if that's smaller -- e.g. top_n: 10 with
+  # (clamped to the portfolio's own tickers list if that's smaller — e.g. top_n: 10 with
   # only 6 tickers in that portfolio just holds all 6, no error). See STRATEGY_THEORY.md.
   # Overridable per portfolio via risk_overrides, same as every field on this page.
   top_n: 10
@@ -127,7 +127,7 @@ default_risk:
   max_portfolio_drawdown_pct: 0.0     # 0 = disabled; e.g. 0.20 = halt NEW entries at -20% from peak
                                        # equity (does not force-liquidate existing positions)
   use_correlation_spike_regime: false # true = detect a market-wide correlation spike across
-                                       # holdings and react defensively (crash protection --
+                                       # holdings and react defensively (crash protection —
                                        # distinct from use_correlation_penalty above). Applies to
                                        # both backtest and --live.
 
@@ -136,10 +136,10 @@ default_risk:
                                        # "score_proportional" (stronger momentum gets more capital)
 
   # Additional execution safety checks
-  max_dollar_drawdown: null           # e.g. 500.0 -- independent $ breaker alongside the % one above
-  max_slippage_tolerance_pct: null    # e.g. 0.02 -- alert (not un-fill) on excess fill deviation
-  max_price_staleness_minutes: null   # e.g. 30 -- abort a run rather than trade on frozen data
-  max_holding_days: null              # e.g. 90 -- force-exit a position after N days regardless
+  max_dollar_drawdown: null           # e.g. 500.0 — independent $ breaker alongside the % one above
+  max_slippage_tolerance_pct: null    # e.g. 0.02 — alert (not un-fill) on excess fill deviation
+  max_price_staleness_minutes: null   # e.g. 30 — abort a run rather than trade on frozen data
+  max_holding_days: null              # e.g. 90 — force-exit a position after N days regardless
                                        # of price. Applies to both backtest and --live
                                        # (live derives "days held" from the trade log); respects
                                        # auto_execute_stop_loss (flag-only vs. auto-exit) in live.
@@ -152,10 +152,10 @@ portfolios:
                                    # account value after every OTHER portfolio's fixed
                                    # total_value is subtracted (--live only; dry-run uses a flat
                                    # $1000 placeholder instead). At most ONE portfolio across
-                                   # this whole file may be null -- validated at load time,
+                                   # this whole file may be null — validated at load time,
                                    # since "remainder" is ambiguous with more than one.
     # risk_overrides:              # optional: override ANY default_risk field for THIS
-    #   stop_loss_pct: 0.10         # portfolio only -- e.g. a tighter stop, a different top_n
+    #   stop_loss_pct: 0.10         # portfolio only — e.g. a tighter stop, a different top_n
     #   top_n: 5                    # than the default (see portfolio2 below), a shorter/longer
     #   lookback_period: 6          # momentum ranking window (months, LIVE-ONLY), or a different
     #   holding_period: 3           # rebalance cadence (months) than every other portfolio here
@@ -172,5 +172,5 @@ portfolios:
       use_correlation_penalty: true
       top_n: 3    # e.g. this portfolio holds only its top 3 of 4 tickers each rebalance
                   # (whichever of custom_weights' 4 entries didn't make the cut is
-                  # dropped and the rest renormalize to sum to 1.0) -- independent of
+                  # dropped and the rest renormalize to sum to 1.0) — independent of
                   # default_risk.top_n or any other portfolio's override

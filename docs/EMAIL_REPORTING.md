@@ -18,7 +18,7 @@ for the test that guards this.
 WARNING *can* be disabled (unlike CRITICAL) — the deliberate distinction is that these
 are review-when-convenient risk signals, not run-blocking failures, so a user who's confirmed
 their overlapping-ticker setup is intentional can quiet the recurring email. Disabling the
-email never disables the underlying log line, though (see below) -- the risk is never fully
+email never disables the underlying log line, though (see below) — the risk is never fully
 invisible even with `send_warning: false`.
 
 DAILY is the opposite exception: every other filterable category defaults to sending if
@@ -36,11 +36,11 @@ notifications:
   send_standard: true             # routine rebalance summaries
   send_periodic: true             # monthly report
   monthly_report_day_of_month: 1  # day of month the report fires; omit/null to disable
-  send_daily: false               # daily report -- same content depth as the monthly report,
+  send_daily: false               # daily report — same content depth as the monthly report,
                                    # generated every day. Defaults to false (see above);
                                    # set true to opt in.
   send_warning: true              # multi-portfolio capital-safety warnings.
-                                   # Must be a real bool -- a value like "false" (a truthy
+                                   # Must be a real bool — a value like "false" (a truthy
                                    # non-empty string) is rejected at config-load time
                                    # rather than silently doing the opposite of what you meant.
 ```
@@ -54,9 +54,9 @@ Plus the same SMTP environment variables already documented in `DEPLOYMENT.md`
 error"**, sent via `daily_runner.py`'s `send_alert_email()` directly (same unconditional path
 as stop-loss/circuit-breaker, no config gate at all) and always also logged
 (`logger.error`), with the same SMTP-missing ERROR-log fallback every other CRITICAL alert
-relies on. Fatal -- aborts the run (`sys.exit(1)`) before any portfolio is touched. Fires when
+relies on. Fatal — aborts the run (`sys.exit(1)`) before any portfolio is touched. Fires when
 a `total_value: null` portfolio's computed remainder (real account value minus every other
-portfolio's fixed `total_value`) would be zero or negative -- the other portfolios already
+portfolio's fixed `total_value`) would be zero or negative — the other portfolios already
 consume the whole account. Deliberately NOT made filterable (unlike the two WARNING alerts
 below): a run that just silently aborted with no explanation email would be worse than one
 that emails about it, so this stays CRITICAL rather than becoming configurable.
@@ -65,7 +65,7 @@ that emails about it, so this stays CRITICAL rather than becoming configurable.
 `send_action_email(NotificationCategory.WARNING, ...)` (filterable via
 `notifications.send_warning`, defaults to sending if unconfigured — same "unconfigured defaults
 to on" convention as STANDARD/PERIODIC). **The detailed diagnostic log line for each is written
-separately and unconditionally**, before and independent of the email attempt -- so even with
+separately and unconditionally**, before and independent of the email attempt — so even with
 `send_warning: false`, the exact risk detail (which tickers, which portfolios, which dollar
 amounts) always reaches the logs; the config toggle only ever controls whether it *also*
 reaches your inbox:
@@ -75,7 +75,7 @@ reaches your inbox:
   reject/reduce individual orders rather than overdraw), but this should not go unreviewed.
 - **"Ticker overlap across portfolios"** — checked once per run (dry-run or `--live`) before
   the per-portfolio loop starts. Fires when the same ticker appears in more than one
-  portfolio's `tickers` list -- each portfolio computes and submits orders independently, so a
+  portfolio's `tickers` list — each portfolio computes and submits orders independently, so a
   shared ticker on a shared IBKR account risks uncoordinated, conflicting orders against the
   same real position. Deliberately a warning, not a blocking error, since some setups
   intentionally run different weightings on overlapping tickers across portfolios.
@@ -136,8 +136,8 @@ since an intended BUY/SELL doesn't always actually fill. Built by
   Deviation, Sharpe Ratio, Sortino Ratio, computed by
   `core/functions_quant_extensions.py`'s `since_inception_performance()` from the FIRST row ever
   written to `portfolio_snapshot_<name>.csv` through today. Reuses `functions.py`'s
-  `annualize_returns()`/`annualize_vol()`/`max_drawdown()`/`sharpe_ratio()`/`sortino_ratio()` --
-  the same functions the backtest engine's `tear_sheet()` is built from -- so live and
+  `annualize_returns()`/`annualize_vol()`/`max_drawdown()`/`sharpe_ratio()`/`sortino_ratio()` —
+  the same functions the backtest engine's `tear_sheet()` is built from — so live and
   backtested stats can't silently diverge. Sharpe and Sortino specifically need at least a year
   of daily snapshot rows and show "Not enough history yet" rather than a blank cell or a crash
   for a portfolio that's simply too new; Sharpe additionally depends on a live fetch of a
@@ -151,7 +151,7 @@ since an intended BUY/SELL doesn't always actually fill. Built by
 - **Technical Indicators (held positions)** — for each currently-held ticker only (not the whole
   configured universe): SMA(20)/EMA(20) (trend), ADX(14) (trend strength), RSI(14)/MACD
   (momentum), ATR(14)/Bollinger Bands/rolling 20-period Std Dev (volatility), VWAP/OBV (volume)
-  -- from `core/technical_indicators.py`, computed on ~60 days of OHLCV fetched specifically for
+  — from `core/technical_indicators.py`, computed on ~60 days of OHLCV fetched specifically for
   this report (`execution/live_signal.py`'s `fetch_ohlcv_for_tickers()`, distinct from the
   close-only prices fetched for the momentum signal itself). A ticker with too little OHLCV
   history is omitted from the table rather than shown with blank cells; the whole section is
@@ -173,9 +173,9 @@ causing the whole report to fail.
 Performance/Technical Indicators sections, same graceful degradation), generated every day
 instead of monthly, via `build_daily_report_html()`/`send_daily_report()`. The one real
 difference: its trailing-window comparison chart uses `daily_window_comparison()` instead of
-`monthly_window_comparison()` -- "1 Day" / "1 Week" / "2 Week" / "3 Week", the short-timescale
+`monthly_window_comparison()` — "1 Day" / "1 Week" / "2 Week" / "3 Week", the short-timescale
 windows that actually make sense at daily cadence, rather than the monthly report's 1/3/6-month
-windows. Off by default (`send_daily: false`) -- see the category table above for why.
+windows. Off by default (`send_daily: false`) — see the category table above for why.
 
 ## What's implemented vs. deferred
 

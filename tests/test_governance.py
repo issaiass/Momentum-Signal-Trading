@@ -5,7 +5,7 @@ Covers institutional-governance features: risk-quantification tools
 (VaR/CVaR, scenario shocks), a pre-trade capacity/market-impact check, a
 tamper-evident hash-chained audit log, the independent (read-only)
 risk_monitor.py process, and the config-approval gate required before --live
-will run. These are process/oversight safeguards -- none of them validate
+will run. These are process/oversight safeguards — none of them validate
 whether the underlying momentum strategy itself is profitable; see
 TestCrashProtection in test_momentum_backtest.py for the closest thing to
 strategy-behavior testing, and TESTING.md for what this suite can and can't
@@ -31,7 +31,7 @@ from momentum_trading.risk.risk_monitor import (
 class TestVaRCVaR:
     """
     CVaR (average loss in the tail) must always be at least as bad as VaR (the
-    tail threshold itself) by definition -- if a change to the calculation
+    tail threshold itself) by definition — if a change to the calculation
     ever violated that, the numbers would be actively misleading rather than
     just imprecise.
     """
@@ -50,7 +50,7 @@ class TestVaRCVaR:
 class TestScenarioShock:
     """
     scenario_shock() applies deterministic hypothetical returns to current
-    weights -- this test confirms the weighted-sum math is exactly right
+    weights — this test confirms the weighted-sum math is exactly right
     (verifiable by hand: 0.4*-0.10 + 0.3*-0.20 + 0.3*0 = -0.10), and that an
     unshocked holding (GLD here) correctly contributes zero.
     """
@@ -69,7 +69,7 @@ class TestCapacityCheck:
     """
     check_capacity() flags positions sized too large relative to average
     daily volume (market-impact risk). Confirms it correctly distinguishes a
-    thin ticker (10% of ADV, over a 5% limit) from a liquid one (~0% of ADV) --
+    thin ticker (10% of ADV, over a 5% limit) from a liquid one (~0% of ADV) —
     a check that never fires would be silently useless; a check that always
     fires would be silently ignored. Both directions matter.
     """
@@ -87,10 +87,10 @@ class TestCapacityCheck:
 class TestHashChainAuditLog:
     """
     The trade log's hash-chain exists to make tampering DETECTABLE (not
-    prevent it at the OS level -- a plain CSV can always be edited). These
+    prevent it at the OS level — a plain CSV can always be edited). These
     tests confirm both directions: an untouched log verifies clean, and a
     log with even one altered field (a price, in this case) is caught and
-    the exact bad row is identified -- a hash-chain that can't actually
+    the exact bad row is identified — a hash-chain that can't actually
     detect tampering would be false security.
     """
     def test_untampered_log_is_valid(self, tmp_path):
@@ -122,11 +122,11 @@ class TestHashChainAuditLog:
 class TestRiskMonitor:
     """
     risk_monitor.py is deliberately a SEPARATE, independently-implemented FIFO
-    calculation from measure_live_performance() in live_signal.py -- if a bug
+    calculation from measure_live_performance() in live_signal.py — if a bug
     ever affected one, it should not also blind the other. These tests confirm
     its P&L math independently and that it can write the halt flag file
     daily_runner.py checks (the actual cross-process integration is tested
-    manually, not in this unit suite -- see TESTING.md).
+    manually, not in this unit suite — see TESTING.md).
     """
     def test_computes_fifo_realized_pnl(self, tmp_path):
         path = tmp_path / "log.csv"
@@ -147,7 +147,7 @@ class TestRiskMonitor:
 
     def test_load_initial_capital_reads_total_value_from_config(self, tmp_path):
         # risk_monitor.py's --initial-capital falls back to
-        # config.yaml's portfolios.<name>.total_value when omitted on the CLI --
+        # config.yaml's portfolios.<name>.total_value when omitted on the CLI —
         # this is the independent, minimal YAML read that makes that possible.
         path = tmp_path / "config.yaml"
         path.write_text(yaml.dump({"portfolios": {"portfolio1": {"total_value": 2500.0}}}))
@@ -155,7 +155,7 @@ class TestRiskMonitor:
 
     def test_load_initial_capital_returns_none_for_null_total_value(self, tmp_path):
         # total_value: null means "pull live from IBKR" in config.yaml's own
-        # convention -- not usable as a static monitor baseline, so this must
+        # convention — not usable as a static monitor baseline, so this must
         # surface as None (caller turns that into a clear error), not 0 or a crash.
         path = tmp_path / "config.yaml"
         path.write_text(yaml.dump({"portfolios": {"portfolio1": {"total_value": None}}}))
@@ -172,7 +172,7 @@ class TestRiskMonitor:
 
 class TestConfigApprovalGate:
     """
-    Confirms config.example.yaml -- the template everyone copies from --
+    Confirms config.example.yaml — the template everyone copies from —
     ships with approval fields explicitly null, so a fresh config.yaml can
     never accidentally pass the --live approval gate without a human
     deliberately filling those fields in.

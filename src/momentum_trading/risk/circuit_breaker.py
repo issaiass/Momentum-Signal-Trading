@@ -7,7 +7,7 @@ daily_runner.py into its own risk-domain module.
 Design note: alerting is DEPENDENCY-INJECTED (an `alert_fn` callable passed
 in by the caller) rather than importing daily_runner's send_alert_email
 directly. This keeps risk/ decoupled from interfaces/ (no import cycle risk,
-and this module doesn't need to know anything about SMTP/email specifics) --
+and this module doesn't need to know anything about SMTP/email specifics) —
 daily_runner.py wires the real send_alert_email in when it calls these.
 """
 
@@ -45,7 +45,7 @@ def _max_drawdown_override_path(name: str) -> Path:
 def get_effective_max_drawdown_pct(name: str, configured_value: float) -> float:
     """
     Returns the tighter of the config.yaml value and any active
-    SET_MAX_DRAWDOWN email override -- enforced here,
+    SET_MAX_DRAWDOWN email override — enforced here,
     at the point of USE, not at command-parse time. This is where the "can
     only tighten, never loosen" safety property is actually guaranteed: even
     if an override file somehow ended up containing a looser value than
@@ -73,7 +73,7 @@ def check_circuit_breaker(name: str, total_value: float, cfg: BacktestConfig, al
       - cfg.max_dollar_drawdown: halt if drawdown from peak exceeds this $
 
     IMPORTANT: once halted, this does NOT auto-resume even if equity
-    recovers -- a human must explicitly call resume_trading(), so a
+    recovers — a human must explicitly call resume_trading(), so a
     temporary recovery during a volatile period doesn't silently re-enable
     trading without review.
 

@@ -33,7 +33,7 @@ pytest tests/path::TestClass::test_name -v # single test
 pytest tests/ -x --tb=short                # stop at first failure, short tracebacks
 
 # Run (config.yaml required — cp config.example.yaml config.yaml first)
-daily-runner --test-email                  # live SMTP/IMAP check, no config.yaml needed -- run
+daily-runner --test-email                  # live SMTP/IMAP check, no config.yaml needed — run
                                             # this once after editing .env on any machine
 daily-runner --force-rebalance             # safe, no broker connection, test signal/order output
 daily-runner                               # dry-run default (no --live = never places orders)
@@ -106,7 +106,7 @@ that tests enforce — don't casually violate these when editing:
   hard validation error, sub-weekly values (`< 0.25`) are allowed but flagged (see below).
 - **`execution/live_signal.py`** — live signal/order generation, IBKR integration (`ibapi`
   `EClient`/`EWrapper`, not a third-party wrapper), multi-portfolio orchestration, FIFO P&L,
-  hash-chained audit log. `fetch_ohlcv_for_tickers()` is distinct from `fetch_live_prices()` --
+  hash-chained audit log. `fetch_ohlcv_for_tickers()` is distinct from `fetch_live_prices()` —
   the latter returns close-only prices across many tickers at once (for momentum ranking), the
   former returns per-ticker full OHLCV (for `core/technical_indicators.py`), one
   `get_stock_prices()` call per ticker since `get_bulk_prices()` collapses to close-only.
@@ -136,6 +136,14 @@ that tests enforce — don't casually violate these when editing:
   including closed lots). Only populated in `--live` mode: `current_positions` is `{}` in
   dry-run (`daily_runner.py` never calls `get_ibkr_positions()` without a real connection), so
   this section is empty there — same as Technical/Fundamental Indicators, not a new gap.
+  `measure_live_performance()`'s returned dict also includes `open_position_avg_cost` (`{ticker:
+  weighted-average cost basis of the currently open lots}`) — a 3-line additive read of the same
+  `open_lots` FIFO structure the function already builds for realized P&L, added specifically so
+  a `current_positions`-shaped dict for `build_position_performance()` can be reconstructed from
+  the trade log alone, without a live broker connection. This is what lets
+  `notebooks/operational/portfolio_snapshot_report.ipynb` demonstrate real Position Performance
+  data safely (dry-run only, no IBKR needed) — see that notebook's section 5a. Don't remove this
+  key without checking that notebook first.
 - **`risk/circuit_breaker.py`** — extracted from `daily_runner.py` with alerting
   dependency-injected (`alert_fn` param) specifically so `risk/` has zero import dependency on
   `interfaces/` — enforced by an AST-based test
@@ -198,3 +206,6 @@ explicitly rejected, since an env var toggle would let real-money trading get en
 - `docs/TESTING.md` — test organization and fixtures
 - `docs/STRATEGY_THEORY.md` — momentum theory, worked example
 - `docs/EMAIL_REPORTING.md` / `docs/EMAIL_COMMANDS.md` — notification and remote-command setup
+
+## Constraints for documentation
+- Do not use double dash "--" to comment or document the code.

@@ -57,7 +57,7 @@ from .core import functions_quant_extensions as fnx
 logger = logging.getLogger("daily_runner")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 
-# LOCK_DIR is imported from .risk.circuit_breaker above -- single source of truth,
+# LOCK_DIR is imported from .risk.circuit_breaker above — single source of truth,
 # so monkeypatching it in tests (or an env override) affects both modules consistently.
 
 
@@ -70,11 +70,11 @@ def send_alert_email(subject: str, body: str) -> None:
     nothing sensitive is hardcoded:
         SMTP_HOST, SMTP_PORT (default 587), SMTP_USER, SMTP_PASS, ALERT_TO_EMAIL
     If any required var is missing, logs the alert instead of silently failing
-    to notify -- you should still SEE it in the logs even if email is unconfigured.
+    to notify — you should still SEE it in the logs even if email is unconfigured.
 
     Authentication is password-based (SMTP_PASS) by default, e.g. a Gmail App
-    Password. For Outlook.com/Hotmail/Microsoft 365 -- which no longer accept
-    basic auth for SMTP AUTH -- set MS_OAUTH_CLIENT_ID (and optionally
+    Password. For Outlook.com/Hotmail/Microsoft 365 — which no longer accept
+    basic auth for SMTP AUTH — set MS_OAUTH_CLIENT_ID (and optionally
     MS_OAUTH_TENANT) instead; SMTP_PASS is then unused. See core/smtp_auth.py
     and docs/DEPLOYMENT.md.
     """
@@ -85,7 +85,7 @@ def send_alert_email(subject: str, body: str) -> None:
     to_addr = os.environ.get("ALERT_TO_EMAIL")
 
     if not smtp_ready(host, user, to_addr, password):
-        logger.error("SMTP env vars not fully configured -- ALERT NOT SENT. Subject: %s | Body: %s", subject, body)
+        logger.error("SMTP env vars not fully configured — ALERT NOT SENT. Subject: %s | Body: %s", subject, body)
         return
 
     msg = MIMEText(body)
@@ -126,7 +126,7 @@ def validate_config_schema(raw: dict, path: str) -> None:
     """
     Validates config.yaml structure BEFORE building BacktestConfig objects, so a
     typo or malformed field fails at load time with a clear message naming the
-    offending portfolio/field -- not deep inside the daily rebalance loop.
+    offending portfolio/field — not deep inside the daily rebalance loop.
     """
     errors = []
 
@@ -170,7 +170,7 @@ def validate_config_schema(raw: dict, path: str) -> None:
         errors.append(f"top-level default_risk: must be a mapping, got {type(default_risk).__name__}")
 
     # --- At most one portfolio may use total_value: null.
-    #     null means "the rest of the account after other portfolios' fixed allocations" --
+    #     null means "the rest of the account after other portfolios' fixed allocations" —
     #     with 2+ null portfolios that's ambiguous (which one gets the
     #     remainder?), and the OLD behavior (each independently pulling the FULL account
     #     value) silently double/triple-counts the same real capital. Fail fast here
@@ -181,7 +181,7 @@ def validate_config_schema(raw: dict, path: str) -> None:
     ]
     if len(null_portfolios) > 1:
         errors.append(
-            f"portfolios with total_value: null: {sorted(null_portfolios)} -- at most ONE "
+            f"portfolios with total_value: null: {sorted(null_portfolios)} — at most ONE "
             f"portfolio may use null (it means \"account value minus every other portfolio's "
             f"total_value\", which is ambiguous with more than one). Assign an explicit "
             f"total_value to all but one of these."
@@ -189,7 +189,7 @@ def validate_config_schema(raw: dict, path: str) -> None:
 
     # --- notifications.send_warning must be a real bool if present.
     #     This field controls whether the capital-safety warnings (over-allocation,
-    #     ticker overlap) actually reach you by email -- a YAML footgun like
+    #     ticker overlap) actually reach you by email — a YAML footgun like
     #     send_warning: "false" (a truthy non-empty string) would otherwise silently
     #     evaluate as "send" via Python's default truthiness, the opposite of what someone
     #     writing that value almost certainly intended. Worth failing loudly specifically
@@ -199,7 +199,7 @@ def validate_config_schema(raw: dict, path: str) -> None:
     if send_warning is not None and not isinstance(send_warning, bool):
         errors.append(
             f"notifications.send_warning: must be true/false, got {send_warning!r} "
-            f"({type(send_warning).__name__}) -- a non-boolean value here can silently "
+            f"({type(send_warning).__name__}) — a non-boolean value here can silently "
             f"enable or disable capital-safety warning emails against your intent."
         )
 
@@ -227,7 +227,7 @@ def load_config(path: str = "config.yaml") -> dict:
         try:
             cfg = BacktestConfig(**{**raw.get("default_risk", {}), **cfg_overrides})
         except (ValueError, TypeError) as e:
-            raise ValueError(f"portfolios.{name}: invalid risk config -- {e}") from e
+            raise ValueError(f"portfolios.{name}: invalid risk config — {e}") from e
         portfolios[name] = {
             "tickers": spec["tickers"],
             "custom_weights": spec.get("custom_weights"),
@@ -239,7 +239,7 @@ def load_config(path: str = "config.yaml") -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# STOP-LOSS CHECK -- flag or auto-execute per cfg.auto_execute_stop_loss (item 2)
+# STOP-LOSS CHECK — flag or auto-execute per cfg.auto_execute_stop_loss (item 2)
 # --------------------------------------------------------------------------- #
 def check_and_handle_stop_losses(
     tickers: list, current_positions: dict, latest_prices: dict, cfg: BacktestConfig,
@@ -266,7 +266,7 @@ def check_and_handle_stop_losses(
     if not cfg.auto_execute_stop_loss:
         logger.warning("auto_execute_stop_loss=False: flagged only, no orders placed. Tickers: %s", flagged)
         send_alert_email("Stop-loss(es) flagged (manual review needed)",
-                          f"Tickers past stop-loss threshold: {flagged}\nauto_execute_stop_loss is False -- review and exit manually.")
+                          f"Tickers past stop-loss threshold: {flagged}\nauto_execute_stop_loss is False — review and exit manually.")
         return flagged
 
     # auto-execute: build SELL orders for the full flagged position
@@ -289,7 +289,7 @@ def check_and_handle_stop_losses(
 
 
 # --------------------------------------------------------------------------- #
-# TIME-BASED STOP -- live-trading equivalent of the backtest's max_holding_days.
+# TIME-BASED STOP — live-trading equivalent of the backtest's max_holding_days.
 # Independent of and in addition to the price-based
 # stop-loss above; shares its auto_execute_stop_loss flag rather than adding a
 # second config field, since both are "auto-exit on trigger vs. flag only".
@@ -325,7 +325,7 @@ def check_and_handle_time_stops(
     if not cfg.auto_execute_stop_loss:
         logger.warning("auto_execute_stop_loss=False: flagged only, no orders placed. Tickers: %s", flagged)
         send_alert_email("Time-stop(s) flagged (manual review needed)",
-                          f"Tickers past max_holding_days: {flagged}\nauto_execute_stop_loss is False -- review and exit manually.")
+                          f"Tickers past max_holding_days: {flagged}\nauto_execute_stop_loss is False — review and exit manually.")
         return flagged
 
     # auto-execute: build SELL orders for the full flagged position
@@ -348,7 +348,7 @@ def check_and_handle_time_stops(
 
 
 # --------------------------------------------------------------------------- #
-# CIRCUIT BREAKER -- moved to risk/circuit_breaker.py.
+# CIRCUIT BREAKER — moved to risk/circuit_breaker.py.
 # Thin wrappers here inject send_alert_email so callers in this module don't
 # need to pass alert_fn explicitly every time; the underlying logic/state
 # lives in the risk module, imported above.
@@ -366,9 +366,9 @@ def check_and_apply_email_commands(portfolio_names: list[str], ibkr_port: int, d
     Polls for commands from the trusted sender and applies the ones that are
     safe to auto-apply (PAUSE/RESUME reuse the existing circuit-breaker halt
     mechanism; SKIP_NEXT_REBALANCE writes a one-time flag; STATUS replies
-    immediately; SET_MAX_DRAWDOWN writes a tightening-only override -- see
+    immediately; SET_MAX_DRAWDOWN writes a tightening-only override — see
     get_effective_max_drawdown_pct()). LIQUIDATE and ADJUST_PARAM are
-    intentionally logged/alerted but NOT auto-applied here -- they're
+    intentionally logged/alerted but NOT auto-applied here — they're
     high-impact enough to warrant a human reviewing the parsed command and
     applying it deliberately (LIQUIDATE via a manual place_orders_ibkr call,
     ADJUST_PARAM via editing config.yaml with the validated value) rather
@@ -383,11 +383,11 @@ def check_and_apply_email_commands(portfolio_names: list[str], ibkr_port: int, d
     trusted_sender = os.environ.get("TRUSTED_SENDER_EMAIL")
 
     if not all([imap_host, imap_user, imap_password, trusted_sender]):
-        return  # email commands not configured -- opt-in feature, silent no-op
+        return  # email commands not configured — opt-in feature, silent no-op
 
     if trusted_sender.strip().lower() == imap_user.strip().lower():
         logger.warning(
-            "TRUSTED_SENDER_EMAIL is the same address as IMAP_USER -- every command poll will "
+            "TRUSTED_SENDER_EMAIL is the same address as IMAP_USER — every command poll will "
             "also pick up ordinary mail you send from that address (replies, correspondence, "
             "etc.), each generating one 'not a recognized command' reply. This is safe (see "
             "docs/EMAIL_COMMANDS.md) but noisy; a dedicated inbox for IMAP_USER avoids it entirely."
@@ -407,12 +407,12 @@ def check_and_apply_email_commands(portfolio_names: list[str], ibkr_port: int, d
         cmd = result.command
 
         if isinstance(cmd, AlertsReportCommand):
-            # Read-only report query, not a per-portfolio action -- PORTFOLIO
+            # Read-only report query, not a per-portfolio action — PORTFOLIO
             # here means "filter to this portfolio" (or ALL for everything),
             # so it's handled once, before the targets expansion loop below
             # (which is for actions APPLIED per portfolio).
             if cmd.portfolio != "ALL" and cmd.portfolio not in portfolio_names:
-                logger.warning("ALERTS_REPORT referenced unknown portfolio %r -- skipped.", cmd.portfolio)
+                logger.warning("ALERTS_REPORT referenced unknown portfolio %r — skipped.", cmd.portfolio)
                 continue
             rows = read_recent_alerts(portfolio=cmd.portfolio, limit=cmd.limit,
                                        log_path=ALERTS_LOG_PATH)
@@ -433,7 +433,7 @@ def check_and_apply_email_commands(portfolio_names: list[str], ibkr_port: int, d
         targets = portfolio_names if cmd.portfolio == "ALL" else [cmd.portfolio]
         for name in targets:
             if name not in portfolio_names:
-                logger.warning("Email command referenced unknown portfolio %r -- skipped.", name)
+                logger.warning("Email command referenced unknown portfolio %r — skipped.", name)
                 continue
 
             if isinstance(cmd, PauseCommand):
@@ -456,7 +456,7 @@ def check_and_apply_email_commands(portfolio_names: list[str], ibkr_port: int, d
                 _skip_next_flag_path(name).write_text(datetime.now().isoformat())
                 logger.info("[%s] Next rebalance will be SKIPPED via email command.", name)
             elif isinstance(cmd, StatusCommand):
-                # read-only -- safe to reply even in dry-run, nothing is applied
+                # read-only — safe to reply even in dry-run, nothing is applied
                 snap = get_latest_snapshot(name)
                 halted = _halt_flag_path(name).exists()
                 status_body = (
@@ -474,17 +474,17 @@ def check_and_apply_email_commands(portfolio_names: list[str], ibkr_port: int, d
                 LOCK_DIR.mkdir(exist_ok=True)
                 _max_drawdown_override_path(name).write_text(str(cmd.new_value))
                 logger.info("[%s] max_portfolio_drawdown_pct override set to %.2f%% via email "
-                           "(tightening-only -- effective value is min(config, override)).",
+                           "(tightening-only — effective value is min(config, override)).",
                            name, cmd.new_value * 100)
                 send_alert_email(
                     f"Drawdown override applied: {name}",
                     f"max_portfolio_drawdown_pct override set to {cmd.new_value:.1%} for '{name}'.\n"
-                    f"This can only TIGHTEN the effective threshold, never loosen it -- the actual "
+                    f"This can only TIGHTEN the effective threshold, never loosen it — the actual "
                     f"breaker will use whichever of config.yaml's value or this override is smaller.",
                 )
             else:
                 # LIQUIDATE / ADJUST_PARAM / TRIGGER_REPORT: flagged for manual
-                # follow-through rather than auto-applied -- see docstring.
+                # follow-through rather than auto-applied — see docstring.
                 logger.warning("[%s] Email command %s parsed successfully but requires MANUAL "
                                "follow-through (not auto-applied): %s", name, cmd.action, cmd)
                 send_alert_email(
@@ -495,14 +495,14 @@ def check_and_apply_email_commands(portfolio_names: list[str], ibkr_port: int, d
 
 
 # --------------------------------------------------------------------------- #
-# MULTI-PORTFOLIO CAPITAL SAFETY -- resolved ONCE per run, before the
+# MULTI-PORTFOLIO CAPITAL SAFETY — resolved ONCE per run, before the
 # per-portfolio loop, so portfolios sharing one real IBKR account can't silently
 # double-count or over-allocate the same capital.
 # --------------------------------------------------------------------------- #
 def resolve_total_values(portfolios: dict, dry_run: bool, account_value_fn=None) -> dict:
     """
     total_value: null means "the rest of the account after every OTHER portfolio's
-    fixed total_value" -- not "the full account", which would silently double-count
+    fixed total_value" — not "the full account", which would silently double-count
     real capital across portfolios sharing one IBKR account. validate_config_schema()
     guarantees at most one portfolio has total_value: null, so this never has to
     choose between multiple candidates.
@@ -513,9 +513,9 @@ def resolve_total_values(portfolios: dict, dry_run: bool, account_value_fn=None)
 
     Returns {name: resolved_total_value}. In --live mode, raises ValueError if the
     null portfolio's remainder would be <= 0 (the other portfolios' fixed allocations
-    already consume the whole account) -- proceeding with zero/negative real capital
+    already consume the whole account) — proceeding with zero/negative real capital
     is never safe. In dry-run, the null portfolio always gets a flat $1000 placeholder
-    (NOT reduced by other portfolios' total_value) -- dry-run exists to test signal/
+    (NOT reduced by other portfolios' total_value) — dry-run exists to test signal/
     order-generation LOGIC, not to validate real capital math, and there is no real
     account to compute an actual remainder against; forcing dry-run to also enforce
     the remainder check would break dry-run-testing of configs that work fine live
@@ -537,7 +537,7 @@ def resolve_total_values(portfolios: dict, dry_run: bool, account_value_fn=None)
                 raise ValueError(
                     f"portfolio '{null_name}' (total_value: null) would receive "
                     f"${remainder:,.2f} (account value ${account_value:,.2f} minus other "
-                    f"portfolios' fixed total_value ${sum_of_fixed:,.2f}) -- those portfolios "
+                    f"portfolios' fixed total_value ${sum_of_fixed:,.2f}) — those portfolios "
                     f"already consume the whole account."
                 )
             resolved[null_name] = remainder
@@ -551,9 +551,9 @@ def check_ticker_overlap(portfolios: dict) -> dict[str, list[str]]:
     share a ticker will each independently compute and submit orders against the
     SAME real position, with no coordination between them (get_ibkr_positions()
     returns the whole account's positions to every portfolio's loop iteration, and
-    generate_orders() only skips tickers it has no price for -- a shared ticker has
+    generate_orders() only skips tickers it has no price for — a shared ticker has
     a price, so that guard doesn't apply). Deliberately a WARNING, not a blocking
-    error -- some setups intentionally run different weightings on overlapping
+    error — some setups intentionally run different weightings on overlapping
     tickers across portfolios, and forbidding it would break otherwise-valid configs.
 
     Returns {ticker: [portfolio names holding it]} for every ticker held by 2+
@@ -577,7 +577,7 @@ def main():
         epilog=(
             "Quick reference:\n"
             "  Single or multiple portfolios: both are defined the same way, in config.yaml's\n"
-            "  `portfolios:` section -- one entry for a single portfolio, several for multiple.\n"
+            "  `portfolios:` section — one entry for a single portfolio, several for multiple.\n"
             "  Paper trading:  python daily_runner.py --live --port 7497\n"
             "  Live trading:   python daily_runner.py --live --port 7496 --confirm-live-trading\n"
             "  Dry run (safe, default): python daily_runner.py\n"
@@ -595,13 +595,13 @@ def main():
                               "the safe default). Requires TWS/IB Gateway running and reachable on --port.")
     parser.add_argument("--port", type=int, default=int(os.environ.get("IBKR_PORT", 7497)),
                          help="IBKR socket port. 7497 = paper trading TWS (default, safe to experiment). "
-                              "7496 = live/real-money TWS -- using this ALSO requires --confirm-live-trading. "
+                              "7496 = live/real-money TWS — using this ALSO requires --confirm-live-trading. "
                               "4001/4002 are the IB Gateway paper/live equivalents. Verify your own "
                               "TWS/Gateway configuration; these are conventions, not guarantees. Defaults "
                               "from the IBKR_PORT env var if set; this flag always overrides it.")
     parser.add_argument("--confirm-live-trading", action="store_true",
                          help="Required IN ADDITION to --live --port 7496 before any real-money order "
-                              "will be placed. This is a deliberate double-confirmation -- omitting it "
+                              "will be placed. This is a deliberate double-confirmation — omitting it "
                               "causes the script to refuse and exit, even with --live set.")
     parser.add_argument("--force-rebalance", action="store_true",
                          help="Run the full rebalance logic even if today is not a scheduled rebalance "
@@ -611,12 +611,12 @@ def main():
     parser.add_argument("--resume-trading", metavar="PORTFOLIO_NAME",
                          help="Clear an active circuit-breaker halt for the named portfolio (see "
                               "config.yaml's max_portfolio_drawdown_pct) after manual review, and exit. "
-                              "Does not run a rebalance in the same invocation -- run again normally "
+                              "Does not run a rebalance in the same invocation — run again normally "
                               "afterward.")
     parser.add_argument("--test-email", action="store_true",
                          help="Live end-to-end check of email setup: a real SMTP login + test send, "
                               "and a real IMAP login if email-commanded remote actions are configured. "
-                              "Prints a pass/fail summary and exits -- no config.yaml needed, no "
+                              "Prints a pass/fail summary and exits — no config.yaml needed, no "
                               "portfolio logic runs. Run this once after creating/editing .env on any "
                               "machine, before trusting cron/--live with those credentials.")
     args = parser.parse_args()
@@ -655,12 +655,12 @@ def main():
 
     portfolios = cfg_raw["portfolios_resolved"]
     # Extracted once here so both capital-safety warnings below can gate their
-    # email through notifications.send_warning -- the detailed logger.warning() calls
+    # email through notifications.send_warning — the detailed logger.warning() calls
     # right next to each are NEVER gated by this, so the risk is always visible in logs
     # even if the email is filtered out.
     notification_cfg = cfg_raw.get("notifications", {})
 
-    # --- Ticker-overlap warning (non-blocking) -- portfolios sharing
+    # --- Ticker-overlap warning (non-blocking) — portfolios sharing
     #     a ticker on the same real IBKR account would each independently compute and
     #     submit orders against the same position, with no coordination between them. ---
     if len(portfolios) > 1:
@@ -673,7 +673,7 @@ def main():
                       log_path=ALERTS_LOG_PATH)
             overlap_text = (
                 f"The following tickers appear in more than one portfolio in this run:\n"
-                f"{overlap_desc}\n\nEach portfolio computes and submits orders independently -- "
+                f"{overlap_desc}\n\nEach portfolio computes and submits orders independently — "
                 f"if they share a real IBKR account, this can result in uncoordinated, "
                 f"conflicting orders against the same position. Review if unintentional."
             )
@@ -683,7 +683,7 @@ def main():
             )
 
     # --- Resolve every portfolio's total_value ONCE, before
-    #     the loop -- total_value: null means "account value minus every OTHER portfolio's
+    #     the loop — total_value: null means "account value minus every OTHER portfolio's
     #     fixed total_value", not "the full account" (the old per-portfolio resolution
     #     silently double-counted the same real capital across portfolios). ---
     def account_value_fn():
@@ -700,7 +700,7 @@ def main():
         sys.exit(1)
 
     if args.live and len(portfolios) > 1 and all(s["total_value"] is not None for s in portfolios.values()):
-        # No null portfolio -- resolve_total_values() had no reason to fetch the real
+        # No null portfolio — resolve_total_values() had no reason to fetch the real
         # account value, so the remainder<=0 check never ran either. Check
         # separately whether these fully-fixed allocations still add up to more than
         # the account actually has.
@@ -732,7 +732,7 @@ def main():
     except Exception as e:
         logger.warning("Email command check failed (non-fatal, continuing with normal run): %s", e)
 
-    # --- Macro indicators (Fed Funds Rate, CPI), fetched ONCE per run, not per-portfolio --
+    # --- Macro indicators (Fed Funds Rate, CPI), fetched ONCE per run, not per-portfolio —
     #     macro conditions apply market-wide, not per-ticker. Cached (see core/macro_data.py),
     #     and the FRED_API_KEY presence check happens inside get_cached_or_fetch_macro_indicators()
     #     before any network attempt, so an unconfigured key costs nothing every run. ---
@@ -744,7 +744,7 @@ def main():
             tickers = spec["tickers"]
             trade_log_path = str(logs_dir() / f"live_trades_log_{name}.csv")
 
-            # --- Holding-period-too-frequent warning (non-blocking) -- holding_period below
+            # --- Holding-period-too-frequent warning (non-blocking) — holding_period below
             #     0.25 (faster than weekly) is a real, well-defined schedule, just an
             #     economically inadvisable one: the momentum signal is computed over a
             #     monthly-scale lookback_period, so rebalancing faster than weekly adds real
@@ -753,7 +753,7 @@ def main():
             #     below, so a persistent misconfiguration keeps surfacing until fixed. ---
             if is_holding_period_too_frequent(cfg.holding_period):
                 logger.warning(
-                    "[%s] holding_period=%s is faster than weekly (< 0.25) -- not recommended. "
+                    "[%s] holding_period=%s is faster than weekly (< 0.25) — not recommended. "
                     "The momentum signal is computed over a monthly-scale lookback_period, so "
                     "rebalancing this often adds commission/slippage/whole-share drift cost "
                     "without improving signal quality.", name, cfg.holding_period,
@@ -769,8 +769,8 @@ def main():
                     f"This is not recommended: the momentum signal is computed over a "
                     f"monthly-scale lookback_period, so rebalancing faster than weekly adds real "
                     f"commission/slippage/whole-share drift cost without any corresponding "
-                    f"improvement in signal quality. This run is proceeding normally -- nothing "
-                    f"was blocked -- but consider setting holding_period to 0.25 (weekly) or "
+                    f"improvement in signal quality. This run is proceeding normally — nothing "
+                    f"was blocked — but consider setting holding_period to 0.25 (weekly) or "
                     f"higher."
                 )
                 send_action_email(
@@ -795,7 +795,7 @@ def main():
             latest_prices = daily_prices.iloc[-1].to_dict() if not daily_prices.empty else {}
 
             # --- Abort THIS portfolio's run (not the whole process)
-            #     if the price feed looks stale -- trading on frozen data is worse than
+            #     if the price feed looks stale — trading on frozen data is worse than
             #     skipping a cycle. ---
             if cfg.max_price_staleness_minutes is not None:
                 staleness = check_price_staleness(daily_prices, cfg.max_price_staleness_minutes)
@@ -829,7 +829,7 @@ def main():
                     log_path=trade_log_path, trade_log_path=trade_log_path, portfolio=name,
                 )
 
-            # --- ALWAYS runs: portfolio snapshot -- independent
+            # --- ALWAYS runs: portfolio snapshot — independent
             #     of rebalance schedule, so "where do things stand" stays continuous.
             #     Also stores the benchmark price so period returns are computed
             #     automatically on the NEXT run by comparing to this row. ---
@@ -845,7 +845,7 @@ def main():
             except Exception as e:
                 logger.warning("[%s] Portfolio snapshot skipped due to error (non-fatal): %s", name, e)
 
-            # --- Daily report, every day regardless of rebalance schedule -- gated by
+            # --- Daily report, every day regardless of rebalance schedule — gated by
             #     notifications.send_daily (default False, see docs/EMAIL_REPORTING.md). Checked
             #     BEFORE doing any of the underlying work (OHLCV fetch, indicator computation) so
             #     a portfolio with this off pays zero extra cost for it. ---
@@ -893,21 +893,21 @@ def main():
             # --- item 3: idempotent rebalance, item 2 rebalance gate ---
             if args.force_rebalance or is_rebalance_day(holding_period_months=cfg.holding_period):
                 if already_ran_today(f"rebalance_{name}") and not args.force_rebalance:
-                    logger.info("[%s] Rebalance already ran today -- skipping (use --force-rebalance to override).", name)
+                    logger.info("[%s] Rebalance already ran today — skipping (use --force-rebalance to override).", name)
                     continue
 
                 skip_flag = _skip_next_flag_path(name)
                 if skip_flag.exists() and not args.force_rebalance:
-                    skip_flag.unlink()  # one-time skip -- consumed, not persistent
+                    skip_flag.unlink()  # one-time skip — consumed, not persistent
                     logger.info("[%s] Rebalance SKIPPED this cycle via email command.", name)
                     mark_ran_today(f"rebalance_{name}")  # still counts as "handled" for idempotency
                     continue
 
                 if _check_circuit_breaker_with_alert(name, total_value, cfg):
-                    logger.warning("[%s] Skipping rebalance -- circuit breaker halted.", name)
+                    logger.warning("[%s] Skipping rebalance — circuit breaker halted.", name)
                     continue
 
-                logger.info("[%s] Rebalance day -- running full signal + order generation.", name)
+                logger.info("[%s] Rebalance day — running full signal + order generation.", name)
                 orders_result = run(
                     tickers=tickers,
                     current_holdings=current_holdings,
@@ -959,7 +959,7 @@ def main():
                         )
                         # --- REAL realized+unrealized P&L from the trade log (FIFO),
                         #     distinct from the snapshot-based unrealized_pnl already in the
-                        #     report -- this covers cumulative gains from trades that have since
+                        #     report — this covers cumulative gains from trades that have since
                         #     closed, not just currently-open positions. dry_run=not args.live
                         #     filters out any dry-run rows sharing this same log file. ---
                         try:
@@ -978,7 +978,7 @@ def main():
                             fundamentals, macro_indicators, position_performance,
                         )
             else:
-                logger.info("[%s] Not a rebalance day -- stop-loss check complete only.", name)
+                logger.info("[%s] Not a rebalance day — stop-loss check complete only.", name)
 
     except Exception as e:
         logger.exception("Unhandled exception in daily_runner")

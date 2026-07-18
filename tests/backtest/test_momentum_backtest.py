@@ -24,7 +24,7 @@ class TestBacktestConfigValidation:
     """
     Guards against BacktestConfig accepting nonsensical parameter combinations
     that would silently produce wrong sizing/risk behavior instead of failing
-    loudly at construction time -- this is the __post_init__ validation added
+    loudly at construction time — this is the __post_init__ validation added
     specifically because earlier bugs in this project came from bad config
     values propagating unnoticed into a live-money-adjacent code path.
     """
@@ -49,7 +49,7 @@ class TestBacktestConfigValidation:
 
     def test_invalid_top_n_raises(self):
         # top_n selects how many top-momentum names actually get held each
-        # rebalance -- 0 or negative is meaningless (an empty or undefined
+        # rebalance — 0 or negative is meaningless (an empty or undefined
         # portfolio) and signals a config mistake, same class of bug as an
         # inverted min/max exposure.
         with pytest.raises(ValueError, match="top_n"):
@@ -57,13 +57,13 @@ class TestBacktestConfigValidation:
 
     def test_invalid_lookback_period_raises(self):
         # lookback_period is the trailing-months window used to rank tickers by
-        # momentum -- 0 or negative is meaningless (no return window to rank on),
+        # momentum — 0 or negative is meaningless (no return window to rank on),
         # same class of bug as an invalid top_n.
         with pytest.raises(ValueError, match="lookback_period"):
             BacktestConfig(lookback_period=0)
 
     def test_zero_or_negative_holding_period_raises(self):
-        # holding_period must be > 0 -- 0 or negative months between rebalances is
+        # holding_period must be > 0 — 0 or negative months between rebalances is
         # meaningless. This is the ONLY hard validation on holding_period: fractional
         # values (including ones faster than weekly) are legitimate, well-defined
         # schedules, just flagged via a non-blocking WARNING elsewhere (daily_runner.py),
@@ -74,7 +74,7 @@ class TestBacktestConfigValidation:
             BacktestConfig(holding_period=-0.5)
 
     def test_fractional_holding_period_accepted(self):
-        # Confirms the int -> float type change didn't just silently truncate/coerce --
+        # Confirms the int -> float type change didn't just silently truncate/coerce —
         # 0.25 (weekly) and 0.75 (every 3 weeks) must construct successfully and keep
         # their exact fractional value.
         assert BacktestConfig(holding_period=0.25).holding_period == 0.25
@@ -95,7 +95,7 @@ class TestBacktestConfigValidation:
 
     def test_run_custom_backtest_rejects_invalid_override(self, synthetic_monthly_picks, synthetic_daily_prices):
         # The run_custom_backtest() wrapper builds a BacktestConfig internally
-        # from **kwargs -- this confirms validation actually fires through that
+        # from **kwargs — this confirms validation actually fires through that
         # path too, not just when constructing BacktestConfig directly (an
         # earlier version of this wrapper used setattr() after construction,
         # which silently BYPASSED __post_init__ validation entirely).
@@ -108,7 +108,7 @@ class TestBacktestRuns:
     Confirms each optional risk-management feature actually runs end-to-end
     without raising, when enabled via run_custom_backtest()'s **kwargs
     override path. These are deliberately loose ("did it run and produce
-    output") rather than asserting specific numbers -- the numeric behavior of
+    output") rather than asserting specific numbers — the numeric behavior of
     each feature is asserted more precisely in TestResolveTargetWeights and
     TestCrashProtection below. This class exists to catch integration bugs
     (e.g. a new config field that compiles but crashes only when actually
@@ -141,7 +141,7 @@ class TestBacktestRuns:
 class TestResolveTargetWeights:
     """
     resolve_target_weights() is the SINGLE shared sizing function called by
-    both the backtest engine and the live trading path (live_signal.py) --
+    both the backtest engine and the live trading path (live_signal.py) —
     these tests exist specifically to prevent the two paths from silently
     diverging, which was an explicit design goal after this project's history
     of live/backtest logic accidentally drifting apart.
@@ -149,7 +149,7 @@ class TestResolveTargetWeights:
 
     def test_custom_weights_pass_through_when_cap_feasible(self, synthetic_daily_prices):
         # Confirms hand-specified weights are honored exactly when the position
-        # cap doesn't force a change -- i.e. custom_weights isn't silently
+        # cap doesn't force a change — i.e. custom_weights isn't silently
         # overridden by the algorithmic sizing path when it shouldn't be.
         cfg = BacktestConfig(max_position_weight=0.9)
         as_of = synthetic_daily_prices.index[-1]
@@ -159,13 +159,13 @@ class TestResolveTargetWeights:
         assert weights["QQQ"] == pytest.approx(0.2, abs=1e-6)
 
     def test_custom_weights_capped_when_infeasible(self, synthetic_daily_prices):
-        # 2 assets * 0.35 cap = 0.7 max achievable, but weights must sum to 1.0 --
+        # 2 assets * 0.35 cap = 0.7 max achievable, but weights must sum to 1.0 —
         # mathematically infeasible to respect both the cap and the requested
         # 0.8/0.2 split. This documents the ACTUAL (somewhat surprising)
         # behavior in that case: the capping algorithm's iterative redistribution
         # converges to an equal 50/50 split, not an error and not a silent
         # violation of the cap. Discovered as a real edge case during manual
-        # testing earlier in this project -- worth pinning down explicitly so
+        # testing earlier in this project — worth pinning down explicitly so
         # a future change to the capping algorithm doesn't silently alter it.
         cfg = BacktestConfig(max_position_weight=0.35)  # 2 * 0.35 = 0.7 < 1.0, infeasible for 2 assets
         as_of = synthetic_daily_prices.index[-1]
@@ -177,7 +177,7 @@ class TestResolveTargetWeights:
         # Builds A and B as near-duplicates (same underlying shock + tiny
         # independent noise) and C as genuinely independent, then confirms the
         # penalty actually shifts weight AWAY from the correlated pair and
-        # TOWARD the independent asset -- not just that it runs without error.
+        # TOWARD the independent asset — not just that it runs without error.
         # This is the core claim of the correlation-penalty feature; asserting
         # the direction of the effect, not just its existence, is the point.
         np.random.seed(1)
@@ -212,7 +212,7 @@ class TestResolveTargetWeights:
 
     def test_score_proportional_weights_by_signal_strength(self, synthetic_daily_prices):
         # Confirms weight is proportional to score, not
-        # equal or inverse-vol -- C (score 0.20) should get roughly 4x A's
+        # equal or inverse-vol — C (score 0.20) should get roughly 4x A's
         # weight (score 0.05), verified by exact fraction, not just "more than".
         cfg = BacktestConfig(sizing_method="score_proportional", max_position_weight=0.9)
         as_of = synthetic_daily_prices.index[-1]
@@ -225,7 +225,7 @@ class TestResolveTargetWeights:
     def test_score_proportional_falls_back_to_equal_weight_without_scores(self, synthetic_daily_prices):
         # If sizing_method="score_proportional" but no scores are supplied
         # (e.g. a caller forgot to pass them), the function must not crash or
-        # silently produce a zero allocation -- equal weight is the safe default.
+        # silently produce a zero allocation — equal weight is the safe default.
         cfg = BacktestConfig(sizing_method="score_proportional", max_position_weight=0.9)
         as_of = synthetic_daily_prices.index[-1]
         weights = resolve_target_weights(["SPY", "QQQ", "XLK"], synthetic_daily_prices, as_of, cfg,
@@ -240,11 +240,11 @@ class TestResolveTargetWeights:
 class TestCrashProtection:
     """
     Circuit breaker, correlation spike detection, liquidity stress
-    handling. These exist to reduce (not eliminate -- see the circuit
+    handling. These exist to reduce (not eliminate — see the circuit
     breaker's documented limitation in momentum_backtest.py) downside risk
     during sharp market moves. Tests here confirm the mechanisms fire
     correctly on synthetic, deliberately-shaped data (a genuine correlation
-    spike, a genuine vol spike) -- they do NOT validate real crash performance,
+    spike, a genuine vol spike) — they do NOT validate real crash performance,
     which has never been tested against real market history in this project.
     """
 
@@ -256,7 +256,7 @@ class TestCrashProtection:
             BacktestConfig(max_portfolio_drawdown_pct=1.5)
 
     def test_circuit_breaker_run_succeeds(self, synthetic_monthly_picks, synthetic_daily_prices):
-        # Integration smoke test only -- the actual "does it reduce drawdown"
+        # Integration smoke test only — the actual "does it reduce drawdown"
         # question was investigated manually during implementation and found
         # to be more nuanced than a simple assertion could capture (the
         # breaker halts NEW entries but does not force-liquidate existing
@@ -271,7 +271,7 @@ class TestCrashProtection:
         # then deliberately collapses to near-1 in the final 10 days (idiosyncratic
         # noise scaled to near-zero, leaving only the shared shock). Confirms the
         # detector distinguishes "normal" (15 days before the spike) from
-        # "spiking" (at the end) -- a false positive or false negative here would
+        # "spiking" (at the end) — a false positive or false negative here would
         # mean the fast-reacting crash signal either never fires or fires
         # constantly, both of which defeat its purpose.
         np.random.seed(7)
@@ -307,7 +307,7 @@ class TestCrashProtection:
 
     def test_liquidity_stress_and_reduce_only_run_succeed(self, synthetic_monthly_picks, synthetic_daily_prices):
         # Integration smoke tests for both the slippage-multiplier path and the
-        # reduce-only (block-new-BUYs) path -- confirms neither crashes the
+        # reduce-only (block-new-BUYs) path — confirms neither crashes the
         # rebalance loop when enabled together with other default settings.
         df1 = run_custom_backtest(synthetic_monthly_picks, synthetic_daily_prices,
                                    initial_capital=1000.0, liquidity_stress_multiplier=2.0)

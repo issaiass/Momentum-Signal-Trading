@@ -4,14 +4,14 @@ risk_monitor.py
 
 Independent oversight process, deliberately separate from
 daily_runner.py's trading logic. This script has READ-ONLY access to trade
-logs — it cannot place, modify, or cancel orders, and does not import
+logs, it cannot place, modify, or cancel orders, and does not import
 live_signal.py's order-execution functions at all. Its only power is to write
 a halt flag file that daily_runner.py checks and respects.
 
 This segregation matters: if a bug in the trading logic itself causes runaway
 losses, a monitor built from the SAME code sharing the SAME assumptions is a
 weak safeguard. This script is intentionally minimal, independent, and reads
-only the CSV audit trail — the same artifact a human reviewer would look at.
+only the CSV audit trail, the same artifact a human reviewer would look at.
 
 Run this as a SEPARATE scheduled job from daily_runner.py (different cron
 entry, different container/process), ideally more frequently (e.g. hourly)
@@ -43,7 +43,7 @@ LOCK_DIR = data_dir()
 
 def compute_realized_and_open_pnl(log_path: str) -> dict:
     """
-    Independent re-derivation of P&L directly from the trade log CSV —
+    Independent re-derivation of P&L directly from the trade log CSV,
     intentionally NOT importing measure_live_performance() from live_signal.py,
     so a bug in that function doesn't also blind the monitor watching for it.
     Simpler FIFO logic, same algorithm, separately implemented.
@@ -89,8 +89,8 @@ def write_halt_flag(portfolio: str, reason: str) -> None:
 
 def send_monitor_alert(subject: str, body: str) -> None:
     """
-    Deliberately separate alert path from daily_runner.py's send_alert_email()
-    — true segregation means even the notification channel isn't shared, so a
+    Deliberately separate alert path from daily_runner.py's send_alert_email(),
+    true segregation means even the notification channel isn't shared, so a
     bug affecting one doesn't silence the other. Reads the SAME env vars for
     simplicity, but is its own independent code path.
     """
@@ -104,7 +104,7 @@ def send_monitor_alert(subject: str, body: str) -> None:
     port = int(os.environ.get("SMTP_PORT", "587"))
 
     if not all([host, user, password, to_addr]):
-        logger.error("SMTP not configured — MONITOR ALERT NOT SENT. Subject: %s | Body: %s", subject, body)
+        logger.error("SMTP not configured, MONITOR ALERT NOT SENT. Subject: %s | Body: %s", subject, body)
         return
 
     msg = MIMEText(body)
@@ -124,7 +124,7 @@ def send_monitor_alert(subject: str, body: str) -> None:
 
 def load_initial_capital(portfolio: str, config_path: str) -> float | None:
     """
-    Independent, minimal read of portfolios.<name>.total_value from config.yaml —
+    Independent, minimal read of portfolios.<name>.total_value from config.yaml,
     deliberately does NOT import daily_runner.load_config()/BacktestConfig (see module
     docstring: this monitor must not share code/assumptions with the trading logic it watches).
     """

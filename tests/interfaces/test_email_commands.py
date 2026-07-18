@@ -27,7 +27,7 @@ class TestSenderAuthentication:
     The single most important security property of this module: only the
     configured trusted_sender's emails are ever parsed. Anything else must
     be rejected BEFORE reaching command parsing, regardless of how
-    well-formed the body looks — a spoofed or compromised third-party
+    well-formed the body looks, a spoofed or compromised third-party
     address sending a perfectly valid-looking PAUSE command must still fail.
     """
 
@@ -63,7 +63,7 @@ class TestSimpleCommands:
 
 class TestLiquidateExtraFriction:
     """
-    LIQUIDATE is the single most destructive command exposed via email —
+    LIQUIDATE is the single most destructive command exposed via email,
     these tests confirm it requires an EXACT confirmation phrase, not just
     the presence of the LIQUIDATE action word, and that anything less
     (missing, wrong, or approximate) is rejected.
@@ -93,7 +93,7 @@ class TestAdjustParamAllowlist:
     THE critical security boundary of this module: ADJUST_PARAM can only
     touch a small, hard-coded allowlist of fields, each with hard bounds.
     A test failure here would mean an email could alter config fields never
-    intended to be remotely adjustable (e.g. initial_capital, commission) —
+    intended to be remotely adjustable (e.g. initial_capital, commission),
     this is deliberately tested exhaustively, not just the happy path.
     """
 
@@ -122,14 +122,14 @@ class TestAdjustParamAllowlist:
         assert result.success is False
 
     def test_all_allowlisted_params_have_valid_bounds_tuples(self):
-        # Sanity check on the allowlist definition itself — every entry must
+        # Sanity check on the allowlist definition itself, every entry must
         # be a proper (min, max) tuple with min < max.
         for param, (lo, hi) in ADJUSTABLE_PARAMS.items():
             assert lo < hi, f"{param} has invalid bounds ({lo}, {hi})"
 
     def test_top_n_in_bounds_accepted(self):
         # top_n joined the allowlist as a real, live-wired
-        # concentration lever — same category as the two
+        # concentration lever, same category as the two
         # existing entries (defensive, bounded, safe to tweak mid-day).
         result = parse_command(TRUSTED, TRUSTED,
                                 "ACTION: ADJUST_PARAM\nPORTFOLIO: p1\nPARAM: top_n\nVALUE: 3")
@@ -145,7 +145,7 @@ class TestAdjustParamAllowlist:
 class TestNewCommandsStatusAndDrawdown:
     """
     STATUS (read-only, zero-risk) and SET_MAX_DRAWDOWN (scoped,
-    one-directional — can only tighten, never loosen, the circuit breaker).
+    one-directional, can only tighten, never loosen, the circuit breaker).
     The bounds check here only validates the requested value is a sane
     fraction; the "can only tighten vs. current config" enforcement happens
     at application time in daily_runner.py (see get_effective_max_drawdown_pct),
@@ -177,7 +177,7 @@ class TestNewCommandsStatusAndDrawdown:
 
 class TestAlertsReportCommand:
     """
-    Read-only, zero-risk, mirrors STATUS — these tests
+    Read-only, zero-risk, mirrors STATUS, these tests
     cover PARSING only (default/explicit LIMIT, bounds enforcement, ALL vs a
     specific portfolio). The actual alert-log READ + email reply is exercised
     end-to-end in tests/test_daily_runner.py, since that's where
@@ -220,7 +220,7 @@ class TestAlertsReportCommand:
 
 class TestAuditLogging:
     """
-    Every parsed attempt — accepted or rejected — must
+    Every parsed attempt (accepted or rejected) must
     be logged to the hash-chained audit trail, not just printed to console.
     This is what makes "who tried to do what, and when" queryable after the
     fact, and (via the hash chain) tamper-evident the same way the trade log is.
@@ -279,7 +279,7 @@ class TestAuditLogging:
 class TestFailSafeBehavior:
     """
     Nothing here should ever raise an exception, regardless of how malformed
-    the input is — an exception in email command parsing could crash the
+    the input is, an exception in email command parsing could crash the
     daily_runner.py process that's meant to be checking for these commands.
     """
 
@@ -306,7 +306,7 @@ class TestFailSafeBehavior:
 
 
 class TestIsBotThread:
-    """_is_bot_thread() is the second of two guards against a same-inbox reply cascade — the
+    """_is_bot_thread() is the second of two guards against a same-inbox reply cascade, the
     X-Momentum-Trading-Bot header catches the bot's own generated replies, this catches a
     human's reply to those replies (which never carries the header, but keeps the subject)."""
 
@@ -331,7 +331,7 @@ def _raw_email_bytes(subject: str, from_addr: str, body: str) -> bytes:
 
 
 class _FakeIMAPConnection:
-    """Hand-rolled fake standing in for imaplib.IMAP4_SSL — mirrors this project's existing
+    """Hand-rolled fake standing in for imaplib.IMAP4_SSL, mirrors this project's existing
     style of dependency-injected fakes (e.g. send_reply_fn) rather than introducing a mocking
     library. Serves exactly one message per test, which is all these tests need."""
 
@@ -363,13 +363,13 @@ class _FakeIMAPConnection:
 
 class TestReplyCascadeGuard:
     """
-    Reproduces the real incident this was built to fix — a same-address
+    Reproduces the real incident this was built to fix, a same-address
     IMAP_USER/TRUSTED_SENDER_EMAIL setup where ordinary correspondence from that address (e.g.
     a reply to an unrelated thread) gets treated as a failed command attempt and replied to.
     Without a subject-marker guard, a human's reply to THAT reply cascades into a second round
     (subject: "[momentum-trading] Re: [momentum-trading] Re: ..."). These tests prove the
-    cascade is capped at exactly one bounce, without suppressing the legitimate first rejection
-    — per the requirement that this be provable in tests, not discovered against a real inbox.
+    cascade is capped at exactly one bounce, without suppressing the legitimate first rejection,
+    per the requirement that this be provable in tests, not discovered against a real inbox.
     """
 
     def _run(self, monkeypatch, raw_email: bytes, processed_ids_path: str):

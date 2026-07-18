@@ -3,24 +3,24 @@ core/fundamentals.py
 
 Fundamental indicators (P/E Ratio, PEG Ratio, ROE, Debt-to-Equity, Current Ratio) for the email
 reports' "Fundamental Indicators" section, per currently-held ticker (same scope decision as
-core/technical_indicators.py — held positions, not the whole configured universe).
+core/technical_indicators.py, held positions, not the whole configured universe).
 
 Confirmed via live testing against real API keys during development, not guessed at:
-  - FMP's LEGACY `/api/v3/` endpoints are dead — shut down 2025-08-31, every `/api/v3/` call
+  - FMP's LEGACY `/api/v3/` endpoints are dead, shut down 2025-08-31, every `/api/v3/` call
     now returns 403 "Legacy Endpoint" regardless of subscription (this also affected the
-    EXISTING price-fetching in this project, core/functions.py's `_fetch_fmp()` — since
+    EXISTING price-fetching in this project, core/functions.py's `_fetch_fmp()`, since
     migrated to `/stable/` as well). FMP's newer `/stable/` API works with the same key:
     `/stable/ratios` returns
     `priceToEarningsRatio`/`priceToEarningsGrowthRatio`/`currentRatio`/`debtToEquityRatio`
     directly; `returnOnEquity` (ROE) is NOT in that response and needs a second call to
     `/stable/key-metrics`.
   - EODHD's `/api/fundamentals/` endpoint returned "Only EOD data allowed for free users"
-    against a free-tier key — fundamentals need a paid EODHD plan. Implemented below per
+    against a free-tier key, fundamentals need a paid EODHD plan. Implemented below per
     EODHD's documented response shape (for when/if a paid plan is available), but NOT confirmed
-    working the way the FMP path above was — treat the EODHD fallback as unverified until
+    working the way the FMP path above was, treat the EODHD fallback as unverified until
     tested against a real paid-tier key.
 
-Both paths return {} (never raise) on any failure — a ticker with no fundamentals access from
+Both paths return {} (never raise) on any failure, a ticker with no fundamentals access from
 either vendor simply doesn't appear in the report section, the same graceful-degradation
 contract core/technical_indicators.py's compute_latest_indicators() already uses.
 """
@@ -59,7 +59,7 @@ def _fetch_fmp_fundamentals(ticker: str, fmp_api_key: str) -> dict:
         "roe": None,
     }
 
-    # ROE isn't in /stable/ratios — a second, best-effort call. Non-fatal if it fails: the
+    # ROE isn't in /stable/ratios, a second, best-effort call. Non-fatal if it fails: the
     # other four fields still stand, matching the per-field graceful-degradation philosophy
     # used throughout this module (a partial result is better than none).
     try:
@@ -76,7 +76,7 @@ def _fetch_fmp_fundamentals(ticker: str, fmp_api_key: str) -> dict:
 
 
 def _fetch_eodhd_fundamentals(ticker: str, eodhd_api_key: str) -> dict:
-    """See module docstring — NOT confirmed working (free-tier EODHD keys are blocked from
+    """See module docstring, NOT confirmed working (free-tier EODHD keys are blocked from
     fundamentals entirely). Balance-sheet field names below follow EODHD's public glossary but
     haven't been checked against a real response the way the FMP path above was."""
     exchange_ticker = ticker if "." in ticker else f"{ticker}.US"
@@ -111,9 +111,9 @@ def fetch_fundamentals(
     ticker: str, fmp_api_key: str | None = None, eodhd_api_key: str | None = None,
 ) -> dict:
     """
-    P/E Ratio, PEG Ratio, ROE, Debt-to-Equity, Current Ratio for one ticker — tries FMP first
+    P/E Ratio, PEG Ratio, ROE, Debt-to-Equity, Current Ratio for one ticker, tries FMP first
     (matching core/functions.py's existing price-fetch vendor priority order), falls back to
-    EODHD. Returns {} (never raises) if both vendors fail or no API key is configured at all —
+    EODHD. Returns {} (never raises) if both vendors fail or no API key is configured at all,
     same contract as compute_latest_indicators() on insufficient data, so a ticker with no
     fundamentals access simply doesn't appear in the report section rather than breaking it.
     """
@@ -135,10 +135,10 @@ def get_cached_or_fetch_fundamentals(
     max_age_days: int = 7, cache_path: str = FUNDAMENTALS_CACHE_PATH,
 ) -> dict:
     """
-    File-cached wrapper around fetch_fundamentals() — fundamentals change quarterly at most, so
+    File-cached wrapper around fetch_fundamentals(), fundamentals change quarterly at most, so
     refetching on every report run (especially the opt-in DAILY report, which could otherwise
     call this every single day) would waste API calls against likely-limited vendor quotas for
-    no benefit. A failed fetch does NOT get written to the cache — only successful results
+    no benefit. A failed fetch does NOT get written to the cache, only successful results
     persist, so a transient vendor outage doesn't block retrying on the very next run.
     """
     cache: dict = {}

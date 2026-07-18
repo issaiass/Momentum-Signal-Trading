@@ -6,9 +6,9 @@ interfaces/notifications.py's category emails. Two mechanisms, picked via the
 explicit SMTP_PROVIDER env var ("gmail" or "outlook"):
 
   - gmail (default if SMTP_PROVIDER is unset): classic SMTP AUTH LOGIN with
-    SMTP_PASS — a Gmail App Password, not your real password.
+    SMTP_PASS, a Gmail App Password, not your real password.
 
-  - outlook: XOAUTH2 via an Azure AD app registration — required for
+  - outlook: XOAUTH2 via an Azure AD app registration, required for
     Outlook.com/Hotmail/Microsoft 365, which reject password-based SMTP AUTH
     outright ("5.7.139 Authentication unsuccessful, basic authentication is
     disabled"). See docs/DEPLOYMENT.md for how to register the app. On first
@@ -19,7 +19,7 @@ explicit SMTP_PROVIDER env var ("gmail" or "outlook"):
 
 SMTP_PROVIDER is explicit (rather than just inferring from which vars happen
 to be set) so switching providers doesn't depend on remembering to blank out
-the other provider's leftover config — e.g. a stale MS_OAUTH_CLIENT_ID
+the other provider's leftover config, e.g. a stale MS_OAUTH_CLIENT_ID
 sitting in .env would otherwise silently force an OAuth2 attempt against a
 Gmail account you meant to send through instead.
 """
@@ -46,7 +46,7 @@ def _token_cache_path():
 def get_provider() -> str:
     provider = os.environ.get("SMTP_PROVIDER", "gmail").strip().lower()
     if provider not in VALID_PROVIDERS:
-        raise ValueError(f"SMTP_PROVIDER={provider!r} is not supported — must be one of {VALID_PROVIDERS}")
+        raise ValueError(f"SMTP_PROVIDER={provider!r} is not supported, must be one of {VALID_PROVIDERS}")
     return provider
 
 
@@ -68,7 +68,7 @@ def _acquire_ms_access_token(user: str) -> str:
 
     client_id = os.environ.get("MS_OAUTH_CLIENT_ID")
     if not client_id:
-        raise RuntimeError("SMTP_PROVIDER=outlook requires MS_OAUTH_CLIENT_ID — see docs/DEPLOYMENT.md")
+        raise RuntimeError("SMTP_PROVIDER=outlook requires MS_OAUTH_CLIENT_ID, see docs/DEPLOYMENT.md")
     tenant = os.environ.get("MS_OAUTH_TENANT", "consumers")  # "consumers" = personal MS accounts (outlook.com/hotmail.com)
 
     cache = msal.SerializableTokenCache()

@@ -2,19 +2,19 @@
 core/technical_indicators.py
 
 Pure price/volume-derived technical indicators for the email reports (monthly/daily
-performance reports, interfaces/notifications.py) — no execution or I/O side effects, per
+performance reports, interfaces/notifications.py), no execution or I/O side effects, per
 core/'s architecture rule. Operates on a single ticker's daily OHLCV DataFrame (columns:
 open/high/low/close/volume, as returned by core/functions.py's get_bulk_prices()).
 
 Hand-rolled rather than depending on the `pandas-ta` package: pandas-ta 0.4.71b0 hard-pins
-numba==0.61.2, which requires numpy<2.3 — incompatible with this project's pandas>=3.0.3 (which
+numba==0.61.2, which requires numpy<2.3, incompatible with this project's pandas>=3.0.3 (which
 requires numpy>=2.3.3 on Python 3.14+), making `uv sync` fail to resolve at all across this
 project's supported Python range. Confirmed by direct attempt: pandas-ta imports and computes
 correctly in isolation, but breaks the project's lockfile resolution project-wide. These formulas
 are standard and stable (Wilder's smoothing for RSI/ATR/ADX, matching the conventional
 definitions), so hand-rolling avoids the dependency risk entirely.
 
-All indicators only need daily bars (no intraday data available in this project) — VWAP/OBV
+All indicators only need daily bars (no intraday data available in this project), VWAP/OBV
 below are the standard cumulative-since-window-start adaptation, not true intraday VWAP, since
 there's no intraday data to reset against.
 """
@@ -34,7 +34,7 @@ def ema(close: pd.Series, span: int = 20) -> pd.Series:
 
 
 def rsi(close: pd.Series, period: int = 14) -> pd.Series:
-    """Wilder's RSI — exponential smoothing with alpha=1/period, the standard definition."""
+    """Wilder's RSI, exponential smoothing with alpha=1/period, the standard definition."""
     delta = close.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -63,7 +63,7 @@ def _true_range(high: pd.Series, low: pd.Series, close: pd.Series) -> pd.Series:
 
 
 def atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
-    """Wilder's ATR — exponential smoothing of true range, alpha=1/period."""
+    """Wilder's ATR, exponential smoothing of true range, alpha=1/period."""
     tr = _true_range(high, low, close)
     return tr.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
 
@@ -76,13 +76,13 @@ def bollinger_bands(close: pd.Series, window: int = 20, num_std: float = 2.0) ->
 
 
 def rolling_std(close: pd.Series, window: int = 20) -> pd.Series:
-    """Rolling standard deviation of daily returns — the 'Standard Deviation' volatility
+    """Rolling standard deviation of daily returns, the 'Standard Deviation' volatility
     indicator, distinct from Bollinger's price-level std used for the bands themselves."""
     return close.pct_change().rolling(window).std()
 
 
 def adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
-    """Wilder's ADX (trend strength, direction-agnostic). The fiddliest of these formulas —
+    """Wilder's ADX (trend strength, direction-agnostic). The fiddliest of these formulas,
     directional movement is computed BEFORE smoothing, then +DI/-DI are derived from the
     smoothed values, then DX is smoothed again into ADX. Get any of these three smoothing
     passes in the wrong order and the result silently diverges from the standard definition."""
@@ -103,7 +103,7 @@ def adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> 
 
 
 def vwap(high: pd.Series, low: pd.Series, close: pd.Series, volume: pd.Series) -> pd.Series:
-    """Cumulative VWAP over the provided window — there's no intraday data in this project to
+    """Cumulative VWAP over the provided window, there's no intraday data in this project to
     reset a true session VWAP against, so this is volume-weighted average price since the start
     of whatever OHLCV window was passed in, not a single-session figure."""
     typical_price = (high + low + close) / 3
@@ -117,7 +117,7 @@ def obv(close: pd.Series, volume: pd.Series) -> pd.Series:
 def compute_latest_indicators(ohlcv: pd.DataFrame) -> dict:
     """
     Computes every indicator above on a single ticker's OHLCV DataFrame (columns:
-    open/high/low/close/volume) and returns only the MOST RECENT value of each — reports show
+    open/high/low/close/volume) and returns only the MOST RECENT value of each, reports show
     a current snapshot per held position, not a full time series. Returns {} if there isn't
     enough history for the longest-window indicator (26-period MACD) to have a real value yet,
     rather than returning a dict full of NaNs.

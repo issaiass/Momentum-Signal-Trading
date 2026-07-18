@@ -16,7 +16,7 @@ WHAT THIS DOES DIFFERENTLY FROM THE ORIGINAL `run_custom_backtest`
    are tracked separately so cost drag is visible, not hidden in daily P&L).
 7. Seeded RNG -> reproducible, auditable results (an unseeded backtest is not a backtest).
 8. Full tearsheet: CAGR, vol, Sharpe, Sortino, max drawdown, Calmar, win rate,
-   beta/alpha vs SPY, turnover, and total cost drag — not just cumulative return.
+   beta/alpha vs SPY, turnover, and total cost drag, not just cumulative return.
 
 HONEST CAVEAT
 -------------
@@ -43,7 +43,7 @@ if not logger.handlers:
     handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
     logger.addHandler(handler)
 logger.setLevel(logging.INFO)
-# See execution/live_signal.py's identical comment — without this, every message here
+# See execution/live_signal.py's identical comment, without this, every message here
 # would double-print when this module is imported into daily_runner.py's process (which
 # also configures the ROOT logger via logging.basicConfig()).
 logger.propagate = False
@@ -54,7 +54,7 @@ logger.propagate = False
 # --------------------------------------------------------------------------- #
 @dataclass
 class BacktestConfig:
-    holding_period: float = 1.0             # months between forced rebalances — accepts
+    holding_period: float = 1.0             # months between forced rebalances, accepts
                                              # fractional values that map onto weeks:
                                              # 0.25 = every week, 0.5 = every 2 weeks,
                                              # 0.75 = every 3 weeks, 1.0 = every month (default,
@@ -63,13 +63,13 @@ class BacktestConfig:
                                              # execution/live_signal.py. Values below 0.25 (faster
                                              # than weekly) are allowed but trigger a non-blocking
                                              # WARNING alert + email every run (see daily_runner.py
-                                             # / is_holding_period_too_frequent()) — deliberately
+                                             # / is_holding_period_too_frequent()), deliberately
                                              # not hard-blocked, since it's a real, well-defined
                                              # schedule, just an economically inadvisable one.
     lookback_period: int = 12               # trailing months of returns used to RANK tickers by
                                              # momentum (distinct from holding_period, which
                                              # controls how often you rebalance, not how far back
-                                             # the signal looks). LIVE-ONLY — the backtest engine
+                                             # the signal looks). LIVE-ONLY, the backtest engine
                                              # operates on monthly_picks, which the caller (e.g. a
                                              # research notebook) already computed upstream via
                                              # calculate_period_returns(..., period=lookback_period)
@@ -77,12 +77,12 @@ class BacktestConfig:
                                              # has no effect on backtest results (mirrors
                                              # commission's BACKTEST-ONLY note, opposite direction).
     initial_capital: float = 100_000.0
-    commission: float = 0.0                 # flat $ per trade — BACKTEST-ONLY: only
+    commission: float = 0.0                 # flat $ per trade, BACKTEST-ONLY: only
                                              # run_risk_managed_backtest()'s simulated cash
                                              # ledger reads this. Live trading (daily_runner.py)
                                              # pulls REAL cash/positions from IBKR every run, so
                                              # there's no simulated balance to deduct a commission
-                                             # from — real commission is already reflected
+                                             # from, real commission is already reflected
                                              # automatically in the broker's real account state.
     exchange: str = "NYSE"
 
@@ -125,15 +125,15 @@ class BacktestConfig:
     # --- live extended-hours (pre-market/after-hours) trading ---
     allow_extended_hours: bool = False   # LIVE ONLY, no effect on the backtest (daily-close
         # based). place_orders_ibkr() submits plain MKT orders by default, which IBKR/exchanges
-        # only accept during regular trading hours (9:30am-4:00pm ET) — a rebalance running
+        # only accept during regular trading hours (9:30am-4:00pm ET), a rebalance running
         # right at or after the close gets "Order rejected - reason:Exchange is closed" (IBKR
         # error 201), same as everyone else's plain MKT order. True switches those orders to
-        # LMT with outsideRth=True instead — IBKR does not accept MKT orders outside RTH at
+        # LMT with outsideRth=True instead, IBKR does not accept MKT orders outside RTH at
         # all, only LMT (confirmed against IBKR's own TWS API docs), so this is a real order-type
         # change, not just a flag. The limit price is the last known price +/- a small buffer
         # (favors getting filled over exact price). Covers NASDAQ's standard extended sessions:
         # pre-market 4:00-9:30am ET, after-hours 4:00-8:00pm ET. Thinner ETH liquidity means a
-        # real chance of no fill, a partial fill, or a worse price than a similar RTH order —
+        # real chance of no fill, a partial fill, or a worse price than a similar RTH order,
         # this is a real economic trade-off, not just a technical toggle. Ticker/price
         # availability still applies: if no reference price exists for a ticker that run, the
         # order silently falls back to a regular MKT (RTH-only) order instead of failing.
@@ -174,10 +174,10 @@ class BacktestConfig:
     max_pct_of_adv: float = 0.0   # 0 = disabled; e.g. 0.05 = warn if a position exceeds 5% of average daily volume
 
     # --- Additional execution safety checks ---
-    max_dollar_drawdown: float | None = None       # e.g. 500.0 — halt if equity drops this many $ from peak, independent of the % breaker
-    max_slippage_tolerance_pct: float | None = None  # e.g. 0.02 — alert (not un-fill) if actual fill deviates from expected price by more than this
-    max_price_staleness_minutes: int | None = None   # e.g. 30 — abort the run rather than trade on a price feed older than this
-    max_holding_days: int | None = None              # e.g. 90 — force-exit a position after N days regardless of price (time-based stop)
+    max_dollar_drawdown: float | None = None       # e.g. 500.0, halt if equity drops this many $ from peak, independent of the % breaker
+    max_slippage_tolerance_pct: float | None = None  # e.g. 0.02, alert (not un-fill) if actual fill deviates from expected price by more than this
+    max_price_staleness_minutes: int | None = None   # e.g. 30, abort the run rather than trade on a price feed older than this
+    max_holding_days: int | None = None              # e.g. 90, force-exit a position after N days regardless of price (time-based stop)
 
     # --- Alternative position-sizing method ---
     sizing_method: str = "inverse_vol"   # "inverse_vol" (default) or "score_proportional"
@@ -281,10 +281,10 @@ def _round_shares(raw_shares: float, allow_fractional: bool) -> float:
     """
     Floor to whole shares by default (matches real market-order fills for most
     US brokers on ETFs). If allow_fractional_shares=True, round DOWN to 4dp
-    instead — never round up, since that could overspend available cash.
+    instead, never round up, since that could overspend available cash.
     Only set allow_fractional=True if your broker/ticker combo actually
     supports fractional share orders (IBKR supports it for many, not all,
-    US equities/ETFs — confirm per-ticker before relying on this).
+    US equities/ETFs, confirm per-ticker before relying on this).
     """
     if allow_fractional:
         return np.floor(raw_shares * 10_000) / 10_000
@@ -299,7 +299,7 @@ def detect_correlation_spike(
     Fast-reacting crash indicator, distinct from the
     sizing-time _correlation_penalty_weights() (which uses a single rolling
     window and reacts slowly). This compares a SHORT recent window's average
-    pairwise correlation against a longer baseline — in real crashes,
+    pairwise correlation against a longer baseline, in real crashes,
     normally-uncorrelated assets often move together in a matter of days
     ("correlation goes to 1"), which this is built to catch faster than a
     single ~63-day rolling average would.
@@ -364,7 +364,7 @@ def _score_proportional_weights(picks: list[str], momentum_scores: pd.Series | N
     Weights proportional to each pick's momentum score
     (higher trailing return -> larger weight), instead of inverse-vol sizing.
     The theory: if the signal genuinely ranks conviction, the strongest
-    momentum names arguably deserve more capital, not less — inverse-vol
+    momentum names arguably deserve more capital, not less, inverse-vol
     sizing is agnostic to signal STRENGTH, only to volatility.
 
     Falls back to equal weight if momentum_scores isn't provided or all
@@ -393,7 +393,7 @@ def resolve_target_weights(
     custom_weights: dict | None = None, momentum_scores: pd.Series | None = None,
 ) -> dict:
     """
-    Single source of truth for turning a pick list into position weights —
+    Single source of truth for turning a pick list into position weights,
     used by BOTH the backtest engine and live_signal.py, so live sizing can
     never silently diverge from what was backtested.
 
@@ -402,7 +402,7 @@ def resolve_target_weights(
     correlation penalty are skipped entirely. Position caps still apply.
 
     If custom_weights is NOT provided, cfg.sizing_method selects between
-    "inverse_vol" (default — weight inversely to trailing volatility) and
+    "inverse_vol" (default, weight inversely to trailing volatility) and
     "score_proportional" (weight proportional to each
     pick's momentum score, requires momentum_scores to be passed in; falls
     back to equal-weight if scores aren't available).
@@ -507,7 +507,7 @@ def _slippage_bps(ticker_returns_window: pd.Series, cfg: BacktestConfig) -> floa
     Base slippage scaled by trailing (vol_lookback_days) annualized vol. If
     liquidity_stress_multiplier > 1.0, additionally checks
     whether the MOST RECENT few days' vol is spiking well above that trailing
-    average — a proxy for liquidity deteriorating faster than a long rolling
+    average, a proxy for liquidity deteriorating faster than a long rolling
     window would show, which is exactly when execution quality matters most
     and behaves least like historical averages.
     """
@@ -549,7 +549,7 @@ def run_risk_managed_backtest(
         e.g. 'SPY', if use_regime_filter=True).
     config : BacktestConfig
     custom_weights_by_date : dict, optional
-        {signal_date: {ticker: weight}} — if present for a given rebalance's
+        {signal_date: {ticker: weight}}, if present for a given rebalance's
         signal date, those weights are used directly instead of inverse-vol
         sizing (still subject to max_position_weight capping).
 
@@ -637,7 +637,7 @@ def run_risk_managed_backtest(
             # GAP-RISK LIMITATION: this checks the drawdown from
             # entry using DAILY close prices, and fills at that day's open/close
             # (via today_exec) with the standard slippage model. On a genuine
-            # overnight gap-down (common in real crashes — e.g. several March 2020
+            # overnight gap-down (common in real crashes, e.g. several March 2020
             # sessions opened well below the prior close), this will UNDERSTATE the
             # actual loss and OVERSTATE the achievable exit price: the stop "sees"
             # the drop only after it has already happened, and fills near that
@@ -668,7 +668,7 @@ def run_risk_managed_backtest(
                     entry_dates.pop(ticker, None)
 
             # ---------------- TIME-BASED STOP -----------------
-            # Force-exits a position after max_holding_days regardless of price —
+            # Force-exits a position after max_holding_days regardless of price,
             # independent of and in addition to the price-based stop-loss above.
             # Exists to bound exposure duration even when a position is neither
             # winning nor losing enough to trigger the price stop, but has simply
@@ -779,7 +779,7 @@ def run_risk_managed_backtest(
 
                     # --- position sizing: custom weights (if provided for this date) or
                     #     inverse-vol + optional correlation penalty, via the SAME resolver
-                    #     live_signal.py uses — single source of truth for sizing logic ---
+                    #     live_signal.py uses, single source of truth for sizing logic ---
                     custom_w = None
                     if custom_weights_by_date is not None:
                         custom_w = custom_weights_by_date.get(latest_signal_date) or custom_weights_by_date.get(today)
@@ -827,7 +827,7 @@ def run_risk_managed_backtest(
                     # A "rebalance-only" trade on an existing position is skipped if the
                     # drift from target is too small to be worth the cost. New entries and
                     # full exits still go through (only gated by min_trade_size), since
-                    # those aren't just noise — they're genuine allocation changes.
+                    # those aren't just noise, they're genuine allocation changes.
                     trades = {}
                     for t, trade_value in raw_trades.items():
                         is_continuing_position = (t in current_value) and (t in target_dollar)
@@ -904,7 +904,7 @@ def run_risk_managed_backtest(
                                     / new_shares
                                 )
                                 if ticker not in entry_dates:
-                                    # only set on a genuinely NEW position — a top-up to an
+                                    # only set on a genuinely NEW position, a top-up to an
                                     # existing holding shouldn't reset the time-based stop clock
                                     entry_dates[ticker] = today
                                 holdings[ticker] = new_shares
@@ -1047,7 +1047,7 @@ def run_custom_backtest(
         you'd call daily_prices.xs('open', level=1, axis=1) on. In that case this
         function automatically uses 'close' for signals/valuation and 'open' for
         trade execution (fills happen the trading day after the signal, at that
-        day's open — avoids same-bar look-ahead on execution price).
+        day's open, avoids same-bar look-ahead on execution price).
 
     Any BacktestConfig field (e.g. target_portfolio_vol=0.20, stop_loss_pct=0.10,
     use_regime_filter=False) can be passed as an extra keyword to override the
@@ -1068,7 +1068,7 @@ def run_custom_backtest(
             logger.warning("Ignoring unknown BacktestConfig override: %s=%r", key, val)
 
     # Construct once (not via post-hoc setattr) so __post_init__ validation actually runs
-    # against the final, complete set of values — setattr after construction would bypass it.
+    # against the final, complete set of values, setattr after construction would bypass it.
     cfg = BacktestConfig(**cfg_kwargs)
 
     return run_risk_managed_backtest(monthly_picks, daily_prices, cfg, custom_weights_by_date=custom_weights_by_date)

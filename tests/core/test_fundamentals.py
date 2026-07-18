@@ -1,9 +1,9 @@
 """
 tests/core/test_fundamentals.py
 
-Covers core/fundamentals.py — FMP-first, EODHD-fallback fetch of P/E, PEG, ROE,
+Covers core/fundamentals.py, FMP-first, EODHD-fallback fetch of P/E, PEG, ROE,
 Debt-to-Equity, Current Ratio for held tickers, plus its file cache. Network calls are never
-made in this suite — _fetch_fmp_fundamentals()/_fetch_eodhd_fundamentals() are monkeypatched
+made in this suite, _fetch_fmp_fundamentals()/_fetch_eodhd_fundamentals() are monkeypatched
 at the module level rather than mocking urlopen, since the module's own docstring already
 confirms (via live testing during development) exactly what each vendor's real response shape
 looks like; these tests exercise the fallback/caching logic around that, not the HTTP layer.

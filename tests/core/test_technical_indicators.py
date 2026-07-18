@@ -1,7 +1,7 @@
 """
 tests/core/test_technical_indicators.py
 
-Covers core/technical_indicators.py — hand-rolled rather than depending on the pandas-ta
+Covers core/technical_indicators.py, hand-rolled rather than depending on the pandas-ta
 package (which hard-pins numba==0.61.2, incompatible with this project's pandas>=3.0.3 under
 `uv sync`'s full dependency resolution, confirmed by direct attempt). These tests pin the
 standard formulas against hand-verifiable known values (a monotonically rising price series
@@ -33,7 +33,7 @@ def _synthetic_ohlcv(n=100, seed=0):
 
 
 class TestKnownValues:
-    """Hand-verifiable cases — a constant or monotonic series has an unambiguous correct
+    """Hand-verifiable cases, a constant or monotonic series has an unambiguous correct
     indicator value, independent of any implementation detail."""
 
     def test_sma_of_constant_series_equals_the_constant(self):
@@ -45,7 +45,7 @@ class TestKnownValues:
         assert ema(close, span=10).iloc[-1] == pytest.approx(100.0)
 
     def test_rsi_of_strictly_rising_series_is_100(self):
-        # Every period is a gain, zero losses — RSI's definition makes this exactly 100
+        # Every period is a gain, zero losses, RSI's definition makes this exactly 100
         # (avg_loss == 0 => RS => infinity => RSI => 100), not just "high".
         close = pd.Series(range(1, 31), dtype=float)
         assert rsi(close, period=14).iloc[-1] == pytest.approx(100.0)
@@ -69,7 +69,7 @@ class TestKnownValues:
 
 
 class TestBoundaries:
-    """RSI and ADX are both defined on [0, 100] by construction — any implementation bug in
+    """RSI and ADX are both defined on [0, 100] by construction, any implementation bug in
     the smoothing/ratio math tends to produce values outside this range, so a violation here
     is a strong, cheap signal something is wrong."""
 
@@ -99,7 +99,7 @@ class TestMacd:
 
 class TestComputeLatestIndicators:
     def test_returns_empty_dict_for_insufficient_history(self):
-        # MACD needs 26 periods — anything shorter must not produce a dict full of NaNs.
+        # MACD needs 26 periods, anything shorter must not produce a dict full of NaNs.
         short_ohlcv = _synthetic_ohlcv(n=10)
         assert compute_latest_indicators(short_ohlcv) == {}
 

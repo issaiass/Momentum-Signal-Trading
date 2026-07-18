@@ -99,14 +99,14 @@ def get_stock_prices(
         """Fetch data from Financial Modeling Prep API.
 
         Uses FMP's `/stable/` endpoints, not the legacy `/api/v3/` path this function used
-        before — FMP shut down every `/api/v3/` endpoint 2025-08-31, and it now returns 403
+        before, FMP shut down every `/api/v3/` endpoint 2025-08-31, and it now returns 403
         "Legacy Endpoint" regardless of subscription tier (confirmed by live testing against a
         real key; see CLAUDE.md's core/ notes). Two `/stable/` calls are needed to match the
         old response shape: `/historical-price-eod/full` for raw OHLCV (needed by
         execution/live_signal.py's fetch_ohlcv_for_tickers(), which requires plain
         open/high/low/close/volume for technical indicators) and
         `/historical-price-eod/dividend-adjusted` for `adjClose` (needed by this module's
-        get_bulk_prices(), whose momentum-ranking price series must be dividend-adjusted —
+        get_bulk_prices(), whose momentum-ranking price series must be dividend-adjusted,
         unadjusted close would distort rankings around ex-dividend dates for dividend-paying
         ETFs). The response is a flat list, unlike `/api/v3/`'s `{"historical": [...]}` wrapper.
         """
@@ -127,7 +127,7 @@ def get_stock_prices(
         df = pd.DataFrame(prices).set_index('date').sort_index()
         df.index = pd.to_datetime(df.index)
 
-        # Dividend-adjusted close — best-effort second call. Non-fatal if it fails: the raw
+        # Dividend-adjusted close, best-effort second call. Non-fatal if it fails: the raw
         # OHLCV above still stands, and get_bulk_prices() already falls back to unadjusted
         # 'close' when 'adjClose' is absent from the frame.
         try:

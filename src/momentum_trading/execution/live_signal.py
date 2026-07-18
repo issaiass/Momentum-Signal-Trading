@@ -5,7 +5,7 @@ Turns the backtested momentum strategy into a real BUY/SELL/HOLD decision on
 live data. Reuses the SAME signal functions (calculate_period_returns,
 assign_ranks, get_top_etfs from Notebook 2 / functions.py) and the SAME
 risk-management internals (inverse-vol sizing, position caps, regime filter,
-vol targeting from momentum_backtest.py) as the backtest — so the live logic
+vol targeting from momentum_backtest.py) as the backtest, so the live logic
 is not a re-implementation, it's the identical code path fed live data instead
 of historical data.
 
@@ -17,7 +17,7 @@ SAFETY MODEL
   explicitly pass --port 7496 (live TWS) AND --confirm-live-trading.
   NOTE: IBKR convention is 7497 = paper, 7496 = live for TWS
   (4001/4002 for IB Gateway paper/live). Double-check YOUR TWS/Gateway
-  configuration — port numbers are configurable and vary by setup.
+  configuration, port numbers are configurable and vary by setup.
 - Every run appends a full audit row (ticker, signal rank, target weight,
   drift, action, shares, price, timestamp, dry_run flag) to live_trades_log.csv
   BEFORE attempting any broker call, so you have a record even if the broker
@@ -29,7 +29,7 @@ USAGE
     python -m momentum_trading.execution.live_signal --live --port 7497          # places real paper orders
     python -m momentum_trading.execution.live_signal --live --port 7496 --confirm-live-trading   # REAL MONEY
 
-There is no --dry-run flag — dry-run is the default when --live is omitted (passing --dry-run
+There is no --dry-run flag, dry-run is the default when --live is omitted (passing --dry-run
 is an argparse error). In practice, daily_runner.py is the actual scheduled entry point (the
 `daily-runner` console script) and calls this module's functions directly; invoking this file's
 own __main__ block is mainly useful for isolated manual testing of the execution layer.
@@ -67,7 +67,7 @@ if not logger.handlers:
     handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
     logger.addHandler(handler)
 logger.setLevel(logging.INFO)
-# daily_runner.py's logging.basicConfig() attaches its own handler to the ROOT logger —
+# daily_runner.py's logging.basicConfig() attaches its own handler to the ROOT logger,
 # without this, every message here would print twice: once via this logger's own handler
 # (needed so this module still prints when run standalone, e.g. its own __main__ block),
 # once via propagation up to root's handler when imported into daily_runner.py's process.
@@ -77,13 +77,13 @@ TRADE_LOG_PATH = str(logs_dir() / "live_trades_log.csv")
 
 # IBKR_HOST: docker-compose.yml already sets this to host.docker.internal (Mac/Windows Docker
 # Desktop) so the container can reach TWS/Gateway running on the host machine. Inside a container,
-# "127.0.0.1" is the container itself — never where TWS/Gateway listens — so that can't be the
+# "127.0.0.1" is the container itself (never where TWS/Gateway listens) so that can't be the
 # unconditional default. Falls back to "127.0.0.1" for non-Docker (bare-metal/venv) usage, where
 # TWS/Gateway genuinely does run on localhost relative to the script.
 IBKR_HOST = os.environ.get("IBKR_HOST", "127.0.0.1")
 
 # IBKR routes purely informational/status notices through the SAME EWrapper.error() callback
-# as real errors (a quirk of the TWS API, not this codebase) — these specific codes are
+# as real errors (a quirk of the TWS API, not this codebase), these specific codes are
 # IBKR's own "System"/"Warning" classification (see their API docs), not failures: 2104/2106/2108
 # fire on every successful connect ("data farm connection is OK"), 2107/2158 are similar
 # farm-status notices, 2119 is a market-data-type notice, 2137 is a warning, not an error.
@@ -91,11 +91,11 @@ IBKR_HOST = os.environ.get("IBKR_HOST", "127.0.0.1")
 # real errors (like a 502 "couldn't connect") in noise and can trip naive log/alert greps.
 # 10349 is the same pattern for a per-ORDER notice: "Order TIF was set to DAY based on order
 # preset" fires because place_orders_ibkr() never sets order.tif explicitly, so IBKR fills in
-# its own account-level default and tells you — confirmed non-fatal empirically (orders
+# its own account-level default and tells you, confirmed non-fatal empirically (orders
 # carrying this exact code have gone on to fill seconds later with a real execDetails/
 # commissionReport). Distinct from the codes above in one way: it DOES carry a real orderId
 # (reqId), so place_orders_ibkr()'s error() callback below must not let it overwrite that
-# order's tracked status to "ERROR: ..." — doing so falsely marks a still-pending (or already
+# order's tracked status to "ERROR: ...", doing so falsely marks a still-pending (or already
 # filled) order as terminally failed and makes the poll loop stop watching it too early.
 IBKR_INFORMATIONAL_CODES = {2104, 2106, 2107, 2108, 2119, 2137, 2158, 10349}
 
@@ -110,9 +110,9 @@ def _log_ibkr_message(reqId: int, errorCode: int, errorString: str) -> None:
 def is_holding_period_too_frequent(holding_period: float) -> bool:
     """
     True for any positive holding_period faster than weekly (< 0.25, i.e. more often than
-    every 4 weeks' worth of months — see is_rebalance_day()'s weekly mapping). Single source
+    every 4 weeks' worth of months, see is_rebalance_day()'s weekly mapping). Single source
     of truth for this threshold so daily_runner.py's warning and its test don't each hardcode
-    0.25 separately. Deliberately not a hard validation error in BacktestConfig — this is a
+    0.25 separately. Deliberately not a hard validation error in BacktestConfig, this is a
     real, well-defined schedule, just an economically inadvisable one (see daily_runner.py's
     per-portfolio WARNING check).
     """
@@ -125,15 +125,15 @@ def is_rebalance_day(holding_period_months: float = 1, exchange: str = "NYSE",
     """
     True only on the Nth trading day of a rebalance period. holding_period_months >= 1
     (the default, holding_period_months=1): the FIRST trading day of every month, or every
-    Nth month if holding_period_months > 1 — unchanged from this function's original behavior.
-    holding_period_months < 1: weekly granularity instead — 0.25 = every week, 0.5 = every 2
+    Nth month if holding_period_months > 1, unchanged from this function's original behavior.
+    holding_period_months < 1: weekly granularity instead, 0.25 = every week, 0.5 = every 2
     weeks, 0.75 = every 3 weeks (weeks_interval = round(holding_period_months * 4)), firing on
     the first trading day of the qualifying week. Lets you schedule this script to run EVERY
     day via cron/Task Scheduler and have it self-gate, instead of hand-calculating which
     calendar dates are holidays/weekends each year.
 
     today : pd.Timestamp | None
-        Injectable for testing (defaults to the real current date) — same dependency-injection
+        Injectable for testing (defaults to the real current date), same dependency-injection
         pattern used elsewhere in this project (resolve_total_values()'s account_value_fn,
         circuit_breaker.py's alert_fn) so this function's date logic can be tested against a
         fixed date instead of the real calendar.
@@ -155,7 +155,7 @@ def is_rebalance_day(holding_period_months: float = 1, exchange: str = "NYSE",
         is_target = today.date() == target_day.date()
 
         if is_target and weeks_interval > 1:
-            # Weeks since a fixed Monday epoch — stable across year boundaries, unlike ISO
+            # Weeks since a fixed Monday epoch, stable across year boundaries, unlike ISO
             # week numbers (which reset near Dec/Jan and some years have a 53rd week).
             weeks_since_epoch = (week_start - pd.Timestamp("1970-01-05")).days // 7
             return (weeks_since_epoch % weeks_interval) == 0
@@ -180,7 +180,7 @@ def is_rebalance_day(holding_period_months: float = 1, exchange: str = "NYSE",
 
 
 # --------------------------------------------------------------------------- #
-# 1. SIGNAL GENERATION — identical logic to Notebook 2, run on live data
+# 1. SIGNAL GENERATION, identical logic to Notebook 2, run on live data
 # --------------------------------------------------------------------------- #
 def calculate_period_returns(df_prices: pd.DataFrame, period: int = 12) -> pd.DataFrame:
     return df_prices.ffill().pct_change(periods=period)
@@ -214,7 +214,7 @@ def fetch_live_prices(
 
 
 _OHLCV_COLUMN_ALIASES = {
-    # FMP / EODHD / yfinance each name columns differently — normalize to lowercase
+    # FMP / EODHD / yfinance each name columns differently, normalize to lowercase
     # open/high/low/close/volume so core/technical_indicators.py has one consistent schema
     # to work with regardless of which vendor answered for a given ticker.
     "open": "open", "Open": "open",
@@ -231,7 +231,7 @@ def fetch_ohlcv_for_tickers(
 ) -> dict[str, pd.DataFrame]:
     """
     Per-ticker OHLCV (not just close), for technical indicator computation
-    (core/technical_indicators.py) — distinct from fetch_live_prices() above, which returns
+    (core/technical_indicators.py), distinct from fetch_live_prices() above, which returns
     only close prices across many tickers at once (all that's needed for momentum ranking).
     Uses core/functions.py's single-symbol get_stock_prices() (same FMP -> EODHD -> yfinance
     auto-fallback chain), one call per ticker, since get_bulk_prices() collapses to close-only.
@@ -240,7 +240,7 @@ def fetch_ohlcv_for_tickers(
     indicators, without fetching as much history as fetch_live_prices()'s 400-day window
     (technical indicators don't need a 12-month lookback the way the momentum signal does).
 
-    Returns {ticker: ohlcv_df} for tickers that fetched successfully — a ticker that fails
+    Returns {ticker: ohlcv_df} for tickers that fetched successfully, a ticker that fails
     (vendor outage, delisted symbol, etc.) is simply omitted rather than failing the whole
     batch, so one bad ticker can't block indicators for the rest of the portfolio.
     """
@@ -256,7 +256,7 @@ def fetch_ohlcv_for_tickers(
             df = df.rename(columns=_OHLCV_COLUMN_ALIASES)
             missing = {"open", "high", "low", "close", "volume"} - set(df.columns)
             if missing:
-                logger.warning("OHLCV fetch for %s missing columns %s — skipping indicators for it.",
+                logger.warning("OHLCV fetch for %s missing columns %s, skipping indicators for it.",
                                 ticker, missing)
                 continue
             results[ticker] = df[["open", "high", "low", "close", "volume"]]
@@ -271,7 +271,7 @@ def check_price_staleness(daily_prices: pd.DataFrame, max_staleness_minutes: int
     (e.g. a data vendor outage that returns yesterday's data without erroring).
 
     NOTE on granularity: this system fetches DAILY bars, not intraday ticks, so
-    a literal minute-level staleness check doesn't map cleanly onto the data —
+    a literal minute-level staleness check doesn't map cleanly onto the data,
     what actually matters is whether the latest available daily price is from
     the most recently completed trading session, not from a stale earlier one.
     This function compares the latest date in daily_prices against the most
@@ -315,7 +315,7 @@ def check_price_staleness(daily_prices: pd.DataFrame, max_staleness_minutes: int
 
 
 # --------------------------------------------------------------------------- #
-# 2. RISK-MANAGED TARGET WEIGHTS — same internals as momentum_backtest.py
+# 2. RISK-MANAGED TARGET WEIGHTS, same internals as momentum_backtest.py
 # --------------------------------------------------------------------------- #
 def compute_target_weights(
     picks: list[str], daily_prices: pd.DataFrame, cfg: BacktestConfig,
@@ -323,7 +323,7 @@ def compute_target_weights(
     portfolio: str = "", alerts_log_path: str = ALERTS_LOG_PATH,
 ) -> tuple[dict, float]:
     """
-    Returns (weights, gross_exposure) via resolve_target_weights() — the SAME
+    Returns (weights, gross_exposure) via resolve_target_weights(), the SAME
     shared sizing function the backtest engine calls, so live sizing decisions
     are provably the same code as what was validated historically, not a
     parallel reimplementation that could silently drift.
@@ -333,7 +333,7 @@ def compute_target_weights(
         sizing (still subject to position caps). See resolve_target_weights()
         in momentum_backtest.py for details.
     momentum_scores : pd.Series, optional
-        Required for cfg.sizing_method == "score_proportional" — ignored
+        Required for cfg.sizing_method == "score_proportional", ignored
         otherwise.
     """
     as_of = daily_prices.index[-1]
@@ -352,7 +352,7 @@ def compute_target_weights(
 
     # --- Correlation-spike defensive scaling, live-trading
     #     equivalent of the backtest's use_correlation_spike_regime (same placement,
-    #     same defensive action — momentum_backtest.py's run_risk_managed_backtest). ---
+    #     same defensive action, momentum_backtest.py's run_risk_managed_backtest). ---
     if cfg.use_correlation_spike_regime:
         spike = detect_correlation_spike(
             daily_prices, as_of,
@@ -371,12 +371,12 @@ def compute_target_weights(
 
 
 # --------------------------------------------------------------------------- #
-# 3. ORDER GENERATION — target weights + real broker positions -> BUY/SELL/HOLD
+# 3. ORDER GENERATION, target weights + real broker positions -> BUY/SELL/HOLD
 # --------------------------------------------------------------------------- #
 def compute_aggregate_drift(target_dollar: dict, current_value: dict, total_value: float) -> float:
     """
     Same formula as the backtest's aggregate-drift skip
-    (run_risk_managed_backtest() in momentum_backtest.py) — sum of absolute dollar
+    (run_risk_managed_backtest() in momentum_backtest.py), sum of absolute dollar
     drift across every ticker (current + target), as a fraction of total_value.
     Extracted as a pure function (matching this codebase's pattern of pulling out
     small pure helpers like _apply_position_caps) so it's directly unit-testable
@@ -450,7 +450,7 @@ def generate_orders(
 
 
 # --------------------------------------------------------------------------- #
-# 4. AUDIT LOG — written BEFORE any broker call, regardless of outcome
+# 4. AUDIT LOG, written BEFORE any broker call, regardless of outcome
 # --------------------------------------------------------------------------- #
 def _config_hash(cfg) -> str:
     """
@@ -489,7 +489,7 @@ def verify_log_integrity(path: str) -> dict:
     """
     Verification utility: re-walks the hash chain and
     confirms no row was altered or removed after the fact. A plain CSV a
-    script can also freely rewrite is not tamper-evident on its own — this
+    script can also freely rewrite is not tamper-evident on its own, this
     at least makes tampering DETECTABLE (recomputed hashes won't match),
     even though the file itself isn't write-protected at the OS level.
     """
@@ -519,7 +519,7 @@ def log_orders(orders: dict, latest_prices: dict, dry_run: bool, path: str = TRA
     """
     NOTE on schema evolution: this adds 'rank' and
     'signal_score' columns. If you have an existing log file from before this
-    change, its header won't have these columns — appending new-schema rows
+    change, its header won't have these columns, appending new-schema rows
     to an old-schema file will misalign columns. Archive/rename any pre-existing
     live_trades_log_*.csv before your first run after upgrading, so a fresh
     file with the new header gets created.
@@ -550,14 +550,14 @@ def log_orders(orders: dict, latest_prices: dict, dry_run: bool, path: str = TRA
 # 4b. REAL PROFIT MEASUREMENT (from actual live_trades_log.csv, not a simulation)
 # --------------------------------------------------------------------------- #
 # --------------------------------------------------------------------------- #
-# 4c. PORTFOLIO SNAPSHOT — one row per run, not per trade
+# 4c. PORTFOLIO SNAPSHOT, one row per run, not per trade
 # --------------------------------------------------------------------------- #
 def write_portfolio_snapshot(
     name: str, current_positions: dict, latest_prices: dict, total_value: float, cash: float,
     benchmark_ticker: str | None = None, snapshot_dir: str = str(data_dir()),
 ) -> str:
     """
-    Writes a single summary row capturing "where things stand today" — distinct
+    Writes a single summary row capturing "where things stand today", distinct
     from the trade log, which only has rows on days something was bought/sold.
     Without this, answering "what's my portfolio worth right now" requires
     replaying the entire trade log through measure_live_performance(); this is
@@ -567,7 +567,7 @@ def write_portfolio_snapshot(
     Also stores the benchmark's current price (if benchmark_ticker + its price
     are available in latest_prices) so the NEXT call can compute a real
     period-over-period return for both portfolio and benchmark by comparing
-    against the previous row — without needing a separate
+    against the previous row, without needing a separate
     price history lookup.
 
     Parameters
@@ -575,7 +575,7 @@ def write_portfolio_snapshot(
     current_positions : dict {ticker: {'shares': float, 'avg_entry_price': float}}
     latest_prices : dict {ticker: float}
     total_value, cash : float
-    benchmark_ticker : str, optional — e.g. cfg.regime_benchmark ("SPY")
+    benchmark_ticker : str, optional, e.g. cfg.regime_benchmark ("SPY")
 
     Returns
     -------
@@ -640,7 +640,7 @@ def write_portfolio_snapshot(
 
 
 def get_latest_snapshot(name: str, snapshot_dir: str = str(data_dir())) -> dict | None:
-    """Fast 'where do things stand today' read — last row only, no full-log replay."""
+    """Fast 'where do things stand today' read, last row only, no full-log replay."""
     path = os.path.join(snapshot_dir, f"portfolio_snapshot_{name}.csv")
     if not os.path.isfile(path):
         return None
@@ -659,7 +659,7 @@ def measure_live_performance(
 ) -> dict:
     """
     Computes REAL realized + unrealized P&L from the actual order log written
-    by log_orders() — this reads what genuinely happened (or would have, in
+    by log_orders(), this reads what genuinely happened (or would have, in
     dry-run), not a backtest re-simulation. Uses FIFO lot matching for realized
     gains, same convention as most brokers' tax reporting.
 
@@ -667,7 +667,7 @@ def measure_live_performance(
     ----------
     start_date, end_date : str, 'YYYY-MM-DD'
         Window to measure. Only rows with dry_run matching your actual live
-        mode are meaningful for a real account — pass `dry_run` (below) to
+        mode are meaningful for a real account, pass `dry_run` (below) to
         filter, since log_orders() writes both modes to the same file.
     latest_prices : dict, optional
         {ticker: price} for marking open positions to market as of `end_date`.
@@ -675,7 +675,7 @@ def measure_live_performance(
     initial_capital : float, optional
         If provided, also returns total_return_pct.
     dry_run : bool, optional
-        If set, only rows whose logged `dry_run` column matches are used —
+        If set, only rows whose logged `dry_run` column matches are used,
         a dry-run test run and a real --live run share the same log file, so
         without this a report could silently mix simulated and real fills.
         None (default) uses every row regardless of mode.
@@ -684,13 +684,13 @@ def measure_live_performance(
     -------
     dict: realized_pnl, unrealized_pnl, total_pnl, open_positions (dict),
           open_position_avg_cost (dict: ticker -> weighted-average cost basis of the
-          currently open lots — lets a caller reconstruct a current_positions-shaped dict
+          currently open lots, lets a caller reconstruct a current_positions-shaped dict
           for build_position_performance() from the trade log alone, without a live broker
           connection; see notebooks/operational/portfolio_snapshot_report.ipynb),
           trade_count, per_ticker (DataFrame breakdown).
     """
     if not os.path.isfile(log_path):
-        raise FileNotFoundError(f"No trade log found at {log_path} — nothing has been logged yet.")
+        raise FileNotFoundError(f"No trade log found at {log_path}, nothing has been logged yet.")
 
     log = pd.read_csv(log_path, parse_dates=["timestamp"])
     log = log[(log["timestamp"] >= start_date) & (log["timestamp"] <= end_date)]
@@ -725,7 +725,7 @@ def measure_live_performance(
                 else:
                     lots[0][0] = lot_shares
             if remaining > 1e-9:
-                logger.warning("SELL of %.4f %s exceeds logged open lots by %.4f shares — "
+                logger.warning("SELL of %.4f %s exceeds logged open lots by %.4f shares, "
                                 "log may not cover full history; realized P&L may be understated.",
                                 shares, ticker, remaining)
 
@@ -768,7 +768,7 @@ def derive_entry_date(ticker: str, trade_log_path: str = TRADE_LOG_PATH) -> pd.T
     the backtest does, so it's derived from the trade log instead.
 
     Walks the log chronologically for `ticker` and returns the timestamp of the BUY
-    that started the CURRENTLY open position's unbroken holding streak — persists
+    that started the CURRENTLY open position's unbroken holding streak, persists
     across partial adds/trims, resets only when the position was last fully flat
     (matching the backtest's exact entry_dates semantics, not just "most recent buy").
 
@@ -806,19 +806,19 @@ def build_position_performance(
     current_positions: dict, latest_prices: dict, trade_log_path: str = TRADE_LOG_PATH,
 ) -> dict[str, dict]:
     """
-    Per-ticker return-since-entry for the reports' "Position Performance" section — distinct
+    Per-ticker return-since-entry for the reports' "Position Performance" section, distinct
     from measure_live_performance()'s aggregate/per_ticker_realized P&L (closed-lot gains):
     this is unrealized return on the CURRENTLY open position, from its entry date to now.
     Reuses avg_entry_price already tracked in current_positions (the same field
     check_and_handle_stop_losses() compares against) and derive_entry_date() (the same
-    FIFO entry-date derivation check_and_handle_time_stops() uses) — both already computed
+    FIFO entry-date derivation check_and_handle_time_stops() uses), both already computed
     live for stop-loss/time-stop gating today, just not previously surfaced in a report.
 
     Returns {ticker: {"entry_date", "entry_price", "current_price", "shares", "return_pct",
     "market_value"}}. A ticker missing a valid avg_entry_price, with non-positive shares, or
-    without a known current price is omitted entirely — same graceful-degradation contract
+    without a known current price is omitted entirely, same graceful-degradation contract
     used throughout this module. "entry_date" may be None (trade log doesn't cover this
-    position's full history) even when the other fields are present — the row still renders,
+    position's full history) even when the other fields are present, the row still renders,
     just with entry date shown as unknown rather than being dropped.
     """
     result = {}
@@ -854,7 +854,7 @@ def run_multi_portfolio(
     current_holdings_per_portfolio: dict[str, dict] | None = None,
 ) -> dict:
     """
-    Runs the SAME strategy independently across multiple named portfolios —
+    Runs the SAME strategy independently across multiple named portfolios,
     each gets its own signal, its own sizing, its own orders, and its own
     trade log (separate CSV per portfolio, so P&L doesn't mix).
 
@@ -919,7 +919,7 @@ def run_multi_portfolio(
 
 
 # --------------------------------------------------------------------------- #
-# 5. BROKER EXECUTION — IBKR, gated behind explicit --live flag
+# 5. BROKER EXECUTION, IBKR, gated behind explicit --live flag
 # --------------------------------------------------------------------------- #
 def with_retry(fn_callable, max_attempts: int = 3, backoff_seconds: float = 2.0, *args, **kwargs):
     """
@@ -942,7 +942,7 @@ def with_retry(fn_callable, max_attempts: int = 3, backoff_seconds: float = 2.0,
 
 def get_ibkr_positions(port: int, client_id: int = 8, timeout: float = 5.0, host: str = IBKR_HOST) -> dict:
     """
-    Real broker positions — {ticker: {'shares': float, 'avg_entry_price': float}} —
+    Real broker positions ({ticker: {'shares': float, 'avg_entry_price': float}})
     via IBKR's reqPositions(). This is the source of truth for current_holdings;
     NEVER trust locally-tracked state (partial fills, manual trades, dividends
     all cause local state to drift from what the broker actually holds).
@@ -985,18 +985,18 @@ def get_ibkr_positions(port: int, client_id: int = 8, timeout: float = 5.0, host
 
     app.disconnect()
     if not app.done:
-        raise TimeoutError(f"reqPositions() did not complete within {timeout}s — is TWS/Gateway running on port {port}?")
+        raise TimeoutError(f"reqPositions() did not complete within {timeout}s, is TWS/Gateway running on port {port}?")
     return app.positions
 
 
 def get_ibkr_account_value(port: int, client_id: int = 9, timeout: float = 5.0,
                             tag: str = "NetLiquidation", host: str = IBKR_HOST) -> float:
     """
-    Real account value via reqAccountSummary() — replaces hardcoded total_value.
+    Real account value via reqAccountSummary(), replaces hardcoded total_value.
 
     tag : which IBKR account summary tag to fetch. Default "NetLiquidation" (total account
     equity) preserves every existing call site's behavior unchanged. Also used with
-    "AvailableFunds" — real spendable cash, checked by
+    "AvailableFunds", real spendable cash, checked by
     place_orders_ibkr() before submitting BUY orders.
     """
     try:
@@ -1037,7 +1037,7 @@ def get_ibkr_account_value(port: int, client_id: int = 9, timeout: float = 5.0,
 
     app.disconnect()
     if not app.done or app.value is None:
-        raise TimeoutError(f"reqAccountSummary({tag}) did not complete within {timeout}s — is TWS/Gateway running on port {port}?")
+        raise TimeoutError(f"reqAccountSummary({tag}) did not complete within {timeout}s, is TWS/Gateway running on port {port}?")
     return app.value
 
 
@@ -1071,7 +1071,7 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
     orders and disconnecting blind after a fixed sleep.
 
     SELLs are always submitted first and confirmed (terminal status) before any
-    BUY is submitted — a BUY submitted before its funding SELL clears can be rejected on a
+    BUY is submitted, a BUY submitted before its funding SELL clears can be rejected on a
     cash account, or silently rely on margin buying power this code never used to check.
     Mirrors the backtest engine's explicit sells-first/buys-second structure.
 
@@ -1080,7 +1080,7 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
         every BUY at its computed size: False (default) logs a warning and submits BUYs as
         computed anyway, letting IBKR's own fill/reject be the backstop. True proportionally
         scales down BUY share counts (floored to whole shares) to fit. Either way, the
-        shortfall is always logged — this flag only controls whether anything is done about
+        shortfall is always logged, this flag only controls whether anything is done about
         it here, never whether it's visible.
     available_cash_fn : callable() -> float, optional
         Injected so this is unit-testable without a real IBKR account-summary round trip.
@@ -1088,12 +1088,12 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
     fill_poll_timeout : float
         Seconds to wait for each batch (sells, then buys) to reach a terminal status before
         giving up and logging "did not confirm as Filled". Real paper-account fills have been
-        observed taking longer than a short window — a too-short timeout doesn't mean the
+        observed taking longer than a short window, a too-short timeout doesn't mean the
         order failed, just that this function stopped watching before the fill callback
         arrived (confirm in TWS's own execution log before assuming an order didn't fill).
     allow_extended_hours : bool
         IBKR/exchanges reject plain MKT orders outside regular trading hours (error 201,
-        "Exchange is closed") — and only accept LMT orders with outsideRth=True instead (MKT
+        "Exchange is closed"), and only accept LMT orders with outsideRth=True instead (MKT
         does not work outside RTH at all, confirmed against IBKR's own docs). True switches
         every order in this call to LMT (limit price = expected_prices[ticker] +/- a small
         buffer favoring fill likelihood) with outsideRth=True; a ticker with no entry in
@@ -1125,7 +1125,7 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
         def error(self, reqId, errorCode, errorString, advancedOrderRejectJson=""):
             _log_ibkr_message(reqId, errorCode, errorString)
             # Informational codes (e.g. 10349, "TIF was set to DAY based on order preset")
-            # carry a real orderId but are not failures — only a genuine error should mark
+            # carry a real orderId but are not failures, only a genuine error should mark
             # this order's tracked status as terminal, or the poll loop stops watching an
             # order that's still pending (or already filled) as if it had been rejected.
             if reqId in self.order_status and errorCode not in IBKR_INFORMATIONAL_CODES:
@@ -1137,7 +1137,7 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
     # --- Retry the CONNECTION only, never retry order
     #     submission itself. If a disconnect happens AFTER an order was
     #     already sent but before its confirmation arrived, blindly retrying
-    #     the whole function could submit a duplicate order — a much worse
+    #     the whole function could submit a duplicate order, a much worse
     #     failure mode than just failing this run and alerting. So: connect
     #     with retries; once connected and order submission begins, any
     #     failure from that point fails loudly with no retry. ---
@@ -1163,7 +1163,7 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
             time.sleep(2.0 * attempt)
 
     if app is None or app.next_order_id is None:
-        logger.error("Could not obtain a valid order ID from IBKR after %d attempts — "
+        logger.error("Could not obtain a valid order ID from IBKR after %d attempts, "
                      "is TWS/Gateway running on port %d? NO ORDERS WERE SUBMITTED.",
                      connect_attempts, port)
         if app is not None:
@@ -1191,10 +1191,10 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
 
             ib_order = Order()
             # ibapi's Order() defaults eTradeOnly/firmQuoteOnly to True (legacy fields from
-            # older ibapi releases) — current TWS/Gateway versions have dropped server-side
+            # older ibapi releases), current TWS/Gateway versions have dropped server-side
             # support for them entirely and reject ANY order carrying them as True with error
             # 10268 ("attribute is not supported"), regardless of account/order type. Every
-            # order is rejected until these are explicitly cleared — this is IBKR's own
+            # order is rejected until these are explicitly cleared, this is IBKR's own
             # documented fix for this exact ibapi/TWS version combination, not optional.
             ib_order.eTradeOnly = False
             ib_order.firmQuoteOnly = False
@@ -1204,14 +1204,14 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
             # instead of raw "MKT" for anything beyond a liquid, tight-spread ETF.
 
             # IBKR does not support fractional EQUITY/ETF share orders via the API, under any
-            # circumstances — confirmed empirically (error 10243, "Fractional-sized order
+            # circumstances, confirmed empirically (error 10243, "Fractional-sized order
             # cannot be placed via API. Please use desktop version") even after correctly
             # setting cashQty per IBKR's own official sample code (LimitOrderWithCashQty):
             # cashQty only authorizes fractional fills for forex/CASH-pair orders, NOT STK
-            # contracts like these. There is no code-level workaround for STK — the desktop/
+            # contracts like these. There is no code-level workaround for STK, the desktop/
             # web UI is the only way to place a genuinely fractional equity order. So: floor to
             # whole shares here, at the submission boundary only. allow_fractional_shares still
-            # fully applies everywhere else (sizing math, drift calc, the backtest engine) —
+            # fully applies everywhere else (sizing math, drift calc, the backtest engine),
             # only the final live order quantity is forced whole, because that's a hard broker
             # constraint no config setting can change.
             shares = order["shares"]
@@ -1219,7 +1219,7 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
                 floored = int(shares)
                 if floored <= 0:
                     logger.warning(
-                        "%s: dropping %s order — %.4f shares floors to 0 whole shares "
+                        "%s: dropping %s order, %.4f shares floors to 0 whole shares "
                         "(IBKR does not support fractional equity orders via API).",
                         ticker, order["action"], shares)
                     dropped_orders[ticker] = {
@@ -1235,10 +1235,10 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
             ib_order.totalQuantity = shares
 
             # IBKR/exchanges reject plain MKT orders outside regular trading hours (error 201,
-            # "Exchange is closed") and only accept LMT orders with outsideRth=True instead —
+            # "Exchange is closed") and only accept LMT orders with outsideRth=True instead,
             # MKT does not work outside RTH at all (confirmed against IBKR's own TWS API docs),
             # so this is a real order-type change, not just a flag. A 0.5% buffer favors
-            # actually getting filled over exact price — extended-hours liquidity is thinner,
+            # actually getting filled over exact price, extended-hours liquidity is thinner,
             # so a tight limit risks no fill at all. No reference price -> fall back to a
             # regular MKT (RTH-only) order rather than submitting an unpriced limit order.
             extended_hours_note = ""
@@ -1253,7 +1253,7 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
                     extended_hours_note = f" [extended hours: LMT @ {ib_order.lmtPrice}]"
                 else:
                     logger.warning(
-                        "%s: allow_extended_hours is set but no reference price is available — "
+                        "%s: allow_extended_hours is set but no reference price is available, "
                         "submitting as a regular MKT order (RTH only) instead.", ticker)
 
             logger.info("Placing %s %s shares of %s (orderId=%d)%s",
@@ -1289,7 +1289,7 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
                 logger.info("Order for %s FILLED: %.4f shares @ $%.2f", ticker, info["filled"], info["avg_fill_price"])
 
                 # --- Slippage tolerance check ---
-                # Cannot un-fill an order that already executed — this ALERTS on
+                # Cannot un-fill an order that already executed, this ALERTS on
                 # excess deviation from the expected price rather than attempting
                 # any reversal, so a bad fill is at least immediately visible
                 # instead of silently accepted.
@@ -1300,7 +1300,7 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
                     if slip_check["exceeded"]:
                         logger.warning(
                             "SLIPPAGE TOLERANCE EXCEEDED: %s expected $%.2f, filled $%.2f (%.2f%% deviation, "
-                            "tolerance %.2f%%). Fill already executed — review manually.",
+                            "tolerance %.2f%%). Fill already executed, review manually.",
                             ticker, expected, actual, slip_check["deviation_pct"] * 100, max_slippage_tolerance_pct * 100,
                         )
                         log_alert(portfolio, "SLIPPAGE_TOLERANCE_EXCEEDED", "WARNING",
@@ -1311,7 +1311,7 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
                         results[ticker]["slippage_deviation_pct"] = slip_check["deviation_pct"]
         return results
 
-    # --- SELLs first, always — see docstring. ---
+    # --- SELLs first, always, see docstring. ---
     sell_orders = {t: o for t, o in orders.items() if o["action"] == "SELL" and o["shares"] > 0}
     buy_orders = {t: o for t, o in orders.items() if o["action"] == "BUY" and o["shares"] > 0}
 
@@ -1325,7 +1325,7 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
         priced_buys = {t: o for t, o in buy_orders.items() if expected_prices and t in expected_prices}
         unpriced = set(buy_orders) - set(priced_buys)
         if unpriced:
-            logger.info("Cash-availability check skipped for %s — no expected price available "
+            logger.info("Cash-availability check skipped for %s, no expected price available "
                         "to estimate their dollar value.", sorted(unpriced))
 
         if priced_buys:
@@ -1350,11 +1350,11 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
                     reduced = {}
                     for t, o in buy_orders.items():
                         if t not in priced_buys:
-                            reduced[t] = o  # no price to scale against — leave as computed
+                            reduced[t] = o  # no price to scale against, leave as computed
                             continue
-                        new_shares = int(o["shares"] * scale)  # floor — always the safe direction
+                        new_shares = int(o["shares"] * scale)  # floor, always the safe direction
                         if new_shares <= 0:
-                            logger.warning("Dropping BUY %s — reduced to 0 shares after "
+                            logger.warning("Dropping BUY %s, reduced to 0 shares after "
                                            "cash-availability scaling.", t)
                             dropped_orders[t] = {
                                 "status": "DROPPED_INSUFFICIENT_CASH",
@@ -1426,7 +1426,7 @@ def run(
 
     latest_prices = daily_prices.iloc[-1].to_dict()
 
-    # --- Aggregate-drift skip — bypass the ENTIRE rebalance if
+    # --- Aggregate-drift skip, bypass the ENTIRE rebalance if
     #     total portfolio drift is trivial, even if some individual tickers exceed
     #     drift_threshold. Same formula/semantics as the backtest's
     #     run_risk_managed_backtest(); 0 (default) disables this and preserves prior
@@ -1514,7 +1514,7 @@ if __name__ == "__main__":
         logger.error("Refusing to trade on port 7496 (live) without --confirm-live-trading. Aborting.")
         sys.exit(1)
 
-    # --- EXAMPLE universe/config — replace with your real universe and current broker positions ---
+    # --- EXAMPLE universe/config, replace with your real universe and current broker positions ---
     example_tickers = ["SPY", "QQQ", "XLK", "XLF", "XLE", "XLY", "XLP", "XLU", "GLD", "TLT", "BIL"]
     example_holdings = {}  # {} = no positions yet; in production, pull from IBKR reqPositions()
 

@@ -4,7 +4,7 @@ tests/test_architecture.py
 Tests that specifically probe the RESTRUCTURE itself, not the
 strategy logic (which the rest of the suite already covers). These exist to
 catch regressions in the package boundaries, path resolution, and the
-circuit-breaker extraction — the kind of bug that a pure logic test would
+circuit-breaker extraction, the kind of bug that a pure logic test would
 never catch (e.g. the "works when run from the project root but breaks from
 anywhere else" class of bug found and fixed during this restructure).
 """
@@ -16,7 +16,7 @@ import pytest
 
 
 class TestPackageImportability:
-    """Every module must import cleanly as part of the installed package — a
+    """Every module must import cleanly as part of the installed package, a
     broken relative import in any single module would otherwise only surface
     at runtime, in whatever code path happens to exercise it."""
 
@@ -42,7 +42,7 @@ class TestNoStaleFlatImports:
     Guards against regressing back to the old flat-file import style
     (e.g. `from live_signal import X` instead of
     `from momentum_trading.execution.live_signal import X`) sneaking back in
-    via a future edit — this was found and fixed once already during this
+    via a future edit, this was found and fixed once already during this
     restructure (a local import inside daily_runner.main() was missed by the
     first pass of automated rewrites).
     """
@@ -76,7 +76,7 @@ class TestPathResolutionAcrossWorkingDirectories:
     existed, LOCK_DIR and other state paths were bare relative strings that
     only worked if the process's CWD happened to be the project root. These
     tests confirm path resolution is correct regardless of where the
-    interpreter is invoked from — run as a subprocess from a genuinely
+    interpreter is invoked from, run as a subprocess from a genuinely
     different working directory, not just monkeypatched within the same process.
     """
 
@@ -147,7 +147,7 @@ class TestCircuitBreakerExtraction:
         monkeypatch.setattr(cb, "ALERTS_LOG_PATH", str(tmp_path / "data" / "alerts_log.csv"))
         cfg = BacktestConfig(max_portfolio_drawdown_pct=0.20)
 
-        # no alert_fn passed at all — must not raise even when it trips
+        # no alert_fn passed at all, must not raise even when it trips
         assert cb.check_circuit_breaker("p", 1000.0, cfg) is False
         assert cb.check_circuit_breaker("p", 700.0, cfg) is True  # trips, no alert_fn, no crash
 
@@ -171,7 +171,7 @@ class TestCircuitBreakerExtraction:
 
     def test_risk_module_has_no_dependency_on_interfaces_module(self):
         # Static check: risk/circuit_breaker.py must never IMPORT anything
-        # from interfaces/ — that's precisely the coupling this extraction
+        # from interfaces/, that's precisely the coupling this extraction
         # was designed to avoid (see module docstring). Checked via AST on
         # actual import statements, not text search, since the docstring
         # itself legitimately mentions "interfaces" while explaining why.
@@ -193,7 +193,7 @@ class TestCircuitBreakerExtraction:
             f"risk/circuit_breaker.py imports from interfaces/: {import_modules}"
 
     def test_daily_runner_reexports_match_risk_module(self):
-        # daily_runner.py imports these names from risk.circuit_breaker — confirm
+        # daily_runner.py imports these names from risk.circuit_breaker, confirm
         # they're literally the same function objects, not accidentally
         # shadowed/redefined copies that could silently diverge.
         import momentum_trading.daily_runner as dr

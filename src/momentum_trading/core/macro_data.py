@@ -1,14 +1,14 @@
 """
 core/macro_data.py
 
-Macro indicators (Fed Funds Rate, CPI) for the email reports' "Macro Context" section —
+Macro indicators (Fed Funds Rate, CPI) for the email reports' "Macro Context" section,
 portfolio-independent (one fetch covers every portfolio in a run, not per-ticker like
 core/technical_indicators.py / core/fundamentals.py).
 
 Confirmed via live testing against a real API key during development: FRED (the St. Louis
-Fed's own API, https://fred.stlouisfed.org) is the source — neither FMP nor EODHD's
+Fed's own API, https://fred.stlouisfed.org) is the source, neither FMP nor EODHD's
 already-used endpoints in this project cover macro series at all. Requires a NEW, free
-FRED_API_KEY (signup at https://fred.stlouisfed.org/docs/api/api_key.html, no cost) — if unset,
+FRED_API_KEY (signup at https://fred.stlouisfed.org/docs/api/api_key.html, no cost), if unset,
 the whole macro section is simply omitted, the same "opt-in by not configuring it" pattern
 already used for email-commanded remote actions (inactive unless all four IMAP env vars are set).
 
@@ -57,9 +57,9 @@ def _fetch_fred_series(series_id: str, fred_api_key: str) -> dict | None:
 
 def fetch_macro_indicators(fred_api_key: str | None) -> dict:
     """
-    {"fed_funds_rate": {"value": ..., "date": ...}, "cpi": {"value": ..., "date": ...}} —
-    latest observation of each. Returns {} (never raises) if fred_api_key is falsy — checked
-    BEFORE any network attempt, so an unconfigured key costs nothing every run — or if both
+    {"fed_funds_rate": {"value": ..., "date": ...}, "cpi": {"value": ..., "date": ...}},
+    latest observation of each. Returns {} (never raises) if fred_api_key is falsy, checked
+    BEFORE any network attempt, so an unconfigured key costs nothing every run, or if both
     FRED calls fail. Each series is fetched independently: one failing doesn't block the other
     (e.g. a transient FRED outage on one series shouldn't hide data that's actually available).
     """
@@ -81,7 +81,7 @@ def get_cached_or_fetch_macro_indicators(
     fred_api_key: str | None, max_age_days: int = 30, cache_path: str = MACRO_CACHE_PATH,
 ) -> dict:
     """
-    File-cached wrapper around fetch_macro_indicators() — Fed Funds Rate and CPI are both
+    File-cached wrapper around fetch_macro_indicators(), Fed Funds Rate and CPI are both
     released roughly monthly, so refetching on every report run (especially the opt-in DAILY
     report) would waste calls for data that hasn't changed. A failed/empty fetch does NOT get
     cached, so a transient FRED outage or a not-yet-configured FRED_API_KEY doesn't block

@@ -19,7 +19,7 @@ from momentum_trading.execution.live_signal import check_slippage_tolerance, che
 
 class TestDollarDrawdownBreaker:
     """
-    max_dollar_drawdown is INDEPENDENT of max_portfolio_drawdown_pct — either
+    max_dollar_drawdown is INDEPENDENT of max_portfolio_drawdown_pct, either
     can trip a halt on its own. These tests (see also
     test_daily_runner.py::TestCircuitBreaker for the original % version)
     confirm the dollar breaker fires correctly even when the % breaker is
@@ -36,7 +36,7 @@ class TestDollarDrawdownBreaker:
         import momentum_trading.risk.circuit_breaker as circuit_breaker
         monkeypatch.setattr(circuit_breaker, "LOCK_DIR", tmp_path / "data")
         monkeypatch.setattr(daily_runner, "LOCK_DIR", tmp_path / "data")
-        # Tripping the breaker also calls log_alert() — isolate ALERTS_LOG_PATH too,
+        # Tripping the breaker also calls log_alert(), isolate ALERTS_LOG_PATH too,
         # so this test doesn't write into the real project's logs/alerts_log.csv.
         monkeypatch.setattr(circuit_breaker, "ALERTS_LOG_PATH", str(tmp_path / "data" / "alerts_log.csv"))
         from momentum_trading.daily_runner import check_circuit_breaker
@@ -61,7 +61,7 @@ class TestDollarDrawdownBreaker:
 
 class TestSlippageToleranceCheck:
     """
-    check_slippage_tolerance() cannot un-fill an already-executed order — its
+    check_slippage_tolerance() cannot un-fill an already-executed order, its
     only job is to make an excessive deviation VISIBLE (flagged in the result
     dict + logged) rather than silently accepted as if the fill were fine.
     """
@@ -78,7 +78,7 @@ class TestSlippageToleranceCheck:
 
     def test_zero_price_does_not_crash(self):
         # Guards against a division-by-zero if expected/actual price is ever 0
-        # (e.g. a data gap) — should report "not flagged", not raise.
+        # (e.g. a data gap), should report "not flagged", not raise.
         result = check_slippage_tolerance(expected_price=0.0, actual_price=100.0, tolerance_pct=0.02)
         assert result["exceeded"] is False
 
@@ -91,7 +91,7 @@ class TestStalePriceFeedProtection:
     """
     check_price_staleness() must correctly distinguish fresh data (today's
     date) from stale data (an old cached/frozen feed) and from a total fetch
-    failure (empty DataFrame) — each should be handled distinctly, not
+    failure (empty DataFrame), each should be handled distinctly, not
     conflated into one generic "bad data" case.
     """
 
@@ -120,7 +120,7 @@ class TestStalePriceFeedProtection:
 class TestTimeBasedStops:
     """
     max_holding_days must force an exit purely based on TIME, independent of
-    price — verified using a perfectly FLAT price series where the
+    price, verified using a perfectly FLAT price series where the
     price-based stop_loss_pct could never trigger on its own, isolating the
     time-based mechanism from the price-based one.
     """
@@ -133,7 +133,7 @@ class TestTimeBasedStops:
         np.random.seed(0)
         tickers = ["SPY", "QQQ"]
         dates = pd.bdate_range("2020-01-01", "2020-12-31")
-        data = {t: np.full(len(dates), 100.0) for t in tickers}  # perfectly flat — price stop never fires
+        data = {t: np.full(len(dates), 100.0) for t in tickers}  # perfectly flat, price stop never fires
         daily_prices = pd.DataFrame(data, index=dates)
         picks = pd.Series({d: tickers for d in daily_prices.resample("ME").last().index})
 

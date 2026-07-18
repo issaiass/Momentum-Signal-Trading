@@ -7,16 +7,16 @@ services:
       - MOMENTUM_TRADING_ROOT=/app
       # Cron schedule: standard 5-field cron syntax, evaluated in the
       # container's TZ (America/New_York, set in the Dockerfile). Changing these only
-      # needs `docker compose up -d` (container recreate), NOT `--build` — the
+      # needs `docker compose up -d` (container recreate), NOT `--build`, the
       # entrypoint regenerates /etc/cron.d/momentum-cron from these on every start.
       # Defaults: daily-runner at 9:35am ET weekdays; risk_monitor hourly 9am-4pm ET weekdays.
-      # DAILY_RUNNER_CRON is NOT how you set daily/weekly/monthly rebalancing — leave it at the
+      # DAILY_RUNNER_CRON is NOT how you set daily/weekly/monthly rebalancing, leave it at the
       # default for every cadence; that's config.yaml's holding_period instead. See
       # docs/DEPLOYMENT.md's "Choosing a rebalance cadence" section.
       - DAILY_RUNNER_CRON=${DAILY_RUNNER_CRON:-35 9 * * 1-5}
       - RISK_MONITOR_CRON=${RISK_MONITOR_CRON:-0 9-16 * * 1-5}
       # Space-separated portfolio names to independently risk-monitor, one
-      # cron entry each — must match names under config.yaml's portfolios: key.
+      # cron entry each, must match names under config.yaml's portfolios: key.
       # Defaults to just "portfolio1"; add more (e.g. "portfolio1 portfolio2") if
       # config.yaml defines additional portfolios you want automated oversight for.
       - RISK_MONITOR_PORTFOLIOS=${RISK_MONITOR_PORTFOLIOS:-portfolio1}
@@ -24,11 +24,11 @@ services:
       - EODHD_API_KEY=${EODHD_API_KEY:-}
       # IBKR host: use host.docker.internal on Mac/Windows Docker Desktop;
       # on Linux, use --network host or the host machine's real IP instead.
-      # IBKR_PORT is the default for daily-runner's --port (paper 7497 / live 7496) —
+      # IBKR_PORT is the default for daily-runner's --port (paper 7497 / live 7496),
       # an explicit --port in the crontab command still overrides it.
       - IBKR_HOST=${IBKR_HOST:-host.docker.internal}
       - IBKR_PORT=${IBKR_PORT:-7497}
-      # Email alerting (daily_runner.py) — all four required for alerts to send;
+      # Email alerting (daily_runner.py), all four required for alerts to send;
       # missing any of them logs the alert instead of failing silently.
       # SMTP_PROVIDER selects the auth mechanism: "gmail" (SMTP_PASS, default)
       # or "outlook" (OAuth2 via MS_OAUTH_CLIENT_ID below).
@@ -44,7 +44,7 @@ services:
       # one-time device-code login survives container restarts/rebuilds.
       - MS_OAUTH_CLIENT_ID=${MS_OAUTH_CLIENT_ID:-}
       - MS_OAUTH_TENANT=${MS_OAUTH_TENANT:-consumers}
-      # Email-commanded remote actions — opt-in, all four required to activate
+      # Email-commanded remote actions, opt-in, all four required to activate
       - IMAP_HOST=${IMAP_HOST:-}
       - IMAP_USER=${IMAP_USER:-}
       - IMAP_PASS=${IMAP_PASS:-}

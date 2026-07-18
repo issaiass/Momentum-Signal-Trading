@@ -3,7 +3,7 @@ tests/test_live_signal.py
 
 Covers the live-trading order logic: order generation (BUY/SELL/HOLD sizing
 and rounding), real FIFO P&L measurement from a trade log, and multi-portfolio
-orchestration. Nothing here connects to a real broker — IBKR-dependent
+orchestration. Nothing here connects to a real broker, IBKR-dependent
 functions (get_ibkr_positions, place_orders_ibkr) are not covered by this
 file since they require a live TWS/Gateway connection this test environment
 doesn't have.
@@ -28,7 +28,7 @@ from momentum_trading.core.audit_log import read_recent_alerts
 
 class TestIsRebalanceDay:
     """
-    is_rebalance_day() had ZERO test coverage before this — these tests close that gap
+    is_rebalance_day() had ZERO test coverage before this, these tests close that gap
     (regression protection for the pre-existing monthly logic) as well as covering the new
     weekly branch. All dates are injected via the `today` parameter (added specifically for
     this) rather than depending on the real calendar date the suite happens to run on.
@@ -43,7 +43,7 @@ class TestIsRebalanceDay:
         assert is_rebalance_day(1, today=pd.Timestamp("2026-01-05")) is False
 
     def test_every_other_month_fires_only_on_alternating_months(self):
-        # holding_period=2: confirmed fires Feb/Apr, not Jan/Mar, for this calendar —
+        # holding_period=2: confirmed fires Feb/Apr, not Jan/Mar, for this calendar,
         # unchanged pre-existing "every Nth month" logic, just now under test for the
         # first time.
         assert is_rebalance_day(2, today=pd.Timestamp("2026-01-02")) is False
@@ -66,7 +66,7 @@ class TestIsRebalanceDay:
         assert is_rebalance_day(0.75, today=pd.Timestamp("2026-01-26")) is True
 
     def test_holiday_shifts_the_weekly_target_day(self):
-        # Presidents' Day 2026 falls on Monday 2026-02-16 — the real first trading day
+        # Presidents' Day 2026 falls on Monday 2026-02-16, the real first trading day
         # of that week is Tuesday 2026-02-17. Confirms the weekly branch is
         # holiday-aware, the same as the pre-existing monthly branch already was.
         assert is_rebalance_day(0.25, today=pd.Timestamp("2026-02-16")) is False
@@ -76,7 +76,7 @@ class TestIsRebalanceDay:
 class TestIsHoldingPeriodTooFrequent:
     """
     Single source of truth for the 'faster than weekly' threshold used by
-    daily_runner.py's non-blocking WARNING check — these tests pin the exact boundary.
+    daily_runner.py's non-blocking WARNING check, these tests pin the exact boundary.
     """
 
     def test_exactly_weekly_is_not_too_frequent(self):
@@ -91,7 +91,7 @@ class TestIsHoldingPeriodTooFrequent:
 
 class TestGetTopEtfs:
     """
-    get_top_etfs() is where BacktestConfig.top_n actually takes effect — it's
+    get_top_etfs() is where BacktestConfig.top_n actually takes effect, it's
     the sole gate between "everything in the portfolio's tickers list" and
     "what actually gets sized and traded". daily_runner.py wiring cfg.top_n
     through to this call was previously a silent no-op: run()'s own
@@ -111,14 +111,14 @@ class TestGetTopEtfs:
         assert len(picks) == 3
 
     def test_top_n_picks_the_strongest_ranked(self):
-        # top_n=3 should be exactly the 3 lowest ranks: QQQ(1), XLK(2), SPY(3) —
+        # top_n=3 should be exactly the 3 lowest ranks: QQQ(1), XLK(2), SPY(3),
         # not an arbitrary/unordered subset.
         picks = get_top_etfs(self._ranks(), top_n=3)
         assert set(picks) == {"QQQ", "XLK", "SPY"}
 
     def test_top_n_larger_than_universe_returns_whole_universe(self):
         # Mirrors daily_runner.py's min(cfg.top_n, len(tickers)) clamp being
-        # unnecessary in practice — nsmallest() degrades gracefully on its own.
+        # unnecessary in practice, nsmallest() degrades gracefully on its own.
         picks = get_top_etfs(self._ranks(), top_n=10)
         assert len(picks) == 5
 
@@ -126,7 +126,7 @@ class TestGetTopEtfs:
 class TestGenerateOrders:
     """
     generate_orders() is where target weights become concrete BUY/SELL/HOLD
-    decisions with real share counts — bugs here directly translate to wrong
+    decisions with real share counts, bugs here directly translate to wrong
     trades, so these tests focus on the boundary behaviors most likely to be
     wrong: direction (buy vs sell), the min-trade-size cost filter, and
     whole-vs-fractional share rounding (a real source of confusion since the
@@ -136,7 +136,7 @@ class TestGenerateOrders:
 
     def test_produces_buy_and_sell(self):
         # Confirms direction is correct in both directions simultaneously
-        # (SPY/QQQ need to shrink, XLK needs to grow) — a sign error here
+        # (SPY/QQQ need to shrink, XLK needs to grow), a sign error here
         # would be the single worst possible bug in this codebase.
         cfg = BacktestConfig(drift_threshold=0.03, min_trade_size=25.0)
         orders = generate_orders(
@@ -151,7 +151,7 @@ class TestGenerateOrders:
 
     def test_below_min_trade_size_is_hold(self):
         # Confirms the cost-control filter actually suppresses tiny trades
-        # rather than executing them anyway — this is the mechanism that
+        # rather than executing them anyway, this is the mechanism that
         # keeps turnover/commission drag down on small accounts.
         cfg = BacktestConfig(drift_threshold=0.0, min_trade_size=1000.0)
         orders = generate_orders(
@@ -162,7 +162,7 @@ class TestGenerateOrders:
 
     def test_fractional_shares_when_enabled(self):
         # allow_fractional_shares=True should size to a real fraction of a
-        # share (1000/220=4.5454...), not silently floor to a whole number —
+        # share (1000/220=4.5454...), not silently floor to a whole number,
         # confirms the flag actually changes behavior, not just accepted syntax.
         cfg = BacktestConfig(drift_threshold=0.0, min_trade_size=1.0, allow_fractional_shares=True)
         orders = generate_orders(
@@ -173,7 +173,7 @@ class TestGenerateOrders:
 
     def test_whole_shares_by_default(self):
         # The default (allow_fractional_shares=False) must floor to a whole
-        # int, matching the backtest engine's default rounding — if this ever
+        # int, matching the backtest engine's default rounding, if this ever
         # returned a float by mistake, downstream integer-assuming code
         # (e.g. IBKR order quantity formatting) could behave unexpectedly.
         cfg = BacktestConfig(drift_threshold=0.0, min_trade_size=1.0)
@@ -188,7 +188,7 @@ class TestGenerateOrders:
 class TestMeasureLivePerformance:
     """
     measure_live_performance() computes REAL money math (FIFO realized/
-    unrealized P&L) directly from the trade log CSV — this is what an
+    unrealized P&L) directly from the trade log CSV, this is what an
     investor would actually see as "how much have I made or lost." A bug
     here means reporting wrong dollar amounts, so the math is checked by
     hand in the test itself, not just asserted against another function's output.
@@ -225,7 +225,7 @@ class TestMeasureLivePerformance:
             measure_live_performance("2026-01-01", "2026-03-01", log_path=str(tmp_path / "nonexistent.csv"))
 
     def test_dry_run_filter_excludes_the_other_mode(self, tmp_path):
-        # log_orders() writes both dry-run and live rows to the SAME file — without
+        # log_orders() writes both dry-run and live rows to the SAME file, without
         # filtering, a report could silently mix simulated and real fills.
         log_path = tmp_path / "trades.csv"
         with open(log_path, "w", newline="") as f:
@@ -246,14 +246,14 @@ class TestMeasureLivePerformance:
 class TestRunMultiPortfolio:
     """
     run_multi_portfolio() must keep each portfolio's signal, sizing, and
-    trade log fully independent — these tests confirm both the current
+    trade log fully independent, these tests confirm both the current
     dict-based input shape (with per-portfolio custom_weights) and the older
     plain-list shape (kept for backward compatibility) work, and that
     separate log files are actually created per portfolio, not merged.
     """
 
     def _mock_fetch(self, tickers, lookback_days=400, fmp_api_key=None, eodhd_api_key=None):
-        # Deterministic (seeded) synthetic price panel — isolates this test
+        # Deterministic (seeded) synthetic price panel, isolates this test
         # from network access and from real-vendor data changing over time.
         dates = pd.bdate_range("2025-01-01", "2026-07-09")
         rng = np.random.default_rng(1)
@@ -263,7 +263,7 @@ class TestRunMultiPortfolio:
     def test_dict_shape_with_custom_weights(self, monkeypatch, tmp_path):
         # Confirms two portfolios with DIFFERENT settings (one algorithmic,
         # one hand-specified weights) both run correctly in the same call and
-        # log to separate files — the core "multiple portfolios, same
+        # log to separate files, the core "multiple portfolios, same
         # strategy" guarantee this function exists to provide.
         monkeypatch.setattr(live_signal, "fetch_live_prices", self._mock_fetch)
         monkeypatch.chdir(tmp_path)
@@ -296,7 +296,7 @@ class TestRunMultiPortfolio:
 class TestComputeAggregateDrift:
     """
     Live-trading equivalent of the backtest's aggregate-drift
-    skip — same formula, extracted as a pure function so it's directly
+    skip, same formula, extracted as a pure function so it's directly
     unit-testable without a live price feed. Hand-verifiable numbers, not just
     "ran without error" (matching this suite's convention for numeric claims).
     """
@@ -312,7 +312,7 @@ class TestComputeAggregateDrift:
 
     def test_full_exit_counts_as_drift(self):
         # A ticker with no target (full exit) still contributes its whole
-        # current value to the drift sum — 200 / 1000 = 0.20.
+        # current value to the drift sum, 200 / 1000 = 0.20.
         drift = compute_aggregate_drift(
             target_dollar={}, current_value={"A": 200.0}, total_value=1000.0,
         )
@@ -325,7 +325,7 @@ class TestComputeAggregateDrift:
 class TestDeriveEntryDate:
     """
     Live-side equivalent of the backtest's entry_dates
-    tracking — entry date must persist across partial adds/trims and reset
+    tracking, entry date must persist across partial adds/trims and reset
     only when the position was last FULLY flat, matching the backtest's exact
     semantics (not just "most recent BUY", which would understate days_held
     for a position that's simply been added to).
@@ -383,7 +383,7 @@ class TestDeriveEntryDate:
 class TestBuildPositionPerformance:
     """
     build_position_performance() surfaces per-ticker return-since-entry for the reports'
-    "Position Performance" section — reusing avg_entry_price (already tracked in
+    "Position Performance" section, reusing avg_entry_price (already tracked in
     current_positions for stop-loss gating) and derive_entry_date() (already used for
     time-stop gating), just not previously rendered anywhere.
     """
@@ -432,7 +432,7 @@ class TestBuildPositionPerformance:
         assert result == {}
 
     def test_undeterminable_entry_date_does_not_omit_the_row(self, tmp_path):
-        # Trade log doesn't cover this ticker's history (e.g. predates the log) — the row
+        # Trade log doesn't cover this ticker's history (e.g. predates the log), the row
         # still renders with entry_date=None rather than being dropped entirely.
         log_path = self._write_log(tmp_path, [])
         current_positions = {"XLK": {"shares": 10, "avg_entry_price": 50.0}}
@@ -466,7 +466,7 @@ class TestBuildPositionPerformance:
 
 class TestCorrelationSpikeScaling:
     """
-    use_correlation_spike_regime's live-trading equivalent —
+    use_correlation_spike_regime's live-trading equivalent,
     same defensive scaling the backtest applies (regime_scalar clamped down to
     min_gross_exposure), wired into compute_target_weights() at the exact point
     the regime filter already scales gross_exposure. Reuses the same synthetic
@@ -516,7 +516,7 @@ class TestCorrelationSpikeScaling:
 class TestIBKRConnectionRetry:
     """
     place_orders_ibkr() retries the CONNECTION phase (before any order
-    is sent) but must NEVER retry order submission itself — a disconnect
+    is sent) but must NEVER retry order submission itself, a disconnect
     after an order was actually sent but before its confirmation arrived could
     otherwise cause a duplicate order on retry, a much worse outcome than
     failing the run cleanly. This test confirms the connection retry count and
@@ -543,7 +543,7 @@ class TestIBKRConnectionRetry:
 
 def _install_fake_ibkr(monkeypatch, submission_log):
     """
-    Shared mock harness for place_orders_ibkr() tests — bypasses the real
+    Shared mock harness for place_orders_ibkr() tests, bypasses the real
     threaded message loop entirely (connect()/run() become synchronous no-ops) and
     makes every placeOrder() call fill instantly, recording (action, symbol, shares)
     so tests can assert on submission order and sizing without a real/mocked
@@ -573,11 +573,11 @@ def _install_fake_ibkr(monkeypatch, submission_log):
 class TestFractionalOrderFlooring:
     """
     IBKR does not support fractional EQUITY/ETF share orders via the API under any
-    circumstances — confirmed empirically (error 10243) even after correctly setting
+    circumstances, confirmed empirically (error 10243) even after correctly setting
     cashQty per IBKR's own official sample code: cashQty only authorizes fractional fills
     for forex/CASH-pair orders, not STK contracts. place_orders_ibkr() floors fractional
     share counts to whole shares at the submission boundary as the only way to actually
-    place an order — these tests confirm that flooring (and the drop-if-zero case).
+    place an order, these tests confirm that flooring (and the drop-if-zero case).
     """
 
     def test_fractional_order_floors_to_whole_shares(self, monkeypatch, tmp_path):
@@ -599,12 +599,12 @@ class TestFractionalOrderFlooring:
         with caplog.at_level("WARNING"):
             ls.place_orders_ibkr(orders, port=9999, alerts_log_path=str(tmp_path / "alerts_log.csv"))
 
-        assert submission_log == []  # never submitted — 0 whole shares isn't a valid order
+        assert submission_log == []  # never submitted, 0 whole shares isn't a valid order
         assert any("floors to 0 whole shares" in r.message for r in caplog.records)
 
     def test_fractional_order_flooring_to_zero_is_recorded_in_results(self, monkeypatch, tmp_path):
         # A ticker dropped for flooring to 0 whole shares never gets a real IBKR orderId, so
-        # _collect_results() alone would silently omit it entirely — place_orders_ibkr()
+        # _collect_results() alone would silently omit it entirely, place_orders_ibkr()
         # tracks it separately (dropped_orders) and merges it back in, so callers building the
         # rebalance summary email's "What Actually Happened" column can still see it.
         import momentum_trading.execution.live_signal as ls
@@ -630,7 +630,7 @@ class TestFractionalOrderFlooring:
 class TestExtendedHoursOrders:
     """
     IBKR/exchanges reject plain MKT orders outside regular trading hours (error 201, "Exchange
-    is closed") — and MKT orders never work outside RTH at all, confirmed against IBKR's own
+    is closed"), and MKT orders never work outside RTH at all, confirmed against IBKR's own
     TWS API docs; only LMT orders with outsideRth=True do. allow_extended_hours=True switches
     place_orders_ibkr() to that combination; these tests confirm the order actually gets built
     that way, that the buffer direction is correct for BUY vs. SELL, and that a ticker with no
@@ -716,7 +716,7 @@ class TestExtendedHoursOrders:
         orders = {"BUY1": {"action": "BUY", "shares": 5}}
         ls.place_orders_ibkr(orders, port=9999, expected_prices={"BUY1": 100.0},
                               alerts_log_path=str(tmp_path / "alerts_log.csv"))
-        # allow_extended_hours not passed — must default to off, unaffected behavior
+        # allow_extended_hours not passed, must default to off, unaffected behavior
 
         order = captured[0]
         assert order["orderType"] == "MKT"
@@ -726,12 +726,12 @@ class TestExtendedHoursOrders:
 class TestInformationalOrderErrorDoesNotCorruptStatus:
     """
     IBKR error 10349 ("Order TIF was set to DAY based on order preset") carries a real
-    orderId but is not a failure — confirmed empirically against a real paper account
+    orderId but is not a failure, confirmed empirically against a real paper account
     (orders carrying this exact code went on to fill seconds later with a real
     execDetails/commissionReport). Before this fix, place_orders_ibkr()'s error() callback
     unconditionally overwrote the order's tracked status to "ERROR: ..." for ANY error
     callback matching that orderId, and the poll loop treats status.startswith("ERROR") as
-    terminal — so an order that was actually fine (or still pending) got misreported as
+    terminal, so an order that was actually fine (or still pending) got misreported as
     rejected and the code stopped watching it too early.
     """
 
@@ -745,7 +745,7 @@ class TestInformationalOrderErrorDoesNotCorruptStatus:
             pass
 
         def fake_place_order(self, orderId, contract, order):
-            # Simulate IBKR sending the informational TIF notice BEFORE the real fill —
+            # Simulate IBKR sending the informational TIF notice BEFORE the real fill,
             # exactly the ordering observed in the real log that exposed this bug.
             self.error(orderId, 10349, "Order TIF was set to DAY based on order preset.")
             self.orderStatus(orderId, "Filled", order.totalQuantity, 0, 100.0)
@@ -794,7 +794,7 @@ class TestInformationalOrderErrorDoesNotCorruptStatus:
 class TestSellsBeforeBuys:
     """
     place_orders_ibkr() must submit and confirm ALL sells before
-    submitting any buy — a buy submitted before its funding sell clears can be
+    submitting any buy, a buy submitted before its funding sell clears can be
     rejected on a cash account, or silently rely on margin buying power this code
     never checks. Mirrors the backtest engine's explicit sells-first/buys-second
     structure (momentum_backtest.py's run_risk_managed_backtest), closing a real
@@ -826,7 +826,7 @@ class TestSellsBeforeBuys:
         assert all(r["status"] == "Filled" for r in results.values())
 
     def test_sells_only_never_waits_on_buy_phase(self, monkeypatch, tmp_path):
-        # No buys at all — must not error or hang on an empty buy phase.
+        # No buys at all, must not error or hang on an empty buy phase.
         import momentum_trading.execution.live_signal as ls
         submission_log = []
         _install_fake_ibkr(monkeypatch, submission_log)
@@ -841,7 +841,7 @@ class TestCashAwareBuySizing:
     """
     After sells clear, BUYs are checked against real available
     cash via available_cash_fn (injected here so no real IBKR account-summary round
-    trip is needed). Default behavior is warn-only — submit as computed, let IBKR's
+    trip is needed). Default behavior is warn-only, submit as computed, let IBKR's
     own fill/reject be the backstop; auto_reduce_on_insufficient_cash additionally
     scales BUY sizes down (floored to whole shares) to fit.
     """
@@ -956,7 +956,7 @@ class TestCashAwareBuySizing:
 class TestAccountValueTag:
     """
     get_ibkr_account_value()'s tag parameter must actually
-    control which accountSummary tag is read — this is what lets the cash-aware
+    control which accountSummary tag is read, this is what lets the cash-aware
     buy sizing above reuse the function for "AvailableFunds" instead of only ever
     reading "NetLiquidation".
     """
@@ -1012,5 +1012,5 @@ class TestAccountValueTag:
         monkeypatch.setattr(EClient, "reqAccountSummary", fake_req_account_summary)
         monkeypatch.setattr(EClient, "disconnect", fake_disconnect)
 
-        result = ls.get_ibkr_account_value(port=9999)  # no tag= — must default to NetLiquidation
+        result = ls.get_ibkr_account_value(port=9999)  # no tag=, must default to NetLiquidation
         assert result == 50000.00

@@ -1,10 +1,10 @@
 """
 tests/core/test_functions_quant_extensions.py
 
-Covers the new live-performance-report wiring added to core/functions_quant_extensions.py —
+Covers the new live-performance-report wiring added to core/functions_quant_extensions.py,
 since_inception_performance(), daily_window_comparison(), monthly_window_comparison(). None of
 functions.py/functions_quant_extensions.py had any prior pytest coverage at all (only exercised
-via notebooks) — these tests are scoped to the NEW additions only, not a retroactive audit of
+via notebooks), these tests are scoped to the NEW additions only, not a retroactive audit of
 the pre-existing module.
 
 Run with: pytest tests/core/test_functions_quant_extensions.py -v
@@ -36,7 +36,7 @@ class TestSinceInceptionPerformance:
         assert "error" in result
 
     def test_short_history_computes_return_stats_but_not_ratios(self, tmp_path):
-        # Sharpe/Sortino need >= 252 daily rows (functions.py's own threshold) — a 30-row
+        # Sharpe/Sortino need >= 252 daily rows (functions.py's own threshold), a 30-row
         # history must gracefully report None for those, not raise or fabricate a number.
         rng = np.random.default_rng(0)
         n = 30
@@ -84,7 +84,7 @@ class TestDailyWindowComparison:
         assert "error" in result
 
     def test_omits_windows_without_enough_history(self, tmp_path):
-        # Only 3 days of history — "2 Week"/"3 Week" must be absent, not NaN or fabricated.
+        # Only 3 days of history, "2 Week"/"3 Week" must be absent, not NaN or fabricated.
         dates = pd.date_range("2026-06-01", periods=3, freq="D")
         snapshot_dir = _write_snapshot_csv(tmp_path, "p1", dates, [0.01, 0.01, 0.01], [0.005, 0.005, 0.005])
         result = daily_window_comparison("p1", snapshot_dir=snapshot_dir)
@@ -106,7 +106,7 @@ class TestMonthlyWindowComparison:
         assert "error" in result
 
     def test_only_available_windows_present_for_short_history(self, tmp_path):
-        # ~2 months of history — "1 Month" should be present, "1 Year" must not be.
+        # ~2 months of history, "1 Month" should be present, "1 Year" must not be.
         rng = np.random.default_rng(1)
         n = 40
         dates = pd.date_range("2026-01-01", periods=n, freq="B")
@@ -122,7 +122,7 @@ class TestMonthlyWindowComparison:
         # Regression guard for the exact bug found during development: functions.py's
         # trailing_returns()/return_period_dates() raised KeyError against short daily-snapshot
         # data (the "Since Inception" window's lookback fell outside the fetched market-calendar
-        # schedule). monthly_window_comparison() deliberately doesn't use that machinery —
+        # schedule). monthly_window_comparison() deliberately doesn't use that machinery,
         # this just confirms it never raises, for histories from 2 rows up to a few months.
         for n in (2, 5, 15, 40):
             dates = pd.date_range("2026-01-01", periods=n, freq="B")

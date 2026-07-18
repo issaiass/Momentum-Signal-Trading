@@ -1,4 +1,4 @@
-# Alert Log (Epic 29)
+# Alert Log
 
 ## What this is
 
@@ -7,7 +7,7 @@ encounters -- stop-loss and time-stop triggers, circuit-breaker trips, ticker ov
 allocation errors, insufficient cash, slippage exceeded, correlation spikes, aggregate-drift
 skips, and stale price feeds. Written to `logs/alerts_log.csv`.
 
-**Why this exists:** before Epic 29, all of these events were only ever `logger.warning()`/
+**Why this exists:** before this log existed, all of these events were only ever `logger.warning()`/
 `logger.error()` console lines. That's fine if stdout happens to be redirected to a file (the
 Docker cron entries do this), but there was no dedicated, structured, queryable history the way
 trade decisions and email commands already had -- and nothing to email back on request. This
@@ -58,10 +58,10 @@ timestamp, portfolio, alert_type, severity, message, row_hash
 | `TIME_STOP_TRIGGERED` | CRITICAL | `daily_runner.py::check_and_handle_time_stops()` | A position has been held >= `max_holding_days` |
 | `AGGREGATE_DRIFT_SKIP` | INFO | `execution/live_signal.py::run()` | Whole-portfolio drift was below `aggregate_drift_threshold`; the rebalance was skipped |
 | `CORRELATION_SPIKE_DETECTED` | WARNING | `execution/live_signal.py::compute_target_weights()` | Cross-asset correlation spiked; exposure was defensively scaled down to `min_gross_exposure` |
-| `TICKER_OVERLAP` | WARNING | `daily_runner.py` (main loop, Epic 26) | The same ticker appears in more than one portfolio sharing an IBKR account -- logged under portfolio `"ALL"` |
-| `CAPITAL_ALLOCATION_ERROR` | CRITICAL | `daily_runner.py` (main loop, Epic 26) | Ambiguous or invalid `total_value: null` configuration across portfolios -- the run refuses to proceed; logged under portfolio `"ALL"` |
-| `OVER_ALLOCATION` | WARNING | `daily_runner.py` (main loop, Epic 26) | Fixed `total_value`s across portfolios exceed the real account value -- logged under portfolio `"ALL"` |
-| `INSUFFICIENT_CASH` | WARNING | `execution/live_signal.py::place_orders_ibkr()` | Buy orders total more than available cash after sells cleared (Epic 28) |
+| `TICKER_OVERLAP` | WARNING | `daily_runner.py` (main loop) | The same ticker appears in more than one portfolio sharing an IBKR account -- logged under portfolio `"ALL"` |
+| `CAPITAL_ALLOCATION_ERROR` | CRITICAL | `daily_runner.py` (main loop) | Ambiguous or invalid `total_value: null` configuration across portfolios -- the run refuses to proceed; logged under portfolio `"ALL"` |
+| `OVER_ALLOCATION` | WARNING | `daily_runner.py` (main loop) | Fixed `total_value`s across portfolios exceed the real account value -- logged under portfolio `"ALL"` |
+| `INSUFFICIENT_CASH` | WARNING | `execution/live_signal.py::place_orders_ibkr()` | Buy orders total more than available cash after sells cleared |
 | `CIRCUIT_BREAKER_TRIPPED` | CRITICAL | `risk/circuit_breaker.py::check_circuit_breaker()` | Drawdown from peak equity breached the percentage and/or dollar breaker; rebalancing halted for that portfolio |
 | `CIRCUIT_BREAKER_RESUMED` | INFO | `risk/circuit_breaker.py::resume_trading()` | An operator explicitly cleared a halted circuit breaker (no automatic clearing exists) |
 | `STALE_PRICE_FEED` | CRITICAL | `daily_runner.py` (main loop) | Latest price data is older than `max_price_staleness_minutes` allows; that portfolio's run was skipped |
@@ -78,7 +78,7 @@ position on its own. If you run multiple portfolios against one real account, ex
 
 - **Directly**: it's a plain CSV at `logs/alerts_log.csv` -- open it, `pandas.read_csv()` it, or
   `grep` it like any other log.
-- **Via email** (Epic 29, Story 29.5): send `ACTION: ALERTS_REPORT` / `PORTFOLIO: <name or ALL>`
+- **Via email**: send `ACTION: ALERTS_REPORT` / `PORTFOLIO: <name or ALL>`
   / optional `LIMIT:` (default 10, capped at 50) to get the most recent matching rows emailed
   back, newest first. See `docs/EMAIL_COMMANDS.md`.
 - **Programmatically**: `core.audit_log.read_recent_alerts(portfolio, limit, log_path)` --

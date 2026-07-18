@@ -1,15 +1,15 @@
 """
-tests/test_epic4_reporting.py
+tests/test_reporting.py
 
-Covers Epic 4's investor-facing reporting layer: the portfolio snapshot
+Covers the investor-facing reporting layer: the portfolio snapshot
 (continuous "where things stand" record, independent of the trade log),
 rank/signal-score context attached to each trade for later review, benchmark-
 relative cumulative return comparison, and correlation against a user's other
 (external) holdings. Also confirms the trade-log schema changes made for this
-epic (new rank/signal_score columns) don't break the existing FIFO P&L parsing
-from Epic 4's predecessor work.
+layer (new rank/signal_score columns) don't break the existing FIFO P&L parsing
+from the predecessor work.
 
-Run with: pytest tests/test_epic4_reporting.py -v
+Run with: pytest tests/test_reporting.py -v
 """
 import pytest
 import pandas as pd
@@ -187,7 +187,7 @@ def pd_isna(x):
 
 class TestMultiLookbackBlending:
     """
-    Epic 9, Story 9.2: blend_momentum_scores() combines multiple lookback
+    blend_momentum_scores() combines multiple lookback
     windows into one signal. The math is checked against a hand-computed
     weighted sum (not just "did it run"), and mismatched lookbacks/weights
     lengths must fail loudly rather than silently truncating or broadcasting

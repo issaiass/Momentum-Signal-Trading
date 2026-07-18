@@ -69,7 +69,7 @@ class TestConfigSchemaValidation:
             validate_config_schema(bad, "test.yaml")
 
     def test_two_null_total_values_raises(self):
-        # Epic 26, Story 26.1: total_value: null means "account remainder", which is
+        # total_value: null means "account remainder", which is
         # ambiguous with more than one candidate -- must fail at load time, not
         # silently double-count real capital across portfolios sharing an account.
         bad = {"portfolios": {
@@ -87,7 +87,7 @@ class TestConfigSchemaValidation:
         validate_config_schema(ok, "test.yaml")  # should not raise
 
     def test_non_bool_send_warning_raises(self):
-        # Epic 27, Story 27.2: send_warning: "false" is a truthy non-empty string in
+        # send_warning: "false" is a truthy non-empty string in
         # Python -- would otherwise silently mean "send" via default truthiness, the
         # opposite of what someone writing that value almost certainly intended. This
         # field gates whether a real capital-safety risk reaches you by email at all,
@@ -142,17 +142,17 @@ class TestLoadConfig:
             load_config(str(path))
 
     def test_top_n_independent_per_portfolio(self, tmp_path):
-        # Epic 23: confirms top_n is genuinely per-portfolio, not a single value
+        # Confirms top_n is genuinely per-portfolio, not a single value
         # shared across a config.yaml with several portfolios -- four portfolios,
         # four different top_n values, each resolved independently via
         # risk_overrides on top of one shared default_risk.top_n.
         cfg = {
             "default_risk": {"holding_period": 1, "top_n": 3},   # portfolio1 uses this as-is
             "portfolios": {
-                # Epic 26: explicit total_value on every portfolio here -- unrelated to what
-                # this test checks (top_n independence), but required since Epic 26 forbids
-                # more than one portfolio with total_value: null (unset defaults to null) in
-                # the same config.yaml.
+                # Explicit total_value on every portfolio here -- unrelated to what
+                # this test checks (top_n independence), but required since more than
+                # one portfolio with total_value: null (unset defaults to null) in
+                # the same config.yaml is forbidden.
                 "portfolio1": {"tickers": ["SPY", "QQQ", "XLK"], "total_value": 1000.0},
                 "portfolio2": {"tickers": ["XLF", "XLE", "GLD", "TLT"], "total_value": 1000.0,
                                "risk_overrides": {"top_n": 10}},
@@ -256,7 +256,7 @@ class TestCircuitBreaker:
 
 class TestMaxDrawdownEmailOverride:
     """
-    Epic 14, Story 14.2: SET_MAX_DRAWDOWN's core safety property -- the
+    SET_MAX_DRAWDOWN's core safety property -- the
     override can only TIGHTEN the effective breaker threshold, never loosen
     it, enforced at the point of USE (get_effective_max_drawdown_pct), not
     at email-parse time. A regression here would mean a malformed or
@@ -322,7 +322,7 @@ class TestMaxDrawdownEmailOverride:
 
 class TestTimeStops:
     """
-    Epic 25, Story 25.2: live-trading equivalent of the backtest's
+    Live-trading equivalent of the backtest's
     max_holding_days -- independent of and in addition to the price-based
     stop-loss (check_and_handle_stop_losses), sharing its auto_execute_stop_loss
     flag rather than a second config field.
@@ -330,7 +330,7 @@ class TestTimeStops:
 
     @pytest.fixture(autouse=True)
     def _isolate_alerts_log(self, tmp_path, monkeypatch):
-        # Epic 29, Story 29.3: check_and_handle_time_stops() now also calls
+        # check_and_handle_time_stops() now also calls
         # log_alert(), which resolves its path via the module-global
         # ALERTS_LOG_PATH (imported from core.audit_log, resolved once at
         # import time into logs_dir()/alerts_log.csv, same pattern as every
@@ -397,7 +397,7 @@ class TestTimeStops:
         assert logged.iloc[0]["action"] == "SELL"
         assert logged.iloc[0]["ticker"] == "XLK"
 
-        # Epic 29, Story 29.3: TIME_STOP_TRIGGERED must land in the alert log,
+        # TIME_STOP_TRIGGERED must land in the alert log,
         # tagged with the portfolio it actually fired for.
         rows = read_recent_alerts(portfolio="p1", log_path=str(tmp_path / "data" / "alerts_log.csv"))
         assert len(rows) == 1
@@ -423,9 +423,9 @@ class TestTimeStops:
 
 class TestStopLossCheck:
     """
-    Epic 29, Story 29.6: check_and_handle_stop_losses() had no dedicated test
-    at all before this epic (only exercised indirectly). Added alongside the
-    Story 29.3 log_alert() wiring to confirm STOP_LOSS_TRIGGERED actually
+    check_and_handle_stop_losses() had no dedicated test
+    at all before now (only exercised indirectly). Added alongside the
+    log_alert() wiring to confirm STOP_LOSS_TRIGGERED actually
     lands in the alert log with the right portfolio tag -- not just that the
     ticker gets flagged.
     """
@@ -463,7 +463,7 @@ class TestStopLossCheck:
 
 class TestAlertsReportEmailCommand:
     """
-    Epic 29, Story 29.5: ALERTS_REPORT is handled specially in
+    ALERTS_REPORT is handled specially in
     check_and_apply_email_commands() -- BEFORE the normal per-portfolio
     targets loop, since PORTFOLIO here means "filter to this portfolio's
     alerts" (a query), not "apply this action to these portfolios" like every
@@ -564,9 +564,71 @@ class TestAlertsReportEmailCommand:
         assert sent == []
 
 
+class TestSameInboxWarning:
+    """
+    TRUSTED_SENDER_EMAIL == IMAP_USER is a fully supported, common setup (see
+    docs/EMAIL_COMMANDS.md), but it means ordinary correspondence from that address gets
+    treated as a failed command attempt and replied to once (by design -- see
+    tests/interfaces/test_email_commands.py::TestReplyCascadeGuard for why this can no longer
+    cascade). This visibility warning exists so that tradeoff isn't silent -- it must fire when
+    the addresses match and stay silent otherwise.
+    """
+
+    def _configure_email_env(self, monkeypatch, imap_user, trusted_sender):
+        monkeypatch.setenv("IMAP_HOST", "imap.example.com")
+        monkeypatch.setenv("IMAP_USER", imap_user)
+        monkeypatch.setenv("IMAP_PASS", "secret")
+        monkeypatch.setenv("TRUSTED_SENDER_EMAIL", trusted_sender)
+
+    def test_warns_when_trusted_sender_matches_imap_user(self, monkeypatch, caplog):
+        self._configure_email_env(monkeypatch, "bot@example.com", "BOT@example.com")
+        monkeypatch.setattr(daily_runner, "poll_and_process_commands", lambda *a, **k: [])
+
+        with caplog.at_level("WARNING", logger="daily_runner"):
+            daily_runner.check_and_apply_email_commands(["p1"], ibkr_port=7497, dry_run=True)
+
+        assert any("same address as IMAP_USER" in r.message for r in caplog.records)
+
+    def test_no_warning_when_addresses_differ(self, monkeypatch, caplog):
+        self._configure_email_env(monkeypatch, "bot-inbox@example.com", "trader@example.com")
+        monkeypatch.setattr(daily_runner, "poll_and_process_commands", lambda *a, **k: [])
+
+        with caplog.at_level("WARNING", logger="daily_runner"):
+            daily_runner.check_and_apply_email_commands(["p1"], ibkr_port=7497, dry_run=True)
+
+        assert not any("same address as IMAP_USER" in r.message for r in caplog.records)
+
+
+class TestTestEmailFlag:
+    """
+    --test-email must exit immediately based on run_email_diagnostics()'s result,
+    before any config.yaml loading or portfolio logic runs -- it's a pure email-setup check,
+    usable even with no config.yaml present at all.
+    """
+
+    def _run_main_with_args(self, monkeypatch, args, diagnostics_result):
+        import momentum_trading.interfaces.email_diagnostics as email_diagnostics
+        monkeypatch.setattr(email_diagnostics, "run_email_diagnostics", lambda: diagnostics_result)
+        monkeypatch.setattr("sys.argv", ["daily-runner"] + args)
+
+        def _fail_if_called(*a, **k):
+            raise AssertionError("load_config() should not be called when --test-email is passed")
+        monkeypatch.setattr(daily_runner, "load_config", _fail_if_called)
+
+        with pytest.raises(SystemExit) as exc_info:
+            daily_runner.main()
+        return exc_info.value.code
+
+    def test_success_exits_zero(self, monkeypatch):
+        assert self._run_main_with_args(monkeypatch, ["--test-email"], True) == 0
+
+    def test_failure_exits_one(self, monkeypatch):
+        assert self._run_main_with_args(monkeypatch, ["--test-email"], False) == 1
+
+
 class TestResolveTotalValues:
     """
-    Epic 26, Story 26.2: total_value: null must mean "account value minus every
+    total_value: null must mean "account value minus every
     OTHER portfolio's fixed total_value" -- the OLD behavior (each null portfolio
     independently pulling the FULL account value) silently double/triple-counted the
     same real capital across portfolios sharing one IBKR account. These tests use an
@@ -623,7 +685,7 @@ class TestResolveTotalValues:
 
 class TestCheckTickerOverlap:
     """
-    Epic 26, Story 26.4: portfolios sharing a ticker on the same real IBKR account
+    Portfolios sharing a ticker on the same real IBKR account
     would each independently compute and submit orders against the same position --
     this is surfaced as a warning (not blocking, per explicit product decision), so
     it must correctly identify exactly which tickers and portfolios are involved.

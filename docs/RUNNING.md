@@ -45,7 +45,7 @@ can verify the signal/sizing/order output without waiting for a real rebalance d
 Add more entries under `portfolios:`. Each portfolio has its own signal, sizing, orders, and
 trade log (`logs/live_trades_log_<name>.csv`) -- but if two or more portfolios trade through
 the **same real IBKR account** (the normal case: one `--port`, one TWS/Gateway login), their
-capital and positions are NOT automatically kept independent. Epic 26 makes this safe rather
+capital and positions are NOT automatically kept independent. The system makes this safe rather
 than silently wrong; see the capital and ticker-overlap notes below before running more than
 one portfolio `--live`.
 
@@ -233,7 +233,7 @@ For a chart and cumulative return vs. benchmark, open `portfolio_snapshot_report
 intentionally minimal (one chart, one table), meant for a quick investor-facing check, not
 a replacement for the full trade log or `measure_live_performance()`.
 
-## 4.7. Staged Operational Rollout (Epic 5, Story 5.2)
+## 4.7. Staged Operational Rollout
 
 Don't jump straight to Section 4 (live trading). Four stages, in order — but first, a basic
 sanity gate that applies before Stage 1:
@@ -306,7 +306,7 @@ daily-runner --live --port 7496 --confirm-live-trading
 Only after Stage 3's checklist is complete and reviewed. Scale `total_value` up, re-approve
 the config (new `approved_date`), and continue the ongoing discipline in 4.8 below.
 
-## 4.8. Ongoing Operating Discipline (Epic 5, Story 5.3)
+## 4.8. Ongoing Operating Discipline
 
 **Monthly review checklist** (or more often if volatility is elevated):
 - [ ] Any circuit-breaker trips since last review? Understood and resolved, not just cleared?
@@ -327,7 +327,7 @@ kill_criteria:
 The point of writing these down now is that the decision to stop isn't made emotionally
 during a drawdown — it's a pre-committed rule you follow.
 
-## 4.9. Manual Override Policy (Epic 6, Story 6.1)
+## 4.9. Manual Override Policy
 
 Decide, in advance, whether you will ever manually skip or alter a scheduled rebalance (e.g.
 "I'll skip this month, the market feels bad"). The honest default recommendation: **don't** —
@@ -339,7 +339,7 @@ override decision with reasoning — extend `logs/live_trades_log_<name>.csv`'s 
 manually if needed, e.g. a `manual_override_log.csv` with the same date/reason/decision-maker
 fields, so the decision is auditable later.
 
-## 4.10. Tax Awareness (Epic 6, Story 6.2)
+## 4.10. Tax Awareness
 
 Monthly rotation across a changing ETF universe generates frequent **short-term capital
 gains** in a taxable account. Nothing in this codebase models tax drag, tax-loss harvesting,
@@ -352,7 +352,7 @@ after-tax return expectation — e.g. at a combined ~30-40% short-term rate, a s
 taxes. This is a rough illustration, not a substitute for real tax advice from a professional
 who knows your situation.
 
-## 4.11. Event-Calendar Awareness (Epic 6, Story 6.5)
+## 4.11. Event-Calendar Awareness
 
 Fixed monthly rebalance dates (`holding_period=1`) can land near FOMC meetings, CPI releases,
 or earnings clusters for sector ETFs — no automated logic here checks for this. At minimum,
@@ -360,14 +360,14 @@ glance at what's scheduled around each rebalance date before `--live` runs, espe
 Stage 2/3 of the rollout above. This is a manual awareness recommendation, not an automated
 feature in this codebase.
 
-## 4.12. New capabilities (Epics 8-13) — quick pointers
+## 4.12. Additional capabilities — quick pointers
 
 - **Alternative position sizing**: set `sizing_method: score_proportional` in `config.yaml`'s
   risk config to weight by momentum strength instead of inverse volatility. See
   `STRATEGY_THEORY.md` for the theory and a worked comparison example.
 - **Multi-lookback signals**: `functions_quant_extensions.blend_momentum_scores()` combines
   multiple lookback windows (e.g. 3/6/12-month) into one signal — see Notebook 2 for a demo.
-- **Additional safety checks** (Epic 10): `max_dollar_drawdown`, `max_slippage_tolerance_pct`,
+- **Additional safety checks**: `max_dollar_drawdown`, `max_slippage_tolerance_pct`,
   `max_price_staleness_minutes`, `max_holding_days` — all in `config.yaml`'s risk config,
   all disabled by default (`null`/`0`).
 - **Email notifications & monthly reports**: see `EMAIL_REPORTING.md`.
@@ -377,7 +377,7 @@ feature in this codebase.
 - **Autostart on reboot**: see `DEPLOYMENT.md`'s new "Autostart on Reboot" section for
   Docker/native-Windows/native-Linux specifics.
 
-## 4.13. Order execution: cash vs. margin IBKR accounts (Epic 28)
+## 4.13. Order execution: cash vs. margin IBKR accounts
 
 `place_orders_ibkr()` always submits SELL orders first and waits for them to reach a terminal
 status (filled, cancelled, or errored) before submitting any BUY -- not configurable, since
@@ -451,6 +451,9 @@ real" section to change what the *scheduled* job does). The `docker exec ... dai
 --live ...` forms above are for
 manually triggering a one-off run outside that schedule; they also require `IBKR_HOST`/
 `IBKR_PORT` to actually reach your TWS/Gateway from inside the container (see `DEPLOYMENT.md`).
+`IBKR_PORT` also sets `--port`'s default when the flag is omitted, so if it's already correct
+in `.env`, an explicit `--port` isn't strictly required — it's shown above for clarity, and
+still overrides `IBKR_PORT` if both are set.
 
 **Changing the schedule itself** (not a one-off run) is a `.env` + container-recreate
 operation, not a command you run inside the container — see `DEPLOYMENT.md`'s cron schedule

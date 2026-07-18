@@ -2,7 +2,7 @@
 """
 risk_monitor.py
 
-Epic 2, Story 2.1: independent oversight process, deliberately separate from
+Independent oversight process, deliberately separate from
 daily_runner.py's trading logic. This script has READ-ONLY access to trade
 logs -- it cannot place, modify, or cancel orders, and does not import
 live_signal.py's order-execution functions at all. Its only power is to write

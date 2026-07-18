@@ -1,16 +1,23 @@
 """
 tests/test_email_commands.py
 
-Covers Epic 13's security-critical email command parsing: sender
+Covers security-critical email command parsing: sender
 authentication, pydantic validation per command type, the ADJUST_PARAM
 allowlist (the single most important security boundary in this module),
 and fail-safe behavior on malformed input.
 
 Run with: pytest tests/test_email_commands.py -v
 """
+import imaplib
+from email.message import EmailMessage
+
 import pytest
 
-from momentum_trading.interfaces.email_commands import parse_command, build_reply_body, ADJUSTABLE_PARAMS
+import momentum_trading.interfaces.email_commands as email_commands_module
+from momentum_trading.interfaces.email_commands import (
+    parse_command, build_reply_body, ADJUSTABLE_PARAMS, poll_and_process_commands,
+    _is_bot_thread, BOT_SUBJECT_MARKER,
+)
 
 TRUSTED = "trader@example.com"
 
@@ -121,8 +128,8 @@ class TestAdjustParamAllowlist:
             assert lo < hi, f"{param} has invalid bounds ({lo}, {hi})"
 
     def test_top_n_in_bounds_accepted(self):
-        # Epic 29, Story 29.4: top_n joined the allowlist as a real, live-wired
-        # concentration lever (Epics 21/23) -- same category as the two
+        # top_n joined the allowlist as a real, live-wired
+        # concentration lever -- same category as the two
         # existing entries (defensive, bounded, safe to tweak mid-day).
         result = parse_command(TRUSTED, TRUSTED,
                                 "ACTION: ADJUST_PARAM\nPORTFOLIO: p1\nPARAM: top_n\nVALUE: 3")
@@ -135,9 +142,9 @@ class TestAdjustParamAllowlist:
         assert result.success is False
 
 
-class TestNewCommandsEpic14:
+class TestNewCommandsStatusAndDrawdown:
     """
-    Epic 14: STATUS (read-only, zero-risk) and SET_MAX_DRAWDOWN (scoped,
+    STATUS (read-only, zero-risk) and SET_MAX_DRAWDOWN (scoped,
     one-directional -- can only tighten, never loosen, the circuit breaker).
     The bounds check here only validates the requested value is a sane
     fraction; the "can only tighten vs. current config" enforcement happens
@@ -170,7 +177,7 @@ class TestNewCommandsEpic14:
 
 class TestAlertsReportCommand:
     """
-    Epic 29, Story 29.5: read-only, zero-risk, mirrors STATUS -- these tests
+    Read-only, zero-risk, mirrors STATUS -- these tests
     cover PARSING only (default/explicit LIMIT, bounds enforcement, ALL vs a
     specific portfolio). The actual alert-log READ + email reply is exercised
     end-to-end in tests/test_daily_runner.py, since that's where
@@ -213,7 +220,7 @@ class TestAlertsReportCommand:
 
 class TestAuditLogging:
     """
-    Epic 14, Story 14.4: every parsed attempt -- accepted or rejected -- must
+    Every parsed attempt -- accepted or rejected -- must
     be logged to the hash-chained audit trail, not just printed to console.
     This is what makes "who tried to do what, and when" queryable after the
     fact, and (via the hash chain) tamper-evident the same way the trade log is.
@@ -296,3 +303,125 @@ class TestFailSafeBehavior:
         assert len(build_reply_body(bad)) > 0
         assert "REJECTED" in build_reply_body(bad)
         assert "ACCEPTED" in build_reply_body(ok)
+
+
+class TestIsBotThread:
+    """_is_bot_thread() is the second of two guards against a same-inbox reply cascade -- the
+    X-Momentum-Trading-Bot header catches the bot's own generated replies, this catches a
+    human's reply to those replies (which never carries the header, but keeps the subject)."""
+
+    def test_marker_present_detected(self):
+        assert _is_bot_thread(f"Re: {BOT_SUBJECT_MARKER} Re: something") is True
+
+    def test_marker_absent_not_detected(self):
+        assert _is_bot_thread("Re: something entirely unrelated") is False
+
+    def test_empty_subject_safe(self):
+        assert _is_bot_thread("") is False
+
+
+def _raw_email_bytes(subject: str, from_addr: str, body: str) -> bytes:
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = from_addr
+    msg["To"] = "bot@example.com"
+    msg["Message-ID"] = f"<{abs(hash(subject))}@example.com>"
+    msg.set_content(body)
+    return msg.as_bytes()
+
+
+class _FakeIMAPConnection:
+    """Hand-rolled fake standing in for imaplib.IMAP4_SSL -- mirrors this project's existing
+    style of dependency-injected fakes (e.g. send_reply_fn) rather than introducing a mocking
+    library. Serves exactly one message per test, which is all these tests need."""
+
+    def __init__(self, raw_email: bytes):
+        self._raw = raw_email
+        self.stored_flags = []
+
+    def login(self, user, password):
+        pass
+
+    def select(self, mailbox):
+        pass
+
+    def search(self, charset, *criteria):
+        return "OK", [b"1"]
+
+    def fetch(self, msg_id, parts):
+        return "OK", [(b"1 (RFC822 {10})", self._raw)]
+
+    def store(self, msg_id, flag_cmd, flags):
+        self.stored_flags.append((msg_id, flag_cmd, flags))
+
+    def close(self):
+        pass
+
+    def logout(self):
+        pass
+
+
+class TestReplyCascadeGuard:
+    """
+    Reproduces the real incident this was built to fix -- a same-address
+    IMAP_USER/TRUSTED_SENDER_EMAIL setup where ordinary correspondence from that address (e.g.
+    a reply to an unrelated thread) gets treated as a failed command attempt and replied to.
+    Without a subject-marker guard, a human's reply to THAT reply cascades into a second round
+    (subject: "[momentum-trading] Re: [momentum-trading] Re: ..."). These tests prove the
+    cascade is capped at exactly one bounce, without suppressing the legitimate first rejection
+    -- per the requirement that this be provable in tests, not discovered against a real inbox.
+    """
+
+    def _run(self, monkeypatch, raw_email: bytes, processed_ids_path: str):
+        fake_conn = _FakeIMAPConnection(raw_email)
+        monkeypatch.setattr(imaplib, "IMAP4_SSL", lambda host: fake_conn)
+        logged = []
+        monkeypatch.setattr(email_commands_module, "log_command_attempt",
+                             lambda sender, result: logged.append((sender, result)))
+        replies = []
+        results = poll_and_process_commands(
+            "imap.example.com", "trader@example.com", "pw", "trader@example.com",
+            send_reply_fn=lambda to_addr, subject, body: replies.append((to_addr, subject, body)),
+            processed_ids_path=processed_ids_path,
+        )
+        return results, replies, logged, fake_conn
+
+    def test_reply_to_bot_thread_is_skipped_no_reply_no_log(self, tmp_path, monkeypatch):
+        raw = _raw_email_bytes(
+            subject=f'Re: {BOT_SUBJECT_MARKER} Re: "Robotics Engineer": recruiter thread',
+            from_addr="trader@example.com",
+            body="Thanks, not interested.",
+        )
+        results, replies, logged, conn = self._run(monkeypatch, raw, str(tmp_path / "processed.txt"))
+
+        assert results == []
+        assert replies == []
+        assert logged == []
+        assert conn.stored_flags == [(b"1", "+FLAGS", "\\Seen")]
+
+    def test_first_time_non_command_email_still_rejected_and_replied(self, tmp_path, monkeypatch):
+        raw = _raw_email_bytes(
+            subject='Re: "Robotics Engineer": recruiter thread',
+            from_addr="trader@example.com",
+            body="Thanks, not interested.",
+        )
+        results, replies, logged, conn = self._run(monkeypatch, raw, str(tmp_path / "processed.txt"))
+
+        assert len(results) == 1
+        assert results[0].success is False
+        assert "Unrecognized or missing ACTION" in results[0].error
+        assert len(replies) == 1
+        assert len(logged) == 1
+
+    def test_malformed_command_attempt_still_rejected_and_replied(self, tmp_path, monkeypatch):
+        raw = _raw_email_bytes(
+            subject="My command",
+            from_addr="trader@example.com",
+            body="ACTION: PUASE\nPORTFOLIO: ALL",
+        )
+        results, replies, logged, conn = self._run(monkeypatch, raw, str(tmp_path / "processed.txt"))
+
+        assert len(results) == 1
+        assert results[0].success is False
+        assert len(replies) == 1
+        assert len(logged) == 1

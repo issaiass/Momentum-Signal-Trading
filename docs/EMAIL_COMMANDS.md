@@ -1,4 +1,4 @@
-# Email-Commanded Remote Actions (Epic 13)
+# Email-Commanded Remote Actions
 
 > **Security-sensitive feature. Read this entire document before enabling it.**
 
@@ -14,13 +14,26 @@ specific environment variables (below).
   ever parsed. This is enforced twice: the IMAP search itself only fetches mail `FROM` that
   address (so unrelated inbox mail is never touched, logged, replied to, or marked read), and
   `parse_command()` re-checks the sender again before parsing.
-- **Self-generated emails are never treated as commands.** Every alert/reply/report this system
-  sends carries an `X-Momentum-Trading-Bot` header; the poller skips anything carrying it,
-  regardless of sender. This matters if `TRUSTED_SENDER_EMAIL` is the same address as
-  `ALERT_TO_EMAIL`/`IMAP_USER` (see "Strongly recommended" note below) — without this check, the
-  bot's own alert emails would land back in its own inbox as new mail "from" the trusted sender,
-  get rejected as unrecognized commands, and trigger another reply, forever (each round's
-  subject doubling `Re: Re:`).
+- **Self-generated emails are never treated as commands, and neither is a reply to one.** This
+  matters most if `TRUSTED_SENDER_EMAIL` is the same address as `ALERT_TO_EMAIL`/`IMAP_USER` (see
+  "Strongly recommended" note below), since every outbound alert/reply then lands right back in
+  the polled inbox as new mail "from" the trusted sender. Two guards, together, stop that from
+  cascading:
+  1. Every alert/reply/report this system sends carries an `X-Momentum-Trading-Bot` header; the
+     poller skips anything carrying it. This alone stops the bot from ever replying to a message
+     *it just sent itself*.
+  2. Every outbound subject is also prefixed `[momentum-trading]`; the poller separately skips
+     any inbound email whose subject already contains that marker. This catches the case the
+     header check structurally cannot: a **human** replying to the bot's own reply. A
+     human-authored reply is a brand-new message your mail client builds — it never carries the
+     bot's custom header — but it does keep the subject prefix, since mail clients preserve/extend
+     subject lines on reply. Without this second guard, that human reply would be treated as a new
+     command attempt, get rejected again, and trigger another reply — doubling `Re: Re:` in the
+     subject each round.
+
+  Neither guard suppresses the **first** rejection reply for a genuine non-command email from the
+  trusted sender (e.g. ordinary correspondence you send from that same address) — that reply is
+  still sent, by design (see "Fail-safe" below). Only the cascade is prevented.
 - **No open-ended parameter changes.** `ADJUST_PARAM` can only touch a small, hard-coded
   allowlist (`stop_loss_pct`, `max_position_weight`, `top_n`), each with hard numeric bounds.
   Nothing else is settable this way — everything else requires editing `config.yaml` directly,
@@ -51,10 +64,21 @@ TRUSTED_SENDER_EMAIL=trader@yourdomain.com
 **Strongly recommended:** use a dedicated inbox for `IMAP_USER`, not your primary email. This
 inbox's password grants read access to whatever commands arrive there — treat it like any
 other credential with write-adjacent power over the bot. Using the same address for everything
-(`IMAP_USER`/`TRUSTED_SENDER_EMAIL`/`SMTP_USER`/`ALERT_TO_EMAIL`) works too — the self-generated-
-email check above keeps that safe — but a dedicated inbox stays cleaner if that address also
-receives unrelated personal mail, since only messages `FROM` the trusted sender are ever fetched
-in the first place.
+(`IMAP_USER`/`TRUSTED_SENDER_EMAIL`/`SMTP_USER`/`ALERT_TO_EMAIL`) works too and cannot loop — the
+two guards above ("Self-generated emails are never treated as commands...") make that structurally
+safe, not just "safe in practice." But it isn't noise-free: since the IMAP search fetches every
+unread message `FROM` the trusted sender regardless of content, ordinary correspondence you send
+from that same address (replying to an unrelated email thread, for example) will still get one
+"not a recognized command" reply per message — expected, correct fail-safe behavior, not a bug,
+but a dedicated inbox avoids that noise entirely since it never receives unrelated personal mail
+in the first place. `daily_runner.py` also logs a one-time warning at startup if it detects
+`TRUSTED_SENDER_EMAIL == IMAP_USER`, precisely so this tradeoff isn't invisible.
+
+Note also: every reply (confirmation or rejection) is sent to `ALERT_TO_EMAIL` specifically —
+not conditionally to whichever address triggered it — since `daily_runner.py`'s reply wiring
+reuses `send_alert_email()`, which always targets `ALERT_TO_EMAIL`. In the common same-address
+setup this is the same inbox anyway; if you split addresses, replies always land in
+`ALERT_TO_EMAIL`'s inbox specifically, not the sender's.
 
 ## Command syntax
 
@@ -77,7 +101,7 @@ PORTFOLIO: <portfolio_name or ALL>
 | `TRIGGER_REPORT` | Parsed, logged | — | `ACTION: TRIGGER_REPORT`<br>`PORTFOLIO: portfolio1` |
 | `LIQUIDATE` | **No — manual only** | `CONFIRM: I confirm liquidation` (exact phrase, case-insensitive) | `ACTION: LIQUIDATE`<br>`PORTFOLIO: portfolio1`<br>`CONFIRM: I confirm liquidation` |
 | `ADJUST_PARAM` | **No — manual only** | `PARAM:` (allowlisted name), `VALUE:` (number, within bounds) | `ACTION: ADJUST_PARAM`<br>`PORTFOLIO: portfolio1`<br>`PARAM: stop_loss_pct`<br>`VALUE: 0.15` |
-| `ALERTS_REPORT` (Epic 29) | Yes — read-only, always applies | `LIMIT:` (optional, default 10, max 50) | `ACTION: ALERTS_REPORT`<br>`PORTFOLIO: portfolio1`<br>`LIMIT: 20` |
+| `ALERTS_REPORT` | Yes — read-only, always applies | `LIMIT:` (optional, default 10, max 50) | `ACTION: ALERTS_REPORT`<br>`PORTFOLIO: portfolio1`<br>`LIMIT: 20` |
 
 Use `PORTFOLIO: ALL` to apply to every portfolio in `config.yaml`. For `ADJUST_PARAM`, the
 allowlist and its bounds are:
@@ -86,7 +110,7 @@ allowlist and its bounds are:
 |---|---|---|
 | `stop_loss_pct` | `0.01` – `0.50` | Fraction, e.g. `0.15` for 15% |
 | `max_position_weight` | `0.05` – `1.00` | Fraction of portfolio in a single position |
-| `top_n` (Epic 29) | `1` – `50` | Number of top-ranked tickers to hold; same concentration lever as `config.yaml`'s `top_n` |
+| `top_n` | `1` – `50` | Number of top-ranked tickers to hold; same concentration lever as `config.yaml`'s `top_n` |
 
 For `ALERTS_REPORT`, `PORTFOLIO` means "filter to this portfolio's alerts" (or `ALL` for every
 portfolio, including cross-portfolio alerts like `TICKER_OVERLAP` that are themselves logged
@@ -122,7 +146,7 @@ still wins) — this can never be used to accidentally make the bot riskier.
   require you to take the actual action yourself (send the report manually, place the
   liquidating trades yourself, or edit `config.yaml`'s `risk_overrides` with the validated
   value).
-- **ALERTS_REPORT** (Epic 29) — read-only, replies immediately (even in dry-run) with the most
+- **ALERTS_REPORT** — read-only, replies immediately (even in dry-run) with the most
   recent `LIMIT` rows (default 10, capped at 50) from `logs/alerts_log.csv`, filtered to the
   requested portfolio (or every portfolio, for `ALL`). See `docs/ALERT_LOG.md`.
 
@@ -141,7 +165,7 @@ still wins) — this can never be used to accidentally make the bot riskier.
 
 - `email_commands.py`'s parsing/validation logic is covered by
   `tests/interfaces/test_email_commands.py` (36 tests, all passing) — sender authentication, the
-  `ADJUST_PARAM` allowlist (including `top_n`, Epic 29), `LIQUIDATE`'s confirmation phrase,
+  `ADJUST_PARAM` allowlist (including `top_n`), `LIQUIDATE`'s confirmation phrase,
   `STATUS`/`SET_MAX_DRAWDOWN`/`ALERTS_REPORT` parsing, audit-log hash-chain integrity, and
   fail-safe behavior on malformed input are all verified. `SET_MAX_DRAWDOWN`'s tightening-only
   enforcement is covered separately in `tests/test_daily_runner.py::TestMaxDrawdownEmailOverride`;
@@ -151,8 +175,11 @@ still wins) — this can never be used to accidentally make the bot riskier.
   and failure mode before enabling this against a real inbox.
 - **The IMAP polling function (`poll_and_process_commands()`) has NOT been tested against a
   real mail server** in this project — no network access to a real inbox was available during
-  development. Test it against your actual dedicated inbox before relying on it, the same way
-  you'd paper-trade before going live with real capital.
+  development. Run `daily-runner --test-email` (see `DEPLOYMENT.md`'s "Verify before you trust
+  it") for a real, live IMAP login check before relying on it, the same way you'd paper-trade
+  before going live with real capital. It confirms the connection/credentials work; it doesn't
+  send a real command through the full pipeline — for that, the interactive notebook below is
+  still the safest first real test.
 
 ## Wiring reminder
 

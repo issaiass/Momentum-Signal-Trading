@@ -7,7 +7,7 @@
 
 ## Files needed (copy this whole set to the new machine)
 
-Since the Epic 17-18 restructure, this is an installable package — copy the whole repo (or at
+This is an installable package — copy the whole repo (or at
 minimum the items below), not individual flat files:
 - `pyproject.toml` (package metadata/dependencies)
 - `src/momentum_trading/` (the whole package: `core/`, `backtest/`, `execution/`, `risk/`,
@@ -53,7 +53,7 @@ pip install -r requirements-dev.txt
 pytest tests/ -v
 ```
 
-251 tests should pass cleanly. This only confirms code mechanics work on this machine
+271 tests should pass cleanly. This only confirms code mechanics work on this machine
 (dependencies installed correctly, no environment mismatch) — see `TESTING.md` for what the
 suite does and doesn't validate, and how to interpret a failure if one occurs.
 
@@ -133,6 +133,17 @@ IMAP_PASS=your_app_password
 TRUSTED_SENDER_EMAIL=trader@yourdomain.com     # only commands from this exact address are ever parsed
 ```
 
+### Verify before you trust it
+
+Run `daily-runner --test-email` right after creating or editing `.env` on **any** machine —
+new or existing. It does a real SMTP login + sends a real test email, and (if the IMAP block
+above is configured) a real IMAP login, then prints a pass/fail summary with a specific
+remediation hint if something's wrong (e.g. a Gmail App Password issue) instead of a raw
+traceback. This matters most right after a fresh `git clone`: `.env` is gitignored and never
+carried over by git, so it has to be recreated by hand every time, and that's exactly where a
+typo'd password or address slips in. No `config.yaml` is needed and no orders are placed —
+it's a pure email-setup check, safe to run before you've done anything else.
+
 ---
 
 ## Linux / Mac
@@ -155,12 +166,12 @@ TRUSTED_SENDER_EMAIL=trader@yourdomain.com     # only commands from this exact a
    # SMTP_PROVIDER=outlook
    # MS_OAUTH_CLIENT_ID=your-application-client-id-guid
 
-   # Cron schedule (Epic 20) -- optional, standard 5-field cron syntax, evaluated in
+   # Cron schedule -- optional, standard 5-field cron syntax, evaluated in
    # the container's TZ (America/New_York). Omit to use the defaults shown here.
    # DAILY_RUNNER_CRON=35 9 * * 1-5      # daily-runner: 9:35am ET, weekdays
    # RISK_MONITOR_CRON=0 9-16 * * 1-5    # risk_monitor.py: hourly, 9am-4pm ET, weekdays
 
-   # Which portfolios get automated risk_monitor.py coverage (Epic 22) -- space-separated,
+   # Which portfolios get automated risk_monitor.py coverage -- space-separated,
    # must match config.yaml's portfolios: key. config.yaml itself supports any number of
    # portfolios for daily-runner automatically; this is the one place you also need to
    # update if you add portfolios beyond the default single one.
@@ -172,6 +183,9 @@ TRUSTED_SENDER_EMAIL=trader@yourdomain.com     # only commands from this exact a
    # Linux (no Docker Desktop), either uncomment `network_mode: host` in docker-compose.yml
    # instead of setting this, or set IBKR_HOST to the host's real LAN IP.
    # IBKR_HOST=host.docker.internal
+   # IBKR_PORT=7497   # default for daily-runner's --port (7497 paper / 7496 live); an
+                       # explicit --port in the crontab command (see docker-entrypoint.sh)
+                       # still overrides this.
    ```
 
 3. **TWS/IB Gateway must run on the HOST machine**, not inside the container — IBKR's API
@@ -343,7 +357,7 @@ monitor that keeps working even if the trading container itself is compromised o
 `risk_monitor.py` in a **separate container or separate host**, pointed at the same `data/`
 volume (read-only mount recommended).
 
-**Multi-portfolio coverage (Epic 22):** `config.yaml` supports any number of portfolios, and
+**Multi-portfolio coverage:** `config.yaml` supports any number of portfolios, and
 `daily_runner.py` automatically rebalances all of them -- but `risk_monitor.py`'s Docker cron
 entries are controlled separately, by `RISK_MONITOR_PORTFOLIOS` (space-separated names) in
 `.env`. The default only covers `portfolio1`; if you add more portfolios to `config.yaml`,
@@ -366,7 +380,7 @@ own cron entry. If it detects the loss threshold breached, it writes the same ha
 daily-runner --resume-trading portfolio1
 ```
 
-## Autostart on Reboot (Epic 11)
+## Autostart on Reboot
 
 **Docker (Linux/Mac/Windows Docker Desktop):** already handled — `docker-compose.yml`'s
 `restart: unless-stopped` (see above) automatically restarts the container, and its internal

@@ -40,12 +40,12 @@ the academic literature guarantees it.
    clamped to the portfolio's own `tickers` list if that's smaller.
 4. **Sizing**: capital is allocated across picks either by inverse volatility (default —
    underweight noisier names) or, if `sizing_method: score_proportional` is set, proportional
-   to each pick's momentum score (Epic 9) — stronger momentum gets more capital.
+   to each pick's momentum score — stronger momentum gets more capital.
 5. **Rebalance**: monthly (configurable via `holding_period`), with drift-threshold filtering
    to avoid trading on trivial rebalances.
 6. **Risk overlays**: regime filter (de-risk when the benchmark is below its long moving
    average), volatility targeting, position caps, correlation penalty, stop-losses, and the
-   Epic 1/10 crash-protection mechanisms sit on top of this core signal — none of them change
+   crash-protection mechanisms sit on top of this core signal — none of them change
    *which* ETFs get picked, only *how much* capital is deployed and when to exit.
 
 ## A concrete worked example
@@ -69,7 +69,7 @@ three picks and SPY the least, XLK gets the *smallest* weight of the three and S
 *largest* — the strategy is expressing a view on *which* names to hold (via ranking) while
 trying to equalize *risk contribution* (via sizing), not necessarily conviction.
 
-**Sizing (score-proportional, Epic 9 alternative):** the same three picks would instead be
+**Sizing (score-proportional alternative):** the same three picks would instead be
 weighted 28:22:15 (normalized), so XLK — the strongest momentum — gets the *largest* weight,
 not the smallest. This is a genuinely different bet: it assumes signal strength should drive
 capital allocation, at the cost of ignoring volatility differences. Neither approach is

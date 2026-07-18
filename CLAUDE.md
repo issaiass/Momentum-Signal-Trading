@@ -33,6 +33,8 @@ pytest tests/path::TestClass::test_name -v # single test
 pytest tests/ -x --tb=short                # stop at first failure, short tracebacks
 
 # Run (config.yaml required — cp config.example.yaml config.yaml first)
+daily-runner --test-email                  # live SMTP/IMAP check, no config.yaml needed -- run
+                                            # this once after editing .env on any machine
 daily-runner --force-rebalance             # safe, no broker connection, test signal/order output
 daily-runner                               # dry-run default (no --live = never places orders)
 daily-runner --live --port 7497            # paper trading
@@ -92,10 +94,18 @@ that tests enforce — don't casually violate these when editing:
   own YAML read for `total_value`. Preserve this segregation in any future edit here.
 - **`interfaces/`** — email notifications (categorized CRITICAL/STANDARD/PERIODIC — CRITICAL
   can never be filtered) and pydantic-validated email-commanded remote actions.
+  `email_commands.py`'s `poll_and_process_commands()` guards against a same-inbox reply
+  cascade with two checks together, not one: the `X-Momentum-Trading-Bot` header catches the
+  bot's own generated replies, and `BOT_SUBJECT_MARKER`/`_is_bot_thread()` catches a *human's*
+  reply to those replies (which never carries the header) — don't remove either one without
+  re-reading why both exist. `email_diagnostics.py`'s `run_email_diagnostics()` backs
+  `daily-runner --test-email`, a live SMTP+IMAP check independent of `config.yaml`.
 - **`daily_runner.py`** — the actual scheduled entry point (`daily-runner` console script).
   Loads and schema-validates `config.yaml`, loops over every portfolio defined under
   `portfolios:`, idempotent per day, refuses `--live` unless `config.yaml`'s
-  `metadata.approved_by`/`approved_date` are set.
+  `metadata.approved_by`/`approved_date` are set. `--port`'s default reads the `IBKR_PORT` env
+  var (falling back to `7497`) — mirrors `execution/live_signal.py`'s existing `IBKR_HOST` env
+  var pattern; an explicit `--port` on the command line always overrides it.
 
 **Config flow**: `config.yaml` (gitignored; copy from `config.example.yaml`) →
 `daily_runner.load_config()` builds one `BacktestConfig` per portfolio from
@@ -107,10 +117,6 @@ explicit user ask: dry-run is the *unflagged default* (`--live` is opt-in, and t
 `--dry-run` flag — passing one is an argparse error, since `parse_args()` is strict); real-money
 trading requires `--port 7496` **and** `--confirm-live-trading` together; circuit-breaker halts
 require explicit `--resume-trading`, never auto-clear.
-
-**Epic/Story references in comments** (e.g. `Epic 17, Story 17.3`) trace design decisions back
-to their origin and rationale — read the referenced module's docstring when a comment cites one,
-it usually explains a non-obvious constraint (e.g. why `risk_monitor.py` avoids shared code).
 
 ## Testing conventions
 

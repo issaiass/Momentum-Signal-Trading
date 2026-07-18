@@ -1,7 +1,7 @@
 """
 email_commands.py
 
-Epic 13: lets a trusted trader send simple operational commands via email
+Lets a trusted trader send simple operational commands via email
 (PAUSE, RESUME, LIQUIDATE, SKIP_NEXT_REBALANCE, TRIGGER_REPORT, ADJUST_PARAM)
 that daily_runner.py picks up and applies.
 
@@ -18,8 +18,16 @@ SECURITY MODEL (read before enabling this):
     the trusted sender but doesn't parse as a valid recognized command, is
     ignored -- the bot continues running with its CURRENT configuration. It
     never partially applies a malformed command, never crashes the run, and
-    always sends a reply (confirmation or rejection reason) back to the
-    trusted sender so they know what happened.
+    (for the first such email in a thread -- see BOT_SUBJECT_MARKER below)
+    always sends a reply explaining what happened, to ALERT_TO_EMAIL
+    specifically (not conditionally to whoever sent it).
+  - ANTI-CASCADE: a reply to the trusted sender is itself new mail FROM the
+    trusted sender if TRUSTED_SENDER_EMAIL == IMAP_USER (a common, supported
+    setup) -- X-Momentum-Trading-Bot (on the bot's own replies) and
+    BOT_SUBJECT_MARKER (on any reply further downstream, including a human's)
+    together guarantee this can never cascade past one reply. See
+    docs/EMAIL_COMMANDS.md's "Self-generated emails" section for the full
+    explanation.
   - LIQUIDATE gets extra friction: it requires the command body to include a
     literal confirmation phrase, not just the command word, since it's the
     single most destructive action exposed this way.
@@ -47,6 +55,19 @@ logger = logging.getLogger("email_commands")
 EMAIL_COMMANDS_LOG_PATH = str(logs_dir() / "email_commands_log.csv")
 PROCESSED_COMMAND_IDS_PATH = str(data_dir() / "processed_command_ids.txt")
 
+# Every outbound email this bot sends (daily_runner.py's send_alert_email()) prefixes its
+# subject with this literal marker. Any INBOUND email whose subject already contains it is
+# therefore, provably, a continuation of a thread the bot itself started -- see
+# _is_bot_thread()'s use in poll_and_process_commands() for why this matters independently of
+# the X-Momentum-Trading-Bot header check.
+BOT_SUBJECT_MARKER = "[momentum-trading]"
+
+
+def _is_bot_thread(subject: str) -> bool:
+    """True if `subject` already carries this bot's own outbound marker -- i.e. this message
+    is a reply (bot-generated or human) somewhere downstream of an email the bot itself sent."""
+    return BOT_SUBJECT_MARKER in (subject or "")
+
 
 # --------------------------------------------------------------------------- #
 # ALLOWLISTED ADJUST_PARAM FIELDS -- deliberately small, with hard bounds.
@@ -55,7 +76,7 @@ PROCESSED_COMMAND_IDS_PATH = str(data_dir() / "processed_command_ids.txt")
 ADJUSTABLE_PARAMS = {
     "stop_loss_pct": (0.01, 0.50),          # (min, max) allowed values
     "max_position_weight": (0.05, 1.00),
-    "top_n": (1, 50),                       # Epic 29, Story 29.4
+    "top_n": (1, 50),
 }
 
 
@@ -81,7 +102,7 @@ class TriggerReportCommand(CommandBase):
 
 class StatusCommand(CommandBase):
     """
-    Epic 14, Story 14.1: read-only, zero-risk. Requests an immediate reply
+    Read-only, zero-risk. Requests an immediate reply
     with current state (halted/active, last rebalance date, latest snapshot)
     instead of waiting for the next scheduled monthly report. No special
     validation needed -- it can't change anything.
@@ -91,7 +112,7 @@ class StatusCommand(CommandBase):
 
 class SetMaxDrawdownCommand(CommandBase):
     """
-    Epic 14, Story 14.2: a SCOPED, one-directional variant of ADJUST_PARAM --
+    A SCOPED, one-directional variant of ADJUST_PARAM --
     can only TIGHTEN max_portfolio_drawdown_pct (make the circuit breaker
     more sensitive), never loosen it. This is deliberately safer than a
     general ADJUST_PARAM entry for this field: in a fast-moving situation
@@ -154,8 +175,8 @@ class AdjustParamCommand(CommandBase):
 
 class AlertsReportCommand(CommandBase):
     """
-    Epic 29, Story 29.5: read-only, zero-risk, mirrors StatusCommand -- emails
-    back the most recent rows from the new alert log (core/audit_log.py's
+    Read-only, zero-risk, mirrors StatusCommand -- emails
+    back the most recent rows from the alert log (core/audit_log.py's
     data/alerts_log.csv) instead of waiting to notice a problem from
     console/cron output. PORTFOLIO here means "filter to this portfolio's
     alerts" (or ALL for every portfolio, including cross-portfolio alerts
@@ -276,11 +297,11 @@ def log_command_attempt(
     sender: str, result: ParsedCommandResult, log_path: str = EMAIL_COMMANDS_LOG_PATH,
 ) -> None:
     """
-    Epic 14, Story 14.4: every parsed attempt -- accepted or rejected -- is
+    Every parsed attempt -- accepted or rejected -- is
     logged to a dedicated, hash-chained audit trail, using the SAME
     hash-chain pattern as the trade log (live_signal.py's log_orders) for
     consistency: tampering with this log is detectable the same way tampering
-    with the trade log is. This was a real gap in the original Epic 13
+    with the trade log is. This was a real gap in the original email-commands
     implementation -- console logging alone doesn't survive a log rotation
     or give you a queryable history of who tried what, when.
     """
@@ -377,7 +398,7 @@ def poll_and_process_commands(
     confirmation/rejection reply for each. Returns the list of results so the
     caller (daily_runner.py) can apply successful commands.
 
-    dry_run : bool (Epic 16, Story 16.2)
+    dry_run : bool
         If True, commands are parsed, logged, and replied to normally, but
         this function marks the email as read WITHOUT any caller-side state
         change happening (the caller is responsible for not applying results
@@ -385,7 +406,7 @@ def poll_and_process_commands(
         email round-trip -- fetch, parse, log, reply -- safely before trusting
         it to actually flip halt flags).
 
-    processed_ids_path : str (Epic 16, Story 16.1)
+    processed_ids_path : str
         Message-ID deduplication: even though IMAP messages are marked
         \\Seen after processing, a failure between processing and marking
         (e.g. a crash, or the IMAP server not persisting the flag before the
@@ -428,13 +449,22 @@ def poll_and_process_commands(
             msg = email_lib.message_from_bytes(msg_data[0][1])
             sender = email_lib.utils.parseaddr(msg.get("From", ""))[1]
 
-            # Self-generated alerts/replies (send_alert_email, notifications.py, risk_monitor.py
-            # all set this header) must never be treated as command attempts. When trusted_sender
-            # is the SAME mailbox that receives alerts (a common setup, including for this bot's
-            # own tests), every outbound alert lands back in this inbox as new unread mail FROM
-            # the trusted sender -- without this check, the bot replies to its own reply forever,
-            # doubling "Re: Re:" in the subject each round.
-            if msg.get("X-Momentum-Trading-Bot"):
+            # Two guards against a same-mailbox reply cascade, needed together -- neither alone
+            # is sufficient. When trusted_sender is the SAME mailbox that receives alerts (a
+            # common, explicitly supported setup), every outbound alert/reply lands back in this
+            # inbox as new unread mail FROM the trusted sender:
+            #   1. X-Momentum-Trading-Bot header (send_alert_email, notifications.py,
+            #      risk_monitor.py all set it): catches the bot's OWN generated replies directly
+            #      -- these always carry the header, so this alone stops the bot from ever
+            #      replying to a message it just sent itself.
+            #   2. Subject marker (_is_bot_thread(), BOT_SUBJECT_MARKER): catches the NEXT hop --
+            #      a human replying to the bot's reply. A human-authored reply is a brand-new
+            #      message the mail client generates; it never carries the custom header, so the
+            #      header check alone would let it through, get parsed (still not a real
+            #      command), and get ANOTHER rejection reply -- round 2, doubling "Re: Re:" in
+            #      the subject. The subject marker persists across replies even when the header
+            #      doesn't, so this guard catches what the header check structurally cannot.
+            if msg.get("X-Momentum-Trading-Bot") or _is_bot_thread(msg.get("Subject", "")):
                 conn.store(msg_id, "+FLAGS", "\\Seen")
                 continue
 

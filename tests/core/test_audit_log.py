@@ -1,10 +1,10 @@
 """
 tests/core/test_audit_log.py
 
-Epic 29, Story 29.6: core/audit_log.py is new shared code, used only by the
-new alert log (Story 29.2) -- log_orders()/log_command_attempt()'s own
+core/audit_log.py is new shared code, used only by the
+new alert log -- log_orders()/log_command_attempt()'s own
 hash-chain implementations are untouched and covered by their own existing
-tests (TestHashChainAuditLog in test_epic2_governance.py,
+tests (TestHashChainAuditLog in test_governance.py,
 TestEmailCommandLogging in test_email_commands.py). These tests confirm the
 extracted helper reproduces that same proven behavior (genesis seed,
 chaining, tamper detection) and that log_alert()/read_recent_alerts() work
@@ -70,7 +70,7 @@ class TestAppendHashChainedRow:
 
 class TestLogAlert:
     """
-    log_alert() is the Story 29.2 function every wired call site (Story 29.3)
+    log_alert() is the function every wired call site
     calls -- these confirm its schema and hash-chain compatibility directly,
     independent of any specific call site.
     """
@@ -102,7 +102,7 @@ class TestLogAlert:
 
 class TestReadRecentAlerts:
     """
-    Backs the ALERTS_REPORT email command (Story 29.5) -- must never raise
+    Backs the ALERTS_REPORT email command -- must never raise
     (a missing/empty log is a normal, expected state, not an error), must
     filter correctly by portfolio, and must respect `limit` and return
     newest-first (most useful ordering for a quick status email).

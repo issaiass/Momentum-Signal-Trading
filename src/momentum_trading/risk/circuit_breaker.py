@@ -1,7 +1,7 @@
 """
 risk/circuit_breaker.py
 
-Epic 18, Story 18.1: circuit-breaker state management extracted out of
+Circuit-breaker state management extracted out of
 daily_runner.py into its own risk-domain module.
 
 Design note: alerting is DEPENDENCY-INJECTED (an `alert_fn` callable passed
@@ -45,7 +45,7 @@ def _max_drawdown_override_path(name: str) -> Path:
 def get_effective_max_drawdown_pct(name: str, configured_value: float) -> float:
     """
     Returns the tighter of the config.yaml value and any active
-    SET_MAX_DRAWDOWN email override (Epic 14, Story 14.2) -- enforced here,
+    SET_MAX_DRAWDOWN email override -- enforced here,
     at the point of USE, not at command-parse time. This is where the "can
     only tighten, never loosen" safety property is actually guaranteed: even
     if an override file somehow ended up containing a looser value than

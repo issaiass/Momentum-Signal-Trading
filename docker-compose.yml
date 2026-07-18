@@ -5,14 +5,14 @@ services:
     restart: unless-stopped
     environment:
       - MOMENTUM_TRADING_ROOT=/app
-      # Cron schedule (Epic 20): standard 5-field cron syntax, evaluated in the
+      # Cron schedule: standard 5-field cron syntax, evaluated in the
       # container's TZ (America/New_York, set in the Dockerfile). Changing these only
       # needs `docker compose up -d` (container recreate), NOT `--build` -- the
       # entrypoint regenerates /etc/cron.d/momentum-cron from these on every start.
       # Defaults: daily-runner at 9:35am ET weekdays; risk_monitor hourly 9am-4pm ET weekdays.
       - DAILY_RUNNER_CRON=${DAILY_RUNNER_CRON:-35 9 * * 1-5}
       - RISK_MONITOR_CRON=${RISK_MONITOR_CRON:-0 9-16 * * 1-5}
-      # Epic 22: space-separated portfolio names to independently risk-monitor, one
+      # Space-separated portfolio names to independently risk-monitor, one
       # cron entry each -- must match names under config.yaml's portfolios: key.
       # Defaults to just "portfolio1"; add more (e.g. "portfolio1 portfolio2") if
       # config.yaml defines additional portfolios you want automated oversight for.
@@ -21,6 +21,8 @@ services:
       - EODHD_API_KEY=${EODHD_API_KEY:-}
       # IBKR host: use host.docker.internal on Mac/Windows Docker Desktop;
       # on Linux, use --network host or the host machine's real IP instead.
+      # IBKR_PORT is the default for daily-runner's --port (paper 7497 / live 7496) --
+      # an explicit --port in the crontab command still overrides it.
       - IBKR_HOST=${IBKR_HOST:-host.docker.internal}
       - IBKR_PORT=${IBKR_PORT:-7497}
       # Email alerting (daily_runner.py) -- all four required for alerts to send;
@@ -39,7 +41,7 @@ services:
       # one-time device-code login survives container restarts/rebuilds.
       - MS_OAUTH_CLIENT_ID=${MS_OAUTH_CLIENT_ID:-}
       - MS_OAUTH_TENANT=${MS_OAUTH_TENANT:-consumers}
-      # Email-commanded remote actions (Epic 13) -- opt-in, all four required to activate
+      # Email-commanded remote actions -- opt-in, all four required to activate
       - IMAP_HOST=${IMAP_HOST:-}
       - IMAP_USER=${IMAP_USER:-}
       - IMAP_PASS=${IMAP_PASS:-}

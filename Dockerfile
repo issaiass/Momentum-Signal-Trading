@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 ENV TZ=America/New_York
-# Epic 17: single source of truth for where config.yaml/data/logs live inside the
+# Single source of truth for where config.yaml/data/logs live inside the
 # container -- matches core/paths.py's env-var override, so path resolution never
 # has to guess based on CWD.
 ENV MOMENTUM_TRADING_ROOT=/app
@@ -41,14 +41,14 @@ VOLUME ["/app/logs", "/app/data"]
 #     daily-runner is intentionally invoked with no flags: dry-run is the safe default when
 #     --live is omitted (there is no --dry-run flag -- passing one is an argparse error).
 #     risk_monitor.py's --initial-capital is intentionally omitted too: it now falls back to
-#     config.yaml's portfolios.<name>.total_value (Epic 19, Story 19.2) unless overridden here.
+#     config.yaml's portfolios.<name>.total_value unless overridden here.
 #
-#     Epic 20: the actual crontab is generated at CONTAINER START (docker-entrypoint.sh), not
+#     The actual crontab is generated at CONTAINER START (docker-entrypoint.sh), not
 #     here at build time, from the DAILY_RUNNER_CRON/RISK_MONITOR_CRON env vars (see
 #     docker-compose.yml / .env) -- so changing the schedule only needs a container recreate,
 #     not a rebuild. Defaults there match what used to be hardcoded here.
 #
-#     Epic 22: config.yaml can define any number of portfolios (daily-runner already loops
+#     config.yaml can define any number of portfolios (daily-runner already loops
 #     over all of them) -- risk_monitor.py coverage for portfolios beyond the first is
 #     controlled by RISK_MONITOR_PORTFOLIOS (space-separated names, one cron entry each),
 #     also read at container start. ---

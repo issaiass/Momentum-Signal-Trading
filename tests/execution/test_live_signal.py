@@ -30,7 +30,7 @@ class TestGetTopEtfs:
     get_top_etfs() is where BacktestConfig.top_n actually takes effect -- it's
     the sole gate between "everything in the portfolio's tickers list" and
     "what actually gets sized and traded". daily_runner.py wiring cfg.top_n
-    through to this call (Epic 21) was previously a silent no-op: run()'s own
+    through to this call was previously a silent no-op: run()'s own
     function-default (10) was used regardless of config.yaml, since top_n was
     never passed through. These tests cover the selection behavior itself.
     """
@@ -228,7 +228,7 @@ class TestRunMultiPortfolio:
 
 class TestComputeAggregateDrift:
     """
-    Epic 25, Story 25.3: live-trading equivalent of the backtest's aggregate-drift
+    Live-trading equivalent of the backtest's aggregate-drift
     skip -- same formula, extracted as a pure function so it's directly
     unit-testable without a live price feed. Hand-verifiable numbers, not just
     "ran without error" (matching this suite's convention for numeric claims).
@@ -257,7 +257,7 @@ class TestComputeAggregateDrift:
 
 class TestDeriveEntryDate:
     """
-    Epic 25, Story 25.2: live-side equivalent of the backtest's entry_dates
+    Live-side equivalent of the backtest's entry_dates
     tracking -- entry date must persist across partial adds/trims and reset
     only when the position was last FULLY flat, matching the backtest's exact
     semantics (not just "most recent BUY", which would understate days_held
@@ -315,7 +315,7 @@ class TestDeriveEntryDate:
 
 class TestCorrelationSpikeScaling:
     """
-    Epic 25, Story 25.4: use_correlation_spike_regime's live-trading equivalent --
+    use_correlation_spike_regime's live-trading equivalent --
     same defensive scaling the backtest applies (regime_scalar clamped down to
     min_gross_exposure), wired into compute_target_weights() at the exact point
     the regime filter already scales gross_exposure. Reuses the same synthetic
@@ -345,7 +345,7 @@ class TestCorrelationSpikeScaling:
                                                      portfolio="p1", alerts_log_path=alerts_path)
         assert gross_exposure == pytest.approx(cfg.min_gross_exposure)
 
-        # Epic 29, Story 29.3: CORRELATION_SPIKE_DETECTED must land in the alert log.
+        # CORRELATION_SPIKE_DETECTED must land in the alert log.
         rows = read_recent_alerts(portfolio="p1", log_path=alerts_path)
         assert len(rows) == 1
         assert rows[0]["alert_type"] == "CORRELATION_SPIKE_DETECTED"
@@ -364,7 +364,7 @@ class TestCorrelationSpikeScaling:
 
 class TestIBKRConnectionRetry:
     """
-    Epic 8: place_orders_ibkr() retries the CONNECTION phase (before any order
+    place_orders_ibkr() retries the CONNECTION phase (before any order
     is sent) but must NEVER retry order submission itself -- a disconnect
     after an order was actually sent but before its confirmation arrived could
     otherwise cause a duplicate order on retry, a much worse outcome than
@@ -392,7 +392,7 @@ class TestIBKRConnectionRetry:
 
 def _install_fake_ibkr(monkeypatch, submission_log):
     """
-    Epic 28: shared mock harness for place_orders_ibkr() tests -- bypasses the real
+    Shared mock harness for place_orders_ibkr() tests -- bypasses the real
     threaded message loop entirely (connect()/run() become synchronous no-ops) and
     makes every placeOrder() call fill instantly, recording (action, symbol, shares)
     so tests can assert on submission order and sizing without a real/mocked
@@ -642,7 +642,7 @@ class TestInformationalOrderErrorDoesNotCorruptStatus:
 
 class TestSellsBeforeBuys:
     """
-    Epic 28, Story 28.3: place_orders_ibkr() must submit and confirm ALL sells before
+    place_orders_ibkr() must submit and confirm ALL sells before
     submitting any buy -- a buy submitted before its funding sell clears can be
     rejected on a cash account, or silently rely on margin buying power this code
     never checks. Mirrors the backtest engine's explicit sells-first/buys-second
@@ -688,7 +688,7 @@ class TestSellsBeforeBuys:
 
 class TestCashAwareBuySizing:
     """
-    Epic 28, Story 28.3: after sells clear, BUYs are checked against real available
+    After sells clear, BUYs are checked against real available
     cash via available_cash_fn (injected here so no real IBKR account-summary round
     trip is needed). Default behavior is warn-only -- submit as computed, let IBKR's
     own fill/reject be the backstop; auto_reduce_on_insufficient_cash additionally
@@ -713,7 +713,7 @@ class TestCashAwareBuySizing:
         assert buy_calls == [("BUY1", 20)]  # submitted at FULL size, unreduced
         assert any("INSUFFICIENT CASH" in r.message for r in caplog.records)
 
-        # Epic 29, Story 29.3: INSUFFICIENT_CASH must also land in the alert log.
+        # INSUFFICIENT_CASH must also land in the alert log.
         rows = read_recent_alerts(portfolio="p1", log_path=alerts_path)
         assert len(rows) == 1
         assert rows[0]["alert_type"] == "INSUFFICIENT_CASH"
@@ -804,9 +804,10 @@ class TestCashAwareBuySizing:
 
 class TestAccountValueTag:
     """
-    Epic 28, Story 28.2: get_ibkr_account_value()'s tag parameter must actually
-    control which accountSummary tag is read -- this is what lets Story 28.3 reuse
-    the function for "AvailableFunds" instead of only ever reading "NetLiquidation".
+    get_ibkr_account_value()'s tag parameter must actually
+    control which accountSummary tag is read -- this is what lets the cash-aware
+    buy sizing above reuse the function for "AvailableFunds" instead of only ever
+    reading "NetLiquidation".
     """
 
     def test_reads_the_requested_tag_not_always_net_liquidation(self, monkeypatch):

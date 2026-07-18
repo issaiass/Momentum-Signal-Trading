@@ -45,7 +45,7 @@ so on purpose.
   signal action
 - Dockerized, self-scheduling deployment (`docker compose up -d`, internal cron, no manual
   triggering needed for normal operation)
-- 251-test pytest suite covering code mechanics — order sizing, config validation, audit-log
+- 271-test pytest suite covering code mechanics — order sizing, config validation, audit-log
   integrity, multi-portfolio capital math — entirely on synthetic/mocked data, no live broker
   required to run it
 
@@ -139,15 +139,15 @@ momentum-trading/
 │                                     TRIGGER_REPORT/ADJUST_PARAM/STATUS/SET_MAX_DRAWDOWN/
 │                                     ALERTS_REPORT)
 │
-└── tests/                         pytest suite (251 tests), mirrors src/ layout where a
+└── tests/                         pytest suite (271 tests), mirrors src/ layout where a
     ├── conftest.py                  test's primary subject is a single sub-package;
     ├── test_architecture.py         cross-cutting/integration tests stay at tests/ root
     ├── test_daily_runner.py
     ├── test_docker_entrypoint.py     docker-entrypoint.sh's crontab generation,
     │                                  run as a real subprocess
-    ├── test_epic2_governance.py
-    ├── test_epic4_reporting.py
-    ├── test_epic8_10_safety.py
+    ├── test_governance.py
+    ├── test_reporting.py
+    ├── test_execution_safety.py
     ├── backtest/
     │   └── test_momentum_backtest.py
     ├── core/
@@ -280,6 +280,11 @@ the factor (the chart above is a live example of that). Only allocate capital th
 - Copy the example config and edit it (tickers, portfolios, risk settings):
 ~~~bash
     cp config.example.yaml config.yaml
+~~~
+- If using email notifications/commands, copy `.env.example` to `.env`, fill in real values, then
+  verify them for real before trusting cron/`--live` with them:
+~~~bash
+    daily-runner --test-email
 ~~~
 - Test signal/order generation — safe, no broker connection, never places an order:
 ~~~bash

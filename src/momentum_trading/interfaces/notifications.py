@@ -1,7 +1,7 @@
 """
 notifications.py
 
-Epic 12: categorized, filterable email notifications, plus a monthly HTML
+Categorized, filterable email notifications, plus a monthly HTML
 report with embedded charts.
 
 Three categories, matching the color-coding scheme requested:
@@ -37,7 +37,7 @@ class NotificationCategory(str, Enum):
     CRITICAL = "critical"   # red -- always sent, not filterable
     STANDARD = "standard"   # green -- routine BUY/SELL/HOLD, filterable
     PERIODIC = "periodic"   # blue -- scheduled reports, filterable
-    WARNING = "warning"     # amber -- non-fatal risk signals (Epic 26/27: multi-portfolio
+    WARNING = "warning"     # amber -- non-fatal risk signals (multi-portfolio
                              # capital over-allocation, ticker overlap), filterable via
                              # notifications.send_warning -- unlike CRITICAL, these are review-
                              # when-convenient risks, not run-blocking failures

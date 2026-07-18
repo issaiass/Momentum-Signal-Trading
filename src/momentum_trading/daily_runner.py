@@ -165,9 +165,9 @@ def validate_config_schema(raw: dict, path: str) -> None:
     if default_risk and not isinstance(default_risk, dict):
         errors.append(f"top-level default_risk: must be a mapping, got {type(default_risk).__name__}")
 
-    # --- Epic 26, Story 26.1: at most one portfolio may use total_value: null.
-    #     null means "the rest of the account after other portfolios' fixed allocations"
-    #     (Story 26.2) -- with 2+ null portfolios that's ambiguous (which one gets the
+    # --- At most one portfolio may use total_value: null.
+    #     null means "the rest of the account after other portfolios' fixed allocations" --
+    #     with 2+ null portfolios that's ambiguous (which one gets the
     #     remainder?), and the OLD behavior (each independently pulling the FULL account
     #     value) silently double/triple-counts the same real capital. Fail fast here
     #     rather than let that reach a --live run. ---
@@ -183,8 +183,8 @@ def validate_config_schema(raw: dict, path: str) -> None:
             f"total_value to all but one of these."
         )
 
-    # --- Epic 27, Story 27.2: notifications.send_warning must be a real bool if present.
-    #     This field controls whether Epic 26's capital-safety warnings (over-allocation,
+    # --- notifications.send_warning must be a real bool if present.
+    #     This field controls whether the capital-safety warnings (over-allocation,
     #     ticker overlap) actually reach you by email -- a YAML footgun like
     #     send_warning: "false" (a truthy non-empty string) would otherwise silently
     #     evaluate as "send" via Python's default truthiness, the opposite of what someone
@@ -285,8 +285,8 @@ def check_and_handle_stop_losses(
 
 
 # --------------------------------------------------------------------------- #
-# TIME-BASED STOP -- live-trading equivalent of the backtest's max_holding_days
-# (Epic 25, Story 25.2). Independent of and in addition to the price-based
+# TIME-BASED STOP -- live-trading equivalent of the backtest's max_holding_days.
+# Independent of and in addition to the price-based
 # stop-loss above; shares its auto_execute_stop_loss flag rather than adding a
 # second config field, since both are "auto-exit on trigger vs. flag only".
 # --------------------------------------------------------------------------- #
@@ -344,7 +344,7 @@ def check_and_handle_time_stops(
 
 
 # --------------------------------------------------------------------------- #
-# CIRCUIT BREAKER -- moved to risk/circuit_breaker.py (Epic 18, Story 18.1).
+# CIRCUIT BREAKER -- moved to risk/circuit_breaker.py.
 # Thin wrappers here inject send_alert_email so callers in this module don't
 # need to pass alert_fn explicitly every time; the underlying logic/state
 # lives in the risk module, imported above.
@@ -380,6 +380,14 @@ def check_and_apply_email_commands(portfolio_names: list[str], ibkr_port: int, d
 
     if not all([imap_host, imap_user, imap_password, trusted_sender]):
         return  # email commands not configured -- opt-in feature, silent no-op
+
+    if trusted_sender.strip().lower() == imap_user.strip().lower():
+        logger.warning(
+            "TRUSTED_SENDER_EMAIL is the same address as IMAP_USER -- every command poll will "
+            "also pick up ordinary mail you send from that address (replies, correspondence, "
+            "etc.), each generating one 'not a recognized command' reply. This is safe (see "
+            "docs/EMAIL_COMMANDS.md) but noisy; a dedicated inbox for IMAP_USER avoids it entirely."
+        )
 
     def _reply(to_addr, subject, body):
         send_alert_email(subject, body)  # reuses existing SMTP reply path
@@ -483,7 +491,7 @@ def check_and_apply_email_commands(portfolio_names: list[str], ibkr_port: int, d
 
 
 # --------------------------------------------------------------------------- #
-# MULTI-PORTFOLIO CAPITAL SAFETY (Epic 26) -- resolved ONCE per run, before the
+# MULTI-PORTFOLIO CAPITAL SAFETY -- resolved ONCE per run, before the
 # per-portfolio loop, so portfolios sharing one real IBKR account can't silently
 # double-count or over-allocate the same capital.
 # --------------------------------------------------------------------------- #
@@ -535,7 +543,7 @@ def resolve_total_values(portfolios: dict, dry_run: bool, account_value_fn=None)
 
 def check_ticker_overlap(portfolios: dict) -> dict[str, list[str]]:
     """
-    Epic 26, Story 26.4: portfolios sharing one real IBKR account/port that also
+    Portfolios sharing one real IBKR account/port that also
     share a ticker will each independently compute and submit orders against the
     SAME real position, with no coordination between them (get_ibkr_positions()
     returns the whole account's positions to every portfolio's loop iteration, and
@@ -581,11 +589,12 @@ def main():
                          help="Actually place orders through IBKR. Without this flag, the script "
                               "computes and logs orders but NEVER sends them to a broker (dry-run, "
                               "the safe default). Requires TWS/IB Gateway running and reachable on --port.")
-    parser.add_argument("--port", type=int, default=7497,
+    parser.add_argument("--port", type=int, default=int(os.environ.get("IBKR_PORT", 7497)),
                          help="IBKR socket port. 7497 = paper trading TWS (default, safe to experiment). "
                               "7496 = live/real-money TWS -- using this ALSO requires --confirm-live-trading. "
                               "4001/4002 are the IB Gateway paper/live equivalents. Verify your own "
-                              "TWS/Gateway configuration; these are conventions, not guarantees.")
+                              "TWS/Gateway configuration; these are conventions, not guarantees. Defaults "
+                              "from the IBKR_PORT env var if set; this flag always overrides it.")
     parser.add_argument("--confirm-live-trading", action="store_true",
                          help="Required IN ADDITION to --live --port 7496 before any real-money order "
                               "will be placed. This is a deliberate double-confirmation -- omitting it "
@@ -600,7 +609,17 @@ def main():
                               "config.yaml's max_portfolio_drawdown_pct) after manual review, and exit. "
                               "Does not run a rebalance in the same invocation -- run again normally "
                               "afterward.")
+    parser.add_argument("--test-email", action="store_true",
+                         help="Live end-to-end check of email setup: a real SMTP login + test send, "
+                              "and a real IMAP login if email-commanded remote actions are configured. "
+                              "Prints a pass/fail summary and exits -- no config.yaml needed, no "
+                              "portfolio logic runs. Run this once after creating/editing .env on any "
+                              "machine, before trusting cron/--live with those credentials.")
     args = parser.parse_args()
+
+    if args.test_email:
+        from .interfaces.email_diagnostics import run_email_diagnostics
+        sys.exit(0 if run_email_diagnostics() else 1)
 
     if args.resume_trading:
         _resume_trading_with_alert(args.resume_trading)
@@ -623,7 +642,7 @@ def main():
             logger.error(
                 "Refusing --live: %s is missing metadata.approved_by / metadata.approved_date. "
                 "This config has not been marked as reviewed. Edit those fields once you've "
-                "actually reviewed the config, per Epic 2 Story 2.3.", args.config,
+                "actually reviewed the config.", args.config,
             )
             send_alert_email("daily_runner: LIVE RUN BLOCKED (unapproved config)",
                               f"{args.config} is missing approval metadata; refused to trade live.")
@@ -631,13 +650,13 @@ def main():
         logger.info("Config approved by %s on %s.", metadata["approved_by"], metadata["approved_date"])
 
     portfolios = cfg_raw["portfolios_resolved"]
-    # Epic 27: extracted once here so both capital-safety warnings below can gate their
+    # Extracted once here so both capital-safety warnings below can gate their
     # email through notifications.send_warning -- the detailed logger.warning() calls
     # right next to each are NEVER gated by this, so the risk is always visible in logs
     # even if the email is filtered out.
     notification_cfg = cfg_raw.get("notifications", {})
 
-    # --- Epic 26, Story 26.4: ticker-overlap warning (non-blocking) -- portfolios sharing
+    # --- Ticker-overlap warning (non-blocking) -- portfolios sharing
     #     a ticker on the same real IBKR account would each independently compute and
     #     submit orders against the same position, with no coordination between them. ---
     if len(portfolios) > 1:
@@ -659,7 +678,7 @@ def main():
                 f"<pre>{overlap_text}</pre>", notification_cfg, plain_text_fallback=overlap_text,
             )
 
-    # --- Epic 26, Stories 26.2/26.3: resolve every portfolio's total_value ONCE, before
+    # --- Resolve every portfolio's total_value ONCE, before
     #     the loop -- total_value: null means "account value minus every OTHER portfolio's
     #     fixed total_value", not "the full account" (the old per-portfolio resolution
     #     silently double-counted the same real capital across portfolios). ---
@@ -678,7 +697,7 @@ def main():
 
     if args.live and len(portfolios) > 1 and all(s["total_value"] is not None for s in portfolios.values()):
         # No null portfolio -- resolve_total_values() had no reason to fetch the real
-        # account value, so Story 26.2's remainder<=0 check never ran either. Check
+        # account value, so the remainder<=0 check never ran either. Check
         # separately whether these fully-fixed allocations still add up to more than
         # the account actually has.
         sum_of_fixed = sum(resolved_total_values.values())
@@ -703,7 +722,7 @@ def main():
                 plain_text_fallback=overallocation_text,
             )
 
-    # --- Epic 13: check for and apply email commands (opt-in, silent no-op if unconfigured) ---
+    # --- Check for and apply email commands (opt-in, silent no-op if unconfigured) ---
     try:
         check_and_apply_email_commands(list(portfolios.keys()), args.port, dry_run=not args.live)
     except Exception as e:
@@ -716,7 +735,7 @@ def main():
             trade_log_path = str(logs_dir() / f"live_trades_log_{name}.csv")
 
             # --- item 1: real positions from IBKR, never local memory. total_value comes
-            #     from resolved_total_values (Epic 26), resolved once above the loop. ---
+            #     from resolved_total_values, resolved once above the loop. ---
             if args.live:
                 current_positions = with_retry(get_ibkr_positions, 3, 2.0, args.port)
             else:
@@ -730,7 +749,7 @@ def main():
             daily_prices = with_retry(fetch_live_prices, 3, 2.0, tickers)
             latest_prices = daily_prices.iloc[-1].to_dict() if not daily_prices.empty else {}
 
-            # --- Epic 10, Story 10.3: abort THIS portfolio's run (not the whole process)
+            # --- Abort THIS portfolio's run (not the whole process)
             #     if the price feed looks stale -- trading on frozen data is worse than
             #     skipping a cycle. ---
             if cfg.max_price_staleness_minutes is not None:
@@ -758,14 +777,14 @@ def main():
                     dry_run=not args.live, ibkr_port=args.port,
                     log_path=trade_log_path, portfolio=name,
                 )
-                # --- Epic 25, Story 25.2: daily time-based stop check (max_holding_days) ---
+                # --- Daily time-based stop check (max_holding_days) ---
                 check_and_handle_time_stops(
                     tickers, current_positions, latest_prices, cfg,
                     dry_run=not args.live, ibkr_port=args.port,
                     log_path=trade_log_path, trade_log_path=trade_log_path, portfolio=name,
                 )
 
-            # --- ALWAYS runs: portfolio snapshot (Epic 4, Story 4.1/4.3) -- independent
+            # --- ALWAYS runs: portfolio snapshot -- independent
             #     of rebalance schedule, so "where do things stand" stays continuous.
             #     Also stores the benchmark price so period returns are computed
             #     automatically on the NEXT run by comparing to this row. ---
@@ -814,7 +833,7 @@ def main():
                 )
                 mark_ran_today(f"rebalance_{name}")
 
-                # --- Epic 12, Story 12.1: STANDARD-category notification (filterable) ---
+                # --- STANDARD-category notification (filterable) ---
                 notification_cfg = cfg_raw.get("notifications", {})
                 if orders_result:
                     send_standard_action(
@@ -823,14 +842,14 @@ def main():
                         notification_cfg,
                     )
 
-                # --- Epic 12, Story 12.4: monthly report, on the configured day of month ---
+                # --- Monthly report, on the configured day of month ---
                 report_day = notification_cfg.get("monthly_report_day_of_month")
                 if report_day and datetime.today().day == report_day:
                     snapshot_path = str(data_dir() / f"portfolio_snapshot_{name}.csv")
                     if os.path.isfile(snapshot_path):
                         snapshot_df = pd.read_csv(snapshot_path, parse_dates=["date"])
                         comparison = fnx.compare_to_benchmark(name)
-                        # --- Epic 4b: REAL realized+unrealized P&L from the trade log (FIFO),
+                        # --- REAL realized+unrealized P&L from the trade log (FIFO),
                         #     distinct from the snapshot-based unrealized_pnl already in the
                         #     report -- this covers cumulative gains from trades that have since
                         #     closed, not just currently-open positions. dry_run=not args.live

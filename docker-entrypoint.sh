@@ -38,6 +38,9 @@ CRONTAB_PATH="${CRONTAB_PATH:-/etc/cron.d/momentum-cron}"
   # To go live, replace the line above with (paper: --port 7497, real money also needs
   # --confirm-live-trading with --port 7496) -- see docs/DEPLOYMENT.md "Going live for real":
   #   echo "$DAILY_RUNNER_CRON"' cd /app && daily-runner --live --port 7497 >> /app/logs/daily_$(date +%Y%m%d).log 2>&1'
+  # daily-runner's --port now defaults to the IBKR_PORT env var (set in .env) when omitted,
+  # so if IBKR_PORT is already correct there, an explicit --port above isn't strictly required --
+  # it's kept in the example for clarity and because it still overrides IBKR_PORT if both are set.
   for p in $RISK_MONITOR_PORTFOLIOS; do
     echo "$RISK_MONITOR_CRON"' cd /app && python -m momentum_trading.risk.risk_monitor --portfolio '"$p"' >> /app/logs/risk_monitor_'"$p"'_$(date +%Y%m%d).log 2>&1'
   done

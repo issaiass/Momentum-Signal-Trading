@@ -186,7 +186,7 @@ class TestResolveTargetWeights:
                                     custom_weights={"QQQ": 1.0})
 
     def test_score_proportional_weights_by_signal_strength(self, synthetic_daily_prices):
-        # Epic 9, Story 9.1: confirms weight is proportional to score, not
+        # Confirms weight is proportional to score, not
         # equal or inverse-vol -- C (score 0.20) should get roughly 4x A's
         # weight (score 0.05), verified by exact fraction, not just "more than".
         cfg = BacktestConfig(sizing_method="score_proportional", max_position_weight=0.9)
@@ -214,7 +214,7 @@ class TestResolveTargetWeights:
 
 class TestCrashProtection:
     """
-    Epic 1: circuit breaker, correlation spike detection, liquidity stress
+    Circuit breaker, correlation spike detection, liquidity stress
     handling. These exist to reduce (not eliminate -- see the circuit
     breaker's documented limitation in momentum_backtest.py) downside risk
     during sharp market moves. Tests here confirm the mechanisms fire

@@ -1,7 +1,7 @@
 """
-tests/test_epic2_governance.py
+tests/test_governance.py
 
-Covers Epic 2's institutional-governance features: risk-quantification tools
+Covers institutional-governance features: risk-quantification tools
 (VaR/CVaR, scenario shocks), a pre-trade capacity/market-impact check, a
 tamper-evident hash-chained audit log, the independent (read-only)
 risk_monitor.py process, and the config-approval gate required before --live
@@ -11,7 +11,7 @@ TestCrashProtection in test_momentum_backtest.py for the closest thing to
 strategy-behavior testing, and TESTING.md for what this suite can and can't
 tell you.
 
-Run with: pytest tests/test_epic2_governance.py -v
+Run with: pytest tests/test_governance.py -v
 """
 import csv
 import os
@@ -146,7 +146,7 @@ class TestRiskMonitor:
         assert (tmp_path / "data" / "circuit_breaker_halted_testp.flag").exists()
 
     def test_load_initial_capital_reads_total_value_from_config(self, tmp_path):
-        # Epic 19, Story 19.2: risk_monitor.py's --initial-capital falls back to
+        # risk_monitor.py's --initial-capital falls back to
         # config.yaml's portfolios.<name>.total_value when omitted on the CLI --
         # this is the independent, minimal YAML read that makes that possible.
         path = tmp_path / "config.yaml"

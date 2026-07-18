@@ -5,7 +5,7 @@ Shared fixtures for the test suite. Synthetic price panels are clearly synthetic
 (seeded, documented) -- these are for testing CODE MECHANICS (order generation,
 config validation, P&L math), not for validating the strategy's real performance.
 
-NOTE (Epic 17): no sys.path manipulation needed here anymore -- the package is
+NOTE: no sys.path manipulation needed here anymore -- the package is
 installed editable (`pip install -e .`), so `import momentum_trading...` works
 from any working directory, same as a real installed dependency would.
 """

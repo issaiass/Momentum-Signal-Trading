@@ -4,7 +4,7 @@
 # SMTP credentials) in environment variables (.env for Docker, User env vars
 # on native Windows) as documented in DEPLOYMENT.md, not in this file.
 
-# Epic 2, Story 2.3: required before --live runs (not enforced in dry-run) --
+# Required before --live runs (not enforced in dry-run) --
 # a lightweight paper trail that a human reviewed and approved this exact
 # config before it was used to trade real money.
 metadata:
@@ -12,8 +12,8 @@ metadata:
   approved_by: null      # e.g. "your name" -- must be non-null for --live
   approved_date: null    # e.g. "2026-07-11" -- must be non-null for --live
 
-# Epic 12: email notification categories. CRITICAL (stop-loss executions,
-# circuit-breaker trips, the Epic 26 capital-allocation error that aborts a run) is ALWAYS
+# Email notification categories. CRITICAL (stop-loss executions,
+# circuit-breaker trips, the capital-allocation error that aborts a run) is ALWAYS
 # sent and cannot be disabled here -- only STANDARD, PERIODIC, and WARNING are filterable.
 # Requires SMTP env vars set (see DEPLOYMENT.md). If sending via a Gmail account, SMTP_PASS
 # must be a Gmail App Password, NOT your normal account password -- generate one at
@@ -23,7 +23,7 @@ notifications:
   send_standard: true             # routine rebalance BUY/SELL/HOLD summaries
   send_periodic: true             # monthly performance report
   monthly_report_day_of_month: 1  # null/omit to disable the monthly report entirely
-  send_warning: true              # Epic 27: multi-portfolio capital-safety warnings (fixed
+  send_warning: true              # multi-portfolio capital-safety warnings (fixed
                                    # allocations exceeding the real account, ticker overlap
                                    # across portfolios). Gates the EMAIL only -- the detailed
                                    # log line for each of these always fires regardless of
@@ -31,7 +31,7 @@ notifications:
                                    # with this set to false. Must be true/false, not a string
                                    # -- validated at load time.
 
-# Epic 13: email-commanded remote actions (PAUSE/RESUME/SKIP_NEXT_REBALANCE
+# Email-commanded remote actions (PAUSE/RESUME/SKIP_NEXT_REBALANCE
 # auto-applied; LIQUIDATE/ADJUST_PARAM parsed+validated but require manual
 # follow-through). Opt-in -- entirely inactive unless the IMAP_HOST, IMAP_USER,
 # IMAP_PASS, TRUSTED_SENDER_EMAIL env vars are all set. See EMAIL_COMMANDS.md.
@@ -60,7 +60,7 @@ default_risk:
                                    # current picks (distinct from use_correlation_spike_regime below)
   aggregate_drift_threshold: 0.0  # 0 = disabled (always rebalance if scheduled);
                                    # e.g. 0.02 = skip the WHOLE rebalance if aggregate drift is <2%
-                                   # (Epic 25: applies to both backtest and --live, same formula)
+                                   # (applies to both backtest and --live, same formula)
 
   # Share granularity
   allow_fractional_shares: false   # true = size positions to 4dp fractional shares in the
@@ -74,7 +74,7 @@ default_risk:
                                     # still want precise backtest sizing; live orders are
                                     # unaffected either way.
 
-  # Epic 28: LIVE ONLY. place_orders_ibkr() always submits SELLs first and waits for them
+  # LIVE ONLY. place_orders_ibkr() always submits SELLs first and waits for them
   # to clear before submitting BUYs (not configurable -- there's no valid reason to skip
   # this). This field controls what happens if BUYs would still exceed real available cash
   # AFTER sells clear: false (default) = warn (always logged) and submit as computed, IBKR's
@@ -103,24 +103,24 @@ default_risk:
   # Overridable per portfolio via risk_overrides, same as every field on this page.
   top_n: 10
 
-  # Epic 1: crash protection
+  # Crash protection
   max_portfolio_drawdown_pct: 0.0     # 0 = disabled; e.g. 0.20 = halt NEW entries at -20% from peak
                                        # equity (does not force-liquidate existing positions)
   use_correlation_spike_regime: false # true = detect a market-wide correlation spike across
                                        # holdings and react defensively (crash protection --
-                                       # distinct from use_correlation_penalty above). Epic 25:
-                                       # applies to both backtest and --live.
+                                       # distinct from use_correlation_penalty above). Applies to
+                                       # both backtest and --live.
 
-  # Epic 9: alternative sizing
+  # Alternative sizing
   sizing_method: inverse_vol          # "inverse_vol" (default, underweights noisier names) or
                                        # "score_proportional" (stronger momentum gets more capital)
 
-  # Epic 10: additional execution safety checks
+  # Additional execution safety checks
   max_dollar_drawdown: null           # e.g. 500.0 -- independent $ breaker alongside the % one above
   max_slippage_tolerance_pct: null    # e.g. 0.02 -- alert (not un-fill) on excess fill deviation
   max_price_staleness_minutes: null   # e.g. 30 -- abort a run rather than trade on frozen data
   max_holding_days: null              # e.g. 90 -- force-exit a position after N days regardless
-                                       # of price. Epic 25: applies to both backtest and --live
+                                       # of price. Applies to both backtest and --live
                                        # (live derives "days held" from the trade log); respects
                                        # auto_execute_stop_loss (flag-only vs. auto-exit) in live.
 
@@ -133,7 +133,7 @@ portfolios:
                                    # total_value is subtracted (--live only; dry-run uses a flat
                                    # $1000 placeholder instead). At most ONE portfolio across
                                    # this whole file may be null -- validated at load time,
-                                   # since "remainder" is ambiguous with more than one. (Epic 26)
+                                   # since "remainder" is ambiguous with more than one.
     # risk_overrides:              # optional: override any default_risk field for THIS
     #   stop_loss_pct: 0.10         # portfolio only -- e.g. a tighter stop, or (see
     #   top_n: 5                    # portfolio2 below) a different top_n than the default

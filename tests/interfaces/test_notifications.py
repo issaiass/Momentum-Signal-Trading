@@ -1,7 +1,7 @@
 """
 tests/test_notifications.py
 
-Covers Epic 12's categorized email notification system: CRITICAL cannot be
+Covers the categorized email notification system: CRITICAL cannot be
 filtered (the whole point of the category), STANDARD/PERIODIC respect
 config.yaml, and HTML/chart generation degrades gracefully rather than
 crashing when data is missing. No actual SMTP send is tested (would require
@@ -41,7 +41,7 @@ class TestCategoryFiltering:
         assert should_send(NotificationCategory.PERIODIC, {"send_periodic": True}) is True
 
     def test_warning_respects_explicit_config(self):
-        # Epic 27: unlike CRITICAL, the multi-portfolio capital-safety warnings ARE
+        # Unlike CRITICAL, the multi-portfolio capital-safety warnings ARE
         # meant to be filterable -- they're review-when-convenient risk signals, not
         # run-blocking failures.
         assert should_send(NotificationCategory.WARNING, {"send_warning": False}) is False

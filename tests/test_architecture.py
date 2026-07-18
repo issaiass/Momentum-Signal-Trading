@@ -1,7 +1,7 @@
 """
 tests/test_architecture.py
 
-Epic 17-18: tests that specifically probe the RESTRUCTURE itself, not the
+Tests that specifically probe the RESTRUCTURE itself, not the
 strategy logic (which the rest of the suite already covers). These exist to
 catch regressions in the package boundaries, path resolution, and the
 circuit-breaker extraction -- the kind of bug that a pure logic test would
@@ -131,7 +131,7 @@ class TestPathResolutionAcrossWorkingDirectories:
 
 class TestCircuitBreakerExtraction:
     """
-    Epic 18, Story 18.1: the circuit breaker logic was extracted from
+    The circuit breaker logic was extracted from
     daily_runner.py into risk/circuit_breaker.py, with alerting
     dependency-injected (alert_fn) instead of imported directly, specifically
     to avoid a risk->interfaces import cycle. These tests confirm the

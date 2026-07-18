@@ -1,7 +1,7 @@
 """
 tests/test_docker_entrypoint.py
 
-Epic 20/22: docker-entrypoint.sh generates /etc/cron.d/momentum-cron at CONTAINER
+docker-entrypoint.sh generates /etc/cron.d/momentum-cron at CONTAINER
 START from env vars (DAILY_RUNNER_CRON, RISK_MONITOR_CRON, RISK_MONITOR_PORTFOLIOS)
 instead of baking a fixed schedule into the image at build time. These tests run the
 REAL script via subprocess (not a reimplementation of its logic) -- the same
@@ -91,7 +91,7 @@ class TestConfigurableSchedule:
 
 
 class TestMultiPortfolioRiskMonitoring:
-    """Epic 22: RISK_MONITOR_PORTFOLIOS controls how many risk_monitor.py cron
+    """RISK_MONITOR_PORTFOLIOS controls how many risk_monitor.py cron
     entries get generated -- previously always exactly one, hardcoded to
     "portfolio1", regardless of how many portfolios config.yaml actually defined."""
 

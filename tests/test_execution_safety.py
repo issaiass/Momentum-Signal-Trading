@@ -1,13 +1,13 @@
 """
-tests/test_epic8_10_safety.py
+tests/test_execution_safety.py
 
-Covers Epic 8 (broker connection resilience -- see test_live_signal.py's
+Covers broker connection resilience (see test_live_signal.py's
 TestIBKRConnectionRetry for the connection-retry test itself, kept there
-since it needs the live_signal.py IBKR mocking pattern) and Epic 10
-(additional execution safety checks: dollar drawdown breaker, slippage
-tolerance, stale price feed protection, time-based stops).
+since it needs the live_signal.py IBKR mocking pattern) and additional
+execution safety checks: dollar drawdown breaker, slippage tolerance, stale
+price feed protection, time-based stops.
 
-Run with: pytest tests/test_epic8_10_safety.py -v
+Run with: pytest tests/test_execution_safety.py -v
 """
 import numpy as np
 import pandas as pd

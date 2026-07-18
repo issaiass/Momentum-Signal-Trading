@@ -93,7 +93,7 @@ class BacktestConfig:
     allow_fractional_shares: bool = False    # True = size positions to 4dp fractional shares
                                               # (only if your broker/tickers actually support it)
 
-    # --- Epic 28: live order execution, cash-aware buy sizing ---
+    # --- Live order execution, cash-aware buy sizing ---
     auto_reduce_buys_on_insufficient_cash: bool = False   # LIVE ONLY. place_orders_ibkr()
         # always submits SELLs first and waits for them to clear before submitting BUYs
         # (unconditional, not configurable here). This flag controls what happens if BUYs
@@ -134,31 +134,31 @@ class BacktestConfig:
     # --- aggregate-drift rebalance skip (item 11) ---
     aggregate_drift_threshold: float = 0.0   # 0 = disabled (always rebalance if scheduled); e.g. 0.02 = skip whole rebalance if <2% aggregate drift
 
-    # --- crash protection: portfolio-level circuit breaker (Epic 1, Story 1.1) ---
+    # --- crash protection: portfolio-level circuit breaker ---
     max_portfolio_drawdown_pct: float = 0.0   # 0 = disabled; e.g. 0.20 = halt new entries at -20% from peak equity
 
-    # --- crash protection: correlation spike detection (Epic 1, Story 1.2) ---
+    # --- crash protection: correlation spike detection ---
     use_correlation_spike_regime: bool = False
     correlation_spike_short_window: int = 7
     correlation_spike_baseline_window: int = 63
     correlation_spike_threshold: float = 0.3
 
-    # --- crash protection: liquidity-crisis-aware execution (Epic 1, Story 1.4) ---
+    # --- crash protection: liquidity-crisis-aware execution ---
     liquidity_stress_multiplier: float = 1.0   # 1.0 = disabled; e.g. 2.0 = double slippage under stress
     liquidity_stress_recent_days: int = 5
     liquidity_stress_vol_ratio: float = 2.0    # recent vol > this multiple of trailing avg -> stress
     liquidity_stress_reduce_only: bool = False  # True = block new BUYs (not SELLs) during detected stress
 
-    # --- capacity / market-impact check (Epic 2, Story 2.4) ---
+    # --- capacity / market-impact check ---
     max_pct_of_adv: float = 0.0   # 0 = disabled; e.g. 0.05 = warn if a position exceeds 5% of average daily volume
 
-    # --- Epic 10: additional execution safety checks ---
+    # --- Additional execution safety checks ---
     max_dollar_drawdown: float | None = None       # e.g. 500.0 -- halt if equity drops this many $ from peak, independent of the % breaker
     max_slippage_tolerance_pct: float | None = None  # e.g. 0.02 -- alert (not un-fill) if actual fill deviates from expected price by more than this
     max_price_staleness_minutes: int | None = None   # e.g. 30 -- abort the run rather than trade on a price feed older than this
     max_holding_days: int | None = None              # e.g. 90 -- force-exit a position after N days regardless of price (time-based stop)
 
-    # --- Epic 9, Story 9.1: alternative position-sizing method ---
+    # --- Alternative position-sizing method ---
     sizing_method: str = "inverse_vol"   # "inverse_vol" (default) or "score_proportional"
 
     def __post_init__(self):
@@ -273,7 +273,7 @@ def detect_correlation_spike(
     short_window: int = 7, baseline_window: int = 63, spike_threshold: float = 0.3,
 ) -> bool:
     """
-    Epic 1, Story 1.2: fast-reacting crash indicator, distinct from the
+    Fast-reacting crash indicator, distinct from the
     sizing-time _correlation_penalty_weights() (which uses a single rolling
     window and reacts slowly). This compares a SHORT recent window's average
     pairwise correlation against a longer baseline -- in real crashes,
@@ -338,7 +338,7 @@ def _correlation_penalty_weights(
 
 def _score_proportional_weights(picks: list[str], momentum_scores: pd.Series | None) -> dict:
     """
-    Epic 9, Story 9.1: weights proportional to each pick's momentum score
+    Weights proportional to each pick's momentum score
     (higher trailing return -> larger weight), instead of inverse-vol sizing.
     The theory: if the signal genuinely ranks conviction, the strongest
     momentum names arguably deserve more capital, not less -- inverse-vol
@@ -380,7 +380,7 @@ def resolve_target_weights(
 
     If custom_weights is NOT provided, cfg.sizing_method selects between
     "inverse_vol" (default -- weight inversely to trailing volatility) and
-    "score_proportional" (Epic 9, Story 9.1 -- weight proportional to each
+    "score_proportional" (weight proportional to each
     pick's momentum score, requires momentum_scores to be passed in; falls
     back to equal-weight if scores aren't available).
     """
@@ -482,7 +482,7 @@ def _realized_portfolio_vol(portfolio_history: list, lookback: int) -> Optional[
 def _slippage_bps(ticker_returns_window: pd.Series, cfg: BacktestConfig) -> float:
     """
     Base slippage scaled by trailing (vol_lookback_days) annualized vol. If
-    liquidity_stress_multiplier > 1.0 (Epic 1, Story 1.4), additionally checks
+    liquidity_stress_multiplier > 1.0, additionally checks
     whether the MOST RECENT few days' vol is spiking well above that trailing
     average -- a proxy for liquidity deteriorating faster than a long rolling
     window would show, which is exactly when execution quality matters most
@@ -588,14 +588,14 @@ def run_risk_managed_backtest(
     cash = config.initial_capital
     holdings: dict[str, float] = {}
     entry_prices: dict[str, float] = {}
-    entry_dates: dict[str, pd.Timestamp] = {}  # Epic 10, Story 10.4: time-based stops
+    entry_dates: dict[str, pd.Timestamp] = {}  # time-based stops
     portfolio_history = [(prices.index[0], config.initial_capital)]
     months_held = 0
     total_commission_paid = 0.0
     total_slippage_cost = 0.0
     turnover_log = []
     peak_equity = config.initial_capital
-    circuit_breaker_halted = False  # Epic 1, Story 1.1: once tripped, only allow risk-reducing trades
+    circuit_breaker_halted = False  # once tripped, only allow risk-reducing trades
 
     with open(config.log_file_path, "w") as log_file:
         log_file.write(
@@ -611,7 +611,7 @@ def run_risk_managed_backtest(
             today_exec = exec_prices.loc[today]      # open, for fills
 
             # ---------------- STOP-LOSS CHECK (every day, not just rebalance) -------
-            # GAP-RISK LIMITATION (Epic 1, Story 1.3): this checks the drawdown from
+            # GAP-RISK LIMITATION: this checks the drawdown from
             # entry using DAILY close prices, and fills at that day's open/close
             # (via today_exec) with the standard slippage model. On a genuine
             # overnight gap-down (common in real crashes -- e.g. several March 2020
@@ -644,7 +644,7 @@ def run_risk_managed_backtest(
                     )
                     entry_dates.pop(ticker, None)
 
-            # ---------------- TIME-BASED STOP (Epic 10, Story 10.4) -----------------
+            # ---------------- TIME-BASED STOP -----------------
             # Force-exits a position after max_holding_days regardless of price --
             # independent of and in addition to the price-based stop-loss above.
             # Exists to bound exposure duration even when a position is neither
@@ -692,7 +692,7 @@ def run_risk_managed_backtest(
                 )
                 total_value = cash + market_value
 
-                # --- circuit breaker check (Epic 1, Story 1.1) ---
+                # --- circuit breaker check ---
                 peak_equity = max(peak_equity, total_value)
                 current_drawdown = (total_value - peak_equity) / peak_equity if peak_equity > 0 else 0.0
                 if config.max_portfolio_drawdown_pct > 0:
@@ -726,7 +726,7 @@ def run_risk_managed_backtest(
                     else:
                         regime_scalar = 1.0
 
-                    # --- correlation spike: additional fast-reacting risk-off signal (Epic 1, Story 1.2) ---
+                    # --- correlation spike: additional fast-reacting risk-off signal ---
                     if config.use_correlation_spike_regime:
                         spike = detect_correlation_spike(
                             prices, today,

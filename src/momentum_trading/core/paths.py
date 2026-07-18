@@ -1,12 +1,12 @@
 """
 core/paths.py
 
-Epic 17, Story 17.3: single source of truth for resolving where config.yaml,
+Single source of truth for resolving where config.yaml,
 data/, and logs/ actually live. Before this module existed, every path in
 the codebase ("data/...", "config.yaml", "trades_log.txt") was a bare
 relative string, which only worked if the process happened to be launched
 with its CWD set to the project root -- fragile, and a real risk once the
-package can be installed/imported from anywhere (Epic 17's whole point).
+package can be installed/imported from anywhere.
 
 Resolution order:
   1. MOMENTUM_TRADING_ROOT env var, if set (explicit override -- useful for

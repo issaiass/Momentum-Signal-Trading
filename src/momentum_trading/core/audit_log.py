@@ -1,8 +1,8 @@
 """
 core/audit_log.py
 
-Epic 29, Story 29.1: shared hash-chain append logic, extracted because the new
-alerts log (Story 29.2) would otherwise be a THIRD independent copy of the same
+Shared hash-chain append logic, extracted because the new
+alerts log would otherwise be a THIRD independent copy of the same
 pattern already implemented twice -- live_signal.py's log_orders() (trade log)
 and email_commands.py's log_command_attempt() (email command log). Those two
 existing, working, already-tested implementations are left untouched; this is
@@ -72,7 +72,7 @@ ALERTS_LOG_PATH = str(logs_dir() / "alerts_log.csv")
 def log_alert(portfolio: str, alert_type: str, severity: str, message: str,
               log_path: str = ALERTS_LOG_PATH) -> None:
     """
-    Epic 29, Story 29.2: persistent, tamper-evident, queryable record of every
+    Persistent, tamper-evident, queryable record of every
     alert/warning-worthy event -- stop-loss/time-stop triggers, circuit-breaker
     trips, ticker overlap, capital-allocation errors, and everything else that was
     previously ONLY a logger.warning()/logger.error() line (which only persists if
@@ -94,7 +94,7 @@ def log_alert(portfolio: str, alert_type: str, severity: str, message: str,
 def read_recent_alerts(portfolio: str = "ALL", limit: int = 10,
                         log_path: str = ALERTS_LOG_PATH) -> list[dict]:
     """
-    Epic 29, Story 29.5: backs the new ALERTS_REPORT email command. Returns
+    Backs the ALERTS_REPORT email command. Returns
     the most recent `limit` rows (newest first), optionally filtered to one
     portfolio -- "ALL" returns every row regardless of portfolio, including
     cross-portfolio alerts (e.g. TICKER_OVERLAP) that are themselves logged

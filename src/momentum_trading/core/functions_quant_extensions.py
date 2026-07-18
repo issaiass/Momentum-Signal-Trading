@@ -80,7 +80,7 @@ def check_capacity(
     as_of: pd.Timestamp, max_pct_of_adv: float = 0.05, lookback_days: int = 21,
 ) -> dict:
     """
-    Epic 2, Story 2.4: flags any position whose target size would exceed
+    Flags any position whose target size would exceed
     max_pct_of_adv (average daily dollar volume) -- a proxy for market impact
     risk. Institutions typically cap single-day participation well under 10%
     of ADV to avoid moving the price against themselves; 5% is a conservative
@@ -585,7 +585,7 @@ def log_revalidation_run(log_path: str = "revalidation_log.csv", notes: str = ""
 
 
 # --------------------------------------------------------------------------- #
-# 10. VALUE-AT-RISK / CONDITIONAL VaR (Epic 2, Story 2.2)
+# 10. VALUE-AT-RISK / CONDITIONAL VaR
 # --------------------------------------------------------------------------- #
 def historical_var_cvar(
     returns: pd.Series, confidence: float = 0.95, portfolio_value: float | None = None,
@@ -659,7 +659,7 @@ def scenario_shock(
 
 
 # --------------------------------------------------------------------------- #
-# 11. BENCHMARK COMPARISON FROM SNAPSHOT LOG (Epic 4, Story 4.3)
+# 11. BENCHMARK COMPARISON FROM SNAPSHOT LOG
 # --------------------------------------------------------------------------- #
 def compare_to_benchmark(name: str, snapshot_dir: str = str(data_dir())) -> dict:
     """
@@ -704,7 +704,7 @@ def compare_to_benchmark(name: str, snapshot_dir: str = str(data_dir())) -> dict
 
 
 # --------------------------------------------------------------------------- #
-# 12. EXTERNAL PORTFOLIO CORRELATION CHECK (Epic 6, Story 6.4)
+# 12. EXTERNAL PORTFOLIO CORRELATION CHECK
 # --------------------------------------------------------------------------- #
 def check_external_correlation(
     strategy_returns: pd.Series, other_holdings_returns: dict,
@@ -756,7 +756,7 @@ def check_external_correlation(
 
 
 # --------------------------------------------------------------------------- #
-# 13. MULTI-LOOKBACK SIGNAL INTEGRATION (Epic 9, Story 9.2)
+# 13. MULTI-LOOKBACK SIGNAL INTEGRATION
 # --------------------------------------------------------------------------- #
 def blend_momentum_scores(
     daily_prices: pd.DataFrame, lookbacks: list[int] = [3, 6, 12], weights: list[float] | None = None,

@@ -171,7 +171,7 @@ def fetch_live_prices(
 
 def check_price_staleness(daily_prices: pd.DataFrame, max_staleness_minutes: int, exchange: str = "NYSE") -> dict:
     """
-    Epic 10, Story 10.3: guards against trading on a frozen/stale price feed
+    Guards against trading on a frozen/stale price feed
     (e.g. a data vendor outage that returns yesterday's data without erroring).
 
     NOTE on granularity: this system fetches DAILY bars, not intraday ticks, so
@@ -237,8 +237,8 @@ def compute_target_weights(
         sizing (still subject to position caps). See resolve_target_weights()
         in momentum_backtest.py for details.
     momentum_scores : pd.Series, optional
-        Required for cfg.sizing_method == "score_proportional" (Epic 9, Story
-        9.1) -- ignored otherwise.
+        Required for cfg.sizing_method == "score_proportional" -- ignored
+        otherwise.
     """
     as_of = daily_prices.index[-1]
     weights = resolve_target_weights(picks, daily_prices, as_of, cfg, custom_weights=custom_weights,
@@ -254,7 +254,7 @@ def compute_target_weights(
                     cfg.regime_benchmark, "above" if bullish else "below",
                     cfg.regime_sma_window, regime_scalar)
 
-    # --- Epic 25, Story 25.4: correlation-spike defensive scaling, live-trading
+    # --- Correlation-spike defensive scaling, live-trading
     #     equivalent of the backtest's use_correlation_spike_regime (same placement,
     #     same defensive action -- momentum_backtest.py's run_risk_managed_backtest). ---
     if cfg.use_correlation_spike_regime:
@@ -279,7 +279,7 @@ def compute_target_weights(
 # --------------------------------------------------------------------------- #
 def compute_aggregate_drift(target_dollar: dict, current_value: dict, total_value: float) -> float:
     """
-    Epic 25, Story 25.3: same formula as the backtest's aggregate-drift skip
+    Same formula as the backtest's aggregate-drift skip
     (run_risk_managed_backtest() in momentum_backtest.py) -- sum of absolute dollar
     drift across every ticker (current + target), as a fraction of total_value.
     Extracted as a pure function (matching this codebase's pattern of pulling out
@@ -308,7 +308,7 @@ def generate_orders(
     Applies the same drift_threshold / min_trade_size filtering as the backtest,
     so live turnover matches the cost assumptions the backtest validated against.
 
-    signal_context (Epic 4, Story 4.2), if provided, is carried through into
+    signal_context, if provided, is carried through into
     each order dict so a trade can be reviewed later with "why" context (e.g.
     "XLK was rank 2 of 10"), not just "what" was traded.
     """
@@ -359,8 +359,8 @@ def generate_orders(
 def _config_hash(cfg) -> str:
     """
     Short hash identifying the exact BacktestConfig used, so every trade in
-    the audit log can be tied back to the risk settings that produced it
-    (Epic 2, Story 2.3). Order-independent (sorted) so field-addition order
+    the audit log can be tied back to the risk settings that produced it.
+    Order-independent (sorted) so field-addition order
     doesn't change the hash unnecessarily.
     """
     import hashlib
@@ -370,7 +370,7 @@ def _config_hash(cfg) -> str:
 
 
 def _last_row_hash(path: str) -> str:
-    """Reads the hash of the last row written, for hash-chaining (Epic 2, Story 2.5)."""
+    """Reads the hash of the last row written, for hash-chaining."""
     if not os.path.isfile(path):
         return "GENESIS"
     try:
@@ -391,7 +391,7 @@ def _compute_row_hash(prev_hash: str, row_fields: list) -> str:
 
 def verify_log_integrity(path: str) -> dict:
     """
-    Verification utility (Epic 2, Story 2.5): re-walks the hash chain and
+    Verification utility: re-walks the hash chain and
     confirms no row was altered or removed after the fact. A plain CSV a
     script can also freely rewrite is not tamper-evident on its own -- this
     at least makes tampering DETECTABLE (recomputed hashes won't match),
@@ -421,7 +421,7 @@ def verify_log_integrity(path: str) -> dict:
 def log_orders(orders: dict, latest_prices: dict, dry_run: bool, path: str = TRADE_LOG_PATH,
                 cfg=None) -> None:
     """
-    NOTE on schema evolution (Epic 4, Story 4.2): this adds 'rank' and
+    NOTE on schema evolution: this adds 'rank' and
     'signal_score' columns. If you have an existing log file from before this
     change, its header won't have these columns -- appending new-schema rows
     to an old-schema file will misalign columns. Archive/rename any pre-existing
@@ -454,7 +454,7 @@ def log_orders(orders: dict, latest_prices: dict, dry_run: bool, path: str = TRA
 # 4b. REAL PROFIT MEASUREMENT (from actual live_trades_log.csv, not a simulation)
 # --------------------------------------------------------------------------- #
 # --------------------------------------------------------------------------- #
-# 4c. PORTFOLIO SNAPSHOT (Epic 4, Story 4.1) -- one row per run, not per trade
+# 4c. PORTFOLIO SNAPSHOT -- one row per run, not per trade
 # --------------------------------------------------------------------------- #
 def write_portfolio_snapshot(
     name: str, current_positions: dict, latest_prices: dict, total_value: float, cash: float,
@@ -471,7 +471,7 @@ def write_portfolio_snapshot(
     Also stores the benchmark's current price (if benchmark_ticker + its price
     are available in latest_prices) so the NEXT call can compute a real
     period-over-period return for both portfolio and benchmark by comparing
-    against the previous row (Epic 4, Story 4.3) -- without needing a separate
+    against the previous row -- without needing a separate
     price history lookup.
 
     Parameters
@@ -657,7 +657,7 @@ def measure_live_performance(
 
 def derive_entry_date(ticker: str, trade_log_path: str = TRADE_LOG_PATH) -> pd.Timestamp | None:
     """
-    Epic 25, Story 25.2: live-side equivalent of the backtest's entry_dates tracking
+    Live-side equivalent of the backtest's entry_dates tracking
     (momentum_backtest.py's run_risk_managed_backtest), so max_holding_days means the
     same thing in live trading as it did when the strategy was backtested with the same
     setting. There's no in-memory day-by-day loop in live trading to track this the way
@@ -854,8 +854,8 @@ def get_ibkr_account_value(port: int, client_id: int = 9, timeout: float = 5.0,
     Real account value via reqAccountSummary() -- replaces hardcoded total_value.
 
     tag : which IBKR account summary tag to fetch. Default "NetLiquidation" (total account
-    equity) preserves every pre-Epic-28 call site's behavior unchanged. Also used with
-    "AvailableFunds" (Epic 28, Story 28.2/28.3) -- real spendable cash, checked by
+    equity) preserves every existing call site's behavior unchanged. Also used with
+    "AvailableFunds" -- real spendable cash, checked by
     place_orders_ibkr() before submitting BUY orders.
     """
     try:
@@ -902,7 +902,7 @@ def get_ibkr_account_value(port: int, client_id: int = 9, timeout: float = 5.0,
 
 def check_slippage_tolerance(expected_price: float, actual_price: float, tolerance_pct: float) -> dict:
     """
-    Epic 10, Story 10.2: pure function for the slippage-tolerance comparison,
+    Pure function for the slippage-tolerance comparison,
     factored out of place_orders_ibkr() so the math is unit-testable without
     a real (or mocked) broker connection.
     """
@@ -929,7 +929,7 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
     by polling orderStatus/execDetails after submission instead of firing
     orders and disconnecting blind after a fixed sleep.
 
-    Epic 28: SELLs are always submitted first and confirmed (terminal status) before any
+    SELLs are always submitted first and confirmed (terminal status) before any
     BUY is submitted -- a BUY submitted before its funding SELL clears can be rejected on a
     cash account, or silently rely on margin buying power this code never used to check.
     Mirrors the backtest engine's explicit sells-first/buys-second structure.
@@ -993,7 +993,7 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
     import threading
     import time
 
-    # --- Epic 8, Story 8.1: retry the CONNECTION only, never retry order
+    # --- Retry the CONNECTION only, never retry order
     #     submission itself. If a disconnect happens AFTER an order was
     #     already sent but before its confirmation arrived, blindly retrying
     #     the whole function could submit a duplicate order -- a much worse
@@ -1147,7 +1147,7 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
             else:
                 logger.info("Order for %s FILLED: %.4f shares @ $%.2f", ticker, info["filled"], info["avg_fill_price"])
 
-                # --- Epic 10, Story 10.2: slippage tolerance check ---
+                # --- Slippage tolerance check ---
                 # Cannot un-fill an order that already executed -- this ALERTS on
                 # excess deviation from the expected price rather than attempting
                 # any reversal, so a bad fill is at least immediately visible
@@ -1170,7 +1170,7 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
                         results[ticker]["slippage_deviation_pct"] = slip_check["deviation_pct"]
         return results
 
-    # --- Epic 28, Story 28.3: SELLs first, always -- see docstring. ---
+    # --- SELLs first, always -- see docstring. ---
     sell_orders = {t: o for t, o in orders.items() if o["action"] == "SELL" and o["shares"] > 0}
     buy_orders = {t: o for t, o in orders.items() if o["action"] == "BUY" and o["shares"] > 0}
 
@@ -1179,7 +1179,7 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
     results = _collect_results(sell_ids)
 
     if buy_orders:
-        # --- Epic 28, Story 28.3: cash-aware buy sizing, checked AFTER sells have
+        # --- Cash-aware buy sizing, checked AFTER sells have
         #     cleared (so proceeds are reflected in the real available-cash query). ---
         priced_buys = {t: o for t, o in buy_orders.items() if expected_prices and t in expected_prices}
         unpriced = set(buy_orders) - set(priced_buys)
@@ -1265,7 +1265,7 @@ def run(
     picks = get_top_etfs(ranks, top_n=top_n)
     logger.info("Today's signal picks (top %d): %s", top_n, picks)
 
-    # Epic 4, Story 4.2: capture rank/score context so a trade can be reviewed
+    # Capture rank/score context so a trade can be reviewed
     # later with "why" (e.g. "XLK was rank 2 of 10"), not just "what" was traded.
     signal_context = {}
     latest_scores = None
@@ -1285,7 +1285,7 @@ def run(
 
     latest_prices = daily_prices.iloc[-1].to_dict()
 
-    # --- Epic 25, Story 25.3: aggregate-drift skip -- bypass the ENTIRE rebalance if
+    # --- Aggregate-drift skip -- bypass the ENTIRE rebalance if
     #     total portfolio drift is trivial, even if some individual tickers exceed
     #     drift_threshold. Same formula/semantics as the backtest's
     #     run_risk_managed_backtest(); 0 (default) disables this and preserves prior
@@ -1308,7 +1308,7 @@ def run(
     for ticker, order in orders.items():
         logger.info("%-6s %-4s shares=%-8.4f (%s)", ticker, order["action"], order["shares"], order["reason"])
 
-    # --- Epic 2, Story 2.4: advisory capacity check (best-effort; never blocks trading) ---
+    # --- Advisory capacity check (best-effort; never blocks trading) ---
     if cfg.max_pct_of_adv > 0:
         try:
             from ..core import functions_quant_extensions as fnx

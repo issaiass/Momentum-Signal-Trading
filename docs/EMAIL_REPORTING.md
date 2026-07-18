@@ -1,11 +1,11 @@
-# Email Notifications & Reporting (Epic 12)
+# Email Notifications & Reporting
 
 ## Four categories
 
 | Category | Color | Filterable? | Examples |
 |---|---|---|---|
-| **CRITICAL** | Red | **No — always sent** | Stop-loss executions, circuit-breaker trips, config-load failures, connection failures, the Epic 26 capital-allocation error that aborts a run |
-| **WARNING** | Amber | Yes (`notifications.send_warning`) | Epic 26/27: fixed portfolio allocations exceeding the real account, ticker overlap across portfolios |
+| **CRITICAL** | Red | **No — always sent** | Stop-loss executions, circuit-breaker trips, config-load failures, connection failures, the capital-allocation error that aborts a run |
+| **WARNING** | Amber | Yes (`notifications.send_warning`) | Fixed portfolio allocations exceeding the real account, ticker overlap across portfolios |
 | **STANDARD** | Green | Yes (`notifications.send_standard`) | Routine rebalance BUY/SELL/HOLD summaries |
 | **PERIODIC** | Blue | Yes (`notifications.send_periodic`) | Monthly performance report |
 
@@ -14,7 +14,7 @@ circuit-breaker alert is exactly the failure mode this system exists to prevent.
 `tests/test_notifications.py::TestCategoryFiltering::test_critical_ignores_config_attempting_to_disable_it`
 for the test that guards this.
 
-WARNING *can* be disabled (unlike CRITICAL) — Epic 27's deliberate distinction is that these
+WARNING *can* be disabled (unlike CRITICAL) — the deliberate distinction is that these
 are review-when-convenient risk signals, not run-blocking failures, so a user who's confirmed
 their overlapping-ticker setup is intentional can quiet the recurring email. Disabling the
 email never disables the underlying log line, though (see below) -- the risk is never fully
@@ -29,7 +29,7 @@ notifications:
   send_standard: true             # routine rebalance summaries
   send_periodic: true             # monthly report
   monthly_report_day_of_month: 1  # day of month the report fires; omit/null to disable
-  send_warning: true              # Epic 27: multi-portfolio capital-safety warnings.
+  send_warning: true              # multi-portfolio capital-safety warnings.
                                    # Must be a real bool -- a value like "false" (a truthy
                                    # non-empty string) is rejected at config-load time
                                    # rather than silently doing the opposite of what you meant.
@@ -40,7 +40,7 @@ Plus the same SMTP environment variables already documented in `DEPLOYMENT.md`
 
 ## What each category actually contains
 
-**CRITICAL (capital allocation error, Epic 26)** — **"daily_runner: capital allocation
+**CRITICAL (capital allocation error)** — **"daily_runner: capital allocation
 error"**, sent via `daily_runner.py`'s `send_alert_email()` directly (same unconditional path
 as stop-loss/circuit-breaker, no config gate at all) and always also logged
 (`logger.error`), with the same SMTP-missing ERROR-log fallback every other CRITICAL alert
@@ -51,7 +51,7 @@ consume the whole account. Deliberately NOT made filterable (unlike the two WARN
 below): a run that just silently aborted with no explanation email would be worse than one
 that emails about it, so this stays CRITICAL rather than becoming configurable.
 
-**WARNING (multi-portfolio capital safety, Epic 27)** — two related, non-fatal alerts, sent via
+**WARNING (multi-portfolio capital safety)** — two related, non-fatal alerts, sent via
 `send_action_email(NotificationCategory.WARNING, ...)` (filterable via
 `notifications.send_warning`, defaults to sending if unconfigured — same "unconfigured defaults
 to on" convention as STANDARD/PERIODIC). **The detailed diagnostic log line for each is written
@@ -131,5 +131,7 @@ causing the whole report to fail.
 
 `tests/test_notifications.py` covers filtering logic and content generation — no actual SMTP
 send is tested (would need a real or mocked mail server). Before relying on this in production,
-manually verify actual delivery once with real SMTP credentials configured, the same way you'd
+run `daily-runner --test-email` once with real SMTP credentials configured (see
+`DEPLOYMENT.md`'s "Verify before you trust it") — it does a real send and reports a specific
+failure reason (e.g. a Gmail App Password issue) if something's wrong, the same way you'd
 paper-trade before going live.

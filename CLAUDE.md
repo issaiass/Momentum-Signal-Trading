@@ -78,6 +78,24 @@ that tests enforce — don't casually violate these when editing:
   live and backtested stats can't diverge) or a small dedicated cumulative-growth-index lookback,
   never the monolithic aggregator. Don't route new live-reporting code through `tear_sheet()`
   itself without re-confirming it handles short histories first.
+  `core/fundamentals.py` (P/E, PEG, ROE, Debt-to-Equity, Current Ratio) and `core/macro_data.py`
+  (Fed Funds Rate, CPI) feed the email reports' Fundamental/Macro sections. Confirmed by live
+  testing, not guessed: FMP's `/api/v3/` endpoints are dead (shut down 2025-08-31, return 403
+  regardless of subscription) — `core/fundamentals.py` uses FMP's `/stable/` endpoints instead
+  (`/stable/ratios` + `/stable/key-metrics` for ROE). `core/functions.py`'s `_fetch_fmp()` price
+  fetch has the same migration: `/stable/historical-price-eod/full` for raw OHLCV (what
+  `execution/live_signal.py`'s `fetch_ohlcv_for_tickers()` needs) plus a second call to
+  `/stable/historical-price-eod/dividend-adjusted` merged in for `adjClose` (what
+  `get_bulk_prices()`'s momentum-ranking price series needs — unadjusted close would distort
+  rankings around ex-dividend dates). The `/stable/` response is a flat list, unlike
+  `/api/v3/`'s `{"historical": [...]}` wrapper — don't reintroduce that key lookup. EODHD's
+  fundamentals endpoint returns `403 Only EOD data allowed for free users` on
+  a free-tier key — implemented as a fallback per EODHD's documented response shape but
+  unverified against a real paid response. Both cache to `data/fundamentals_cache.json` (7-day
+  TTL) / `data/macro_cache.json` (30-day TTL) since neither data source changes daily; a failed
+  fetch is never cached, so a transient outage or a since-added API key doesn't block retrying.
+  `core/macro_data.py` needs its own `FRED_API_KEY` (free, `fred.stlouisfed.org`) — unset means
+  the whole macro section is silently omitted, not an error.
 - **`backtest/momentum_backtest.py`** — `BacktestConfig` (validated on construction) and
   `resolve_target_weights()`, the sizing logic shared by *both* the backtest engine and live
   execution, specifically so the two paths can't silently diverge. `lookback_period` is LIVE-ONLY

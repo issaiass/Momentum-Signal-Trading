@@ -359,10 +359,72 @@ def _technical_indicators_html(indicators: dict[str, dict] | None) -> str:
     """
 
 
+def _fundamental_indicators_html(fundamentals: dict[str, dict] | None) -> str:
+    """One row per held ticker, one column per indicator -- fundamentals is
+    {ticker: core/fundamentals.py's get_cached_or_fetch_fundamentals() output}. A ticker with no
+    fundamentals access from either vendor (empty dict -- e.g. your FMP/EODHD plan doesn't
+    include fundamentals) is omitted from the table entirely, same contract as
+    _technical_indicators_html() above. The whole section is omitted if no ticker has any data."""
+    if not fundamentals:
+        return ""
+    tickers_with_data = {t: v for t, v in fundamentals.items() if v}
+    if not tickers_with_data:
+        return ""
+
+    cols = [("pe_ratio", "P/E"), ("peg_ratio", "PEG"), ("roe", "ROE"),
+            ("debt_to_equity", "Debt/Equity"), ("current_ratio", "Current Ratio")]
+    header = "".join(f"<th style='padding:4px 8px; text-align:left;'>{label}</th>" for _, label in cols)
+    body_rows = ""
+    for ticker, vals in tickers_with_data.items():
+        cells = "".join(
+            f"<td style='padding:4px 8px;'>{vals[key]:,.2f}</td>" if vals.get(key) is not None else "<td>—</td>"
+            for key, _ in cols
+        )
+        body_rows += f"<tr><td style='padding:4px 8px;'><b>{ticker}</b></td>{cells}</tr>"
+
+    return f"""
+    <h3>Fundamental Indicators (held positions)</h3>
+    <table style="border-collapse: collapse; font-size: 12px;">
+      <tr><th style='padding:4px 8px; text-align:left;'>Ticker</th>{header}</tr>
+      {body_rows}
+    </table>
+    """
+
+
+def _macro_indicators_html(macro: dict | None) -> str:
+    """Portfolio-independent -- one Fed Funds Rate / CPI reading per report, not per ticker,
+    since macro conditions apply market-wide. macro is core/macro_data.py's
+    get_cached_or_fetch_macro_indicators() output: {"fed_funds_rate": {"value":..., "date":...},
+    "cpi": {"value":..., "date":...}}. Omitted entirely if empty (FRED_API_KEY not configured,
+    or both FRED calls failed)."""
+    if not macro:
+        return ""
+
+    rows = ""
+    if macro.get("fed_funds_rate"):
+        ffr = macro["fed_funds_rate"]
+        rows += (f"<tr><td style='padding:4px 8px;'>Fed Funds Rate</td>"
+                 f"<td style='padding:4px 8px;'>{ffr['value']:.2f}%</td>"
+                 f"<td style='padding:4px 8px; color:#999;'>as of {ffr['date']}</td></tr>")
+    if macro.get("cpi"):
+        cpi = macro["cpi"]
+        rows += (f"<tr><td style='padding:4px 8px;'>CPI</td>"
+                 f"<td style='padding:4px 8px;'>{cpi['value']:.2f}</td>"
+                 f"<td style='padding:4px 8px; color:#999;'>as of {cpi['date']}</td></tr>")
+    if not rows:
+        return ""
+
+    return f"""
+    <h3>Macro Context</h3>
+    <table style="border-collapse: collapse;">{rows}</table>
+    """
+
+
 def _build_report_html(
     portfolio_name: str, report_label: str, period_line: str, snapshot_df: pd.DataFrame,
     comparison: dict, real_pnl: dict | None = None, since_inception: dict | None = None,
     window_comparison: dict | None = None, indicators: dict[str, dict] | None = None,
+    fundamentals: dict[str, dict] | None = None, macro: dict | None = None,
 ) -> tuple[str, bytes | None, bytes | None]:
     """
     Shared HTML/chart builder for both the monthly and daily reports (build_monthly_report_html()
@@ -395,6 +457,14 @@ def _build_report_html(
     indicators : dict, optional
         {ticker: core/technical_indicators.py's compute_latest_indicators() output} for the
         portfolio's currently held positions. Omitted section if not provided.
+    fundamentals : dict, optional
+        {ticker: core/fundamentals.py's get_cached_or_fetch_fundamentals() output} for the
+        portfolio's currently held positions. Omitted section if not provided, or if no ticker
+        has any data (e.g. your FMP/EODHD plan doesn't include fundamentals access).
+    macro : dict, optional
+        core/macro_data.py's get_cached_or_fetch_macro_indicators() output (Fed Funds Rate,
+        CPI) -- portfolio-independent, the same dict is passed to every portfolio's report in a
+        given run. Omitted section if not provided (e.g. FRED_API_KEY not configured).
     """
     value_chart_bytes = _build_value_chart(snapshot_df, f"{portfolio_name}: Portfolio Value")
     comparison_chart_bytes = (
@@ -437,6 +507,8 @@ def _build_report_html(
     comparison_chart_html = '<img src="cid:comparison_chart" style="max-width:100%;">' if comparison_chart_bytes else ""
     strategy_stats_html = _strategy_stats_rows(since_inception)
     indicators_html = _technical_indicators_html(indicators)
+    fundamentals_html = _fundamental_indicators_html(fundamentals)
+    macro_html = _macro_indicators_html(macro)
 
     html = f"""
     <h2>{report_label} Report: {portfolio_name}</h2>
@@ -450,6 +522,8 @@ def _build_report_html(
     <table style="border-collapse: collapse;">{comparison_rows}</table>
     {comparison_chart_html}
     {indicators_html}
+    {fundamentals_html}
+    {macro_html}
     <p style="color:#999; font-size:11px;">This report reflects backtested/paper/live results as configured --
     verify which mode this portfolio is running in before treating these numbers as real returns.</p>
     """
@@ -460,11 +534,13 @@ def build_monthly_report_html(
     portfolio_name: str, snapshot_df: pd.DataFrame, comparison: dict,
     real_pnl: dict | None = None, since_inception: dict | None = None,
     window_comparison: dict | None = None, indicators: dict[str, dict] | None = None,
+    fundamentals: dict[str, dict] | None = None, macro: dict | None = None,
 ) -> tuple[str, bytes | None, bytes | None]:
     """Monthly cadence -- see _build_report_html() for the full parameter docs (shared)."""
     return _build_report_html(
         portfolio_name, "Monthly", f"Period ending {datetime.now().strftime('%Y-%m-%d')}",
         snapshot_df, comparison, real_pnl, since_inception, window_comparison, indicators,
+        fundamentals, macro,
     )
 
 
@@ -472,6 +548,7 @@ def build_daily_report_html(
     portfolio_name: str, snapshot_df: pd.DataFrame, comparison: dict,
     real_pnl: dict | None = None, since_inception: dict | None = None,
     window_comparison: dict | None = None, indicators: dict[str, dict] | None = None,
+    fundamentals: dict[str, dict] | None = None, macro: dict | None = None,
 ) -> tuple[str, bytes | None, bytes | None]:
     """
     Daily cadence -- same content depth as the monthly report (technical indicators, since-
@@ -485,6 +562,7 @@ def build_daily_report_html(
     return _build_report_html(
         portfolio_name, "Daily", f"As of {datetime.now().strftime('%Y-%m-%d')}",
         snapshot_df, comparison, real_pnl, since_inception, window_comparison, indicators,
+        fundamentals, macro,
     )
 
 
@@ -493,11 +571,12 @@ def send_monthly_report(
     notification_config: dict, real_pnl: dict | None = None,
     since_inception: dict | None = None, window_comparison: dict | None = None,
     indicators: dict[str, dict] | None = None,
+    fundamentals: dict[str, dict] | None = None, macro: dict | None = None,
 ) -> bool:
     """PERIODIC category -- filterable, but distinct from CRITICAL/STANDARD filtering."""
     html, value_chart_bytes, comparison_chart_bytes = build_monthly_report_html(
         portfolio_name, snapshot_df, comparison, real_pnl,
-        since_inception, window_comparison, indicators,
+        since_inception, window_comparison, indicators, fundamentals, macro,
     )
 
     if not should_send(NotificationCategory.PERIODIC, notification_config):
@@ -541,6 +620,7 @@ def send_daily_report(
     notification_config: dict, real_pnl: dict | None = None,
     since_inception: dict | None = None, window_comparison: dict | None = None,
     indicators: dict[str, dict] | None = None,
+    fundamentals: dict[str, dict] | None = None, macro: dict | None = None,
 ) -> bool:
     """DAILY category -- filterable via notifications.send_daily, defaults to NOT sending
     unless explicitly enabled (see should_send()'s per-category default). Structurally
@@ -549,7 +629,7 @@ def send_daily_report(
     comparison/window_comparison inputs (daily windows, not monthly)."""
     html, value_chart_bytes, comparison_chart_bytes = build_daily_report_html(
         portfolio_name, snapshot_df, comparison, real_pnl,
-        since_inception, window_comparison, indicators,
+        since_inception, window_comparison, indicators, fundamentals, macro,
     )
 
     if not should_send(NotificationCategory.DAILY, notification_config):

@@ -144,6 +144,13 @@ since an intended BUY/SELL doesn't always actually fill. Built by
   close-only prices fetched for the momentum signal itself). A ticker with too little OHLCV
   history is omitted from the table rather than shown with blank cells; the whole section is
   omitted if no ticker has enough data yet.
+- **Fundamental Indicators (held positions)** — for each currently-held ticker: P/E Ratio, PEG
+  Ratio, ROE, Debt-to-Equity, Current Ratio — from `core/fundamentals.py`, FMP first (with EODHD
+  fallback). A ticker with no fundamentals access from either vendor is omitted from the table;
+  the whole section is omitted if no ticker has data.
+- **Macro Context** — Fed Funds Rate and CPI (latest FRED observation of each), portfolio-wide
+  rather than per-ticker — from `core/macro_data.py`. Omitted entirely if `FRED_API_KEY` is
+  unset or both FRED calls fail.
 
 Degrades gracefully throughout: if there isn't enough snapshot history yet for a chart, benchmark
 comparison data isn't available, or no trade log exists yet (`FileNotFoundError`, e.g. no
@@ -161,7 +168,8 @@ windows. Off by default (`send_daily: false`) -- see the category table above fo
 ## What's implemented vs. deferred
 
 **Implemented and tested** (`tests/interfaces/test_notifications.py`,
-`tests/core/test_technical_indicators.py`, `tests/core/test_functions_quant_extensions.py`):
+`tests/core/test_technical_indicators.py`, `tests/core/test_functions_quant_extensions.py`,
+`tests/core/test_fundamentals.py`, `tests/core/test_macro_data.py`):
 - Category filtering logic (CRITICAL unsuppressable, STANDARD/PERIODIC/DAILY/WARNING
   configurable, DAILY defaulting to off unlike the others)
 - HTML generation for rebalance summaries, monthly reports, and daily reports
@@ -169,17 +177,25 @@ windows. Off by default (`send_daily: false`) -- see the category table above fo
 - Technical indicators (trend/momentum/volatility/volume) for held positions
 - Strategy performance indicators (Total Return, CAGR, Max Drawdown, Std Dev, Sharpe, Sortino)
   since inception
+- **Fundamental indicators** (P/E Ratio, PEG Ratio, ROE, Debt-to-Equity, Current Ratio) for held
+  positions, via `core/fundamentals.py` — tries `FMP_API_KEY` first (FMP's `/stable/ratios` and
+  `/stable/key-metrics` endpoints; the older `/api/v3/` endpoints FMP shut down 2025-08-31 are
+  NOT used), falls back to `EODHD_API_KEY`. **Tier caveat, confirmed by live testing**: FMP's
+  `/stable/` fundamentals endpoints worked against a real key during development; EODHD's
+  fundamentals endpoint returned `403 Only EOD data allowed for free users` against a free-tier
+  key, so the EODHD fallback is implemented per EODHD's documented response shape but unverified
+  against a real paid-tier response. Either way, a ticker with no fundamentals access from either
+  vendor is simply omitted from the section — never an error. Results are file-cached 7 days
+  (fundamentals change quarterly at most) at `data/fundamentals_cache.json`.
+- **Macro Context** (Fed Funds Rate, CPI), via `core/macro_data.py` — sourced from FRED (the St.
+  Louis Fed's API), a **new integration requiring its own free `FRED_API_KEY`**
+  (`fred.stlouisfed.org/docs/api/api_key.html`, no cost). Portfolio-independent (one fetch per
+  run, not per-ticker). If `FRED_API_KEY` is unset, the whole section is simply omitted — same
+  opt-in-by-not-configuring pattern as the email-commanded remote actions IMAP block. File-cached
+  30 days at `data/macro_cache.json`.
 - Graceful degradation on missing/insufficient data
 
 **Deferred, not built in this pass** (flagged explicitly rather than delivered shallow):
-- **Fundamental indicators** (P/E, PEG, ROE, Debt-to-Equity, Current Ratio) and **macro
-  indicators** (Fed Funds Rate, CPI) — genuinely new data-sourcing surface, confirmed nothing in
-  this codebase fetches either today (`get_bulk_prices()`/`get_stock_prices()` are price-only).
-  Fundamentals would need FMP's fundamentals endpoints (unconfirmed whether your plan tier
-  includes them) or a similar vendor; macro data needs a separate source entirely (FRED -- the
-  Federal Reserve's own API, free but a new API key/integration). Deliberately deferred rather
-  than half-built against an unconfirmed data source -- would plug into a new
-  `core/fundamentals.py` module, following the same pattern as `core/technical_indicators.py`.
 - **PDF attachment** for the monthly/daily reports — the HTML report covers the same content; a
   PDF version would need a rendering library (e.g. `weasyprint` or `reportlab`) not currently a
   dependency. Straightforward to add later using `build_monthly_report_html()`'s existing

@@ -36,6 +36,8 @@ from .core.smtp_auth import authenticate as authenticate_smtp, smtp_ready
 from .core.audit_log import log_alert, read_recent_alerts, ALERTS_LOG_PATH
 from .core.paths import data_dir, logs_dir
 from .core.technical_indicators import compute_latest_indicators
+from .core.fundamentals import get_cached_or_fetch_fundamentals
+from .core.macro_data import get_cached_or_fetch_macro_indicators
 from .backtest.momentum_backtest import BacktestConfig
 from .risk.circuit_breaker import (
     LOCK_DIR, check_circuit_breaker, resume_trading, get_effective_max_drawdown_pct,
@@ -729,6 +731,12 @@ def main():
     except Exception as e:
         logger.warning("Email command check failed (non-fatal, continuing with normal run): %s", e)
 
+    # --- Macro indicators (Fed Funds Rate, CPI), fetched ONCE per run, not per-portfolio --
+    #     macro conditions apply market-wide, not per-ticker. Cached (see core/macro_data.py),
+    #     and the FRED_API_KEY presence check happens inside get_cached_or_fetch_macro_indicators()
+    #     before any network attempt, so an unconfigured key costs nothing every run. ---
+    macro_indicators = get_cached_or_fetch_macro_indicators(fred_api_key=os.environ.get("FRED_API_KEY"))
+
     try:
         for name, spec in portfolios.items():
             cfg = spec["cfg"]
@@ -851,9 +859,17 @@ def main():
                         daily_windows = fnx.daily_window_comparison(name)
                         held_tickers = list(current_positions.keys())
                         daily_indicators = {}
+                        daily_fundamentals = {}
                         if held_tickers:
                             ohlcv = fetch_ohlcv_for_tickers(held_tickers)
                             daily_indicators = {t: compute_latest_indicators(df) for t, df in ohlcv.items()}
+                            daily_fundamentals = {
+                                t: get_cached_or_fetch_fundamentals(
+                                    t, fmp_api_key=os.environ.get("FMP_API_KEY"),
+                                    eodhd_api_key=os.environ.get("EODHD_API_KEY"),
+                                )
+                                for t in held_tickers
+                            }
                         try:
                             daily_real_pnl = measure_live_performance(
                                 "1970-01-01", datetime.today().strftime("%Y-%m-%d"),
@@ -865,6 +881,7 @@ def main():
                         send_daily_report(
                             name, daily_snapshot_df, daily_comparison, notification_cfg,
                             daily_real_pnl, daily_since_inception, daily_windows, daily_indicators,
+                            daily_fundamentals, macro_indicators,
                         )
                 except Exception as e:
                     logger.warning("[%s] Daily report skipped due to error (non-fatal): %s", name, e)
@@ -922,9 +939,17 @@ def main():
                         window_comparison = fnx.monthly_window_comparison(name)
                         held_tickers = list(current_positions.keys())
                         indicators = {}
+                        fundamentals = {}
                         if held_tickers:
                             ohlcv = fetch_ohlcv_for_tickers(held_tickers)
                             indicators = {t: compute_latest_indicators(df) for t, df in ohlcv.items()}
+                            fundamentals = {
+                                t: get_cached_or_fetch_fundamentals(
+                                    t, fmp_api_key=os.environ.get("FMP_API_KEY"),
+                                    eodhd_api_key=os.environ.get("EODHD_API_KEY"),
+                                )
+                                for t in held_tickers
+                            }
                         # --- REAL realized+unrealized P&L from the trade log (FIFO),
                         #     distinct from the snapshot-based unrealized_pnl already in the
                         #     report -- this covers cumulative gains from trades that have since
@@ -943,6 +968,7 @@ def main():
                         send_monthly_report(
                             name, snapshot_df, comparison, notification_cfg, real_pnl,
                             since_inception, window_comparison, indicators,
+                            fundamentals, macro_indicators,
                         )
             else:
                 logger.info("[%s] Not a rebalance day -- stop-loss check complete only.", name)

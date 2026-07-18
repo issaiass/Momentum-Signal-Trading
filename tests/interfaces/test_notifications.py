@@ -249,6 +249,73 @@ class TestHTMLGeneration:
         )
         assert "Technical Indicators" not in html
 
+    def test_monthly_report_includes_fundamentals_when_provided(self):
+        snap = pd.DataFrame({
+            "date": pd.date_range("2026-01-01", periods=1, freq="ME"),
+            "total_value": [1000], "cash": [1000], "unrealized_pnl": [0],
+        })
+        fundamentals = {
+            "SPY": {"pe_ratio": 25.0, "peg_ratio": 1.5, "roe": 0.3,
+                     "debt_to_equity": 1.1, "current_ratio": 0.9},
+            "QQQ": {},  # no fundamentals access from either vendor
+        }
+        html, _, _ = build_monthly_report_html(
+            "portfolio1", snap, {"error": "no data"}, fundamentals=fundamentals,
+        )
+        assert "Fundamental Indicators" in html
+        assert "SPY" in html
+        assert "QQQ" not in html  # empty dict -- omitted, not shown blank
+
+    def test_monthly_report_omits_fundamentals_section_when_not_provided(self):
+        snap = pd.DataFrame({
+            "date": pd.date_range("2026-01-01", periods=1, freq="ME"),
+            "total_value": [1000], "cash": [1000], "unrealized_pnl": [0],
+        })
+        html, _, _ = build_monthly_report_html("portfolio1", snap, {"error": "no data"})
+        assert "Fundamental Indicators" not in html
+
+    def test_monthly_report_omits_fundamentals_section_when_none_have_data(self):
+        snap = pd.DataFrame({
+            "date": pd.date_range("2026-01-01", periods=1, freq="ME"),
+            "total_value": [1000], "cash": [1000], "unrealized_pnl": [0],
+        })
+        html, _, _ = build_monthly_report_html(
+            "portfolio1", snap, {"error": "no data"}, fundamentals={"SPY": {}},
+        )
+        assert "Fundamental Indicators" not in html
+
+    def test_monthly_report_includes_macro_when_provided(self):
+        snap = pd.DataFrame({
+            "date": pd.date_range("2026-01-01", periods=1, freq="ME"),
+            "total_value": [1000], "cash": [1000], "unrealized_pnl": [0],
+        })
+        macro = {
+            "fed_funds_rate": {"value": 3.63, "date": "2026-06-01"},
+            "cpi": {"value": 332.568, "date": "2026-06-01"},
+        }
+        html, _, _ = build_monthly_report_html(
+            "portfolio1", snap, {"error": "no data"}, macro=macro,
+        )
+        assert "Macro Context" in html
+        assert "Fed Funds Rate" in html
+        assert "CPI" in html
+
+    def test_monthly_report_omits_macro_section_when_not_provided(self):
+        snap = pd.DataFrame({
+            "date": pd.date_range("2026-01-01", periods=1, freq="ME"),
+            "total_value": [1000], "cash": [1000], "unrealized_pnl": [0],
+        })
+        html, _, _ = build_monthly_report_html("portfolio1", snap, {"error": "no data"})
+        assert "Macro Context" not in html
+
+    def test_monthly_report_omits_macro_section_when_empty_dict(self):
+        snap = pd.DataFrame({
+            "date": pd.date_range("2026-01-01", periods=1, freq="ME"),
+            "total_value": [1000], "cash": [1000], "unrealized_pnl": [0],
+        })
+        html, _, _ = build_monthly_report_html("portfolio1", snap, {"error": "no data"}, macro={})
+        assert "Macro Context" not in html
+
 
 class TestBuildComparisonBarChart:
     def test_returns_png_bytes_for_valid_window_data(self):

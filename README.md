@@ -110,6 +110,10 @@ momentum-trading/
 │   │   │                             since-inception + trailing-window live performance stats
 │   │   ├── technical_indicators.py  hand-rolled SMA/EMA/RSI/MACD/ATR/Bollinger/ADX/VWAP/OBV --
 │   │   │                             not pandas-ta (dependency-conflicts with pandas>=3.0.3)
+│   │   ├── fundamentals.py          P/E, PEG, ROE, Debt-to-Equity, Current Ratio for held
+│   │   │                             positions -- FMP `/stable/` first, EODHD fallback, file-cached
+│   │   ├── macro_data.py            Fed Funds Rate, CPI via FRED -- needs FRED_API_KEY,
+│   │   │                             portfolio-wide (one fetch per run), file-cached
 │   │   ├── paths.py                 PROJECT_ROOT resolution -- single source of truth for
 │   │   │                             where config.yaml/data/logs live, regardless of CWD
 │   │   ├── smtp_auth.py             shared SMTP auth for email sending -- password-based
@@ -150,7 +154,7 @@ momentum-trading/
 │       └── email_diagnostics.py     backs `daily-runner --test-email` -- live SMTP+IMAP
 │                                     check independent of config.yaml
 │
-└── tests/                         pytest suite (319 tests), mirrors src/ layout where a
+└── tests/                         pytest suite (348 tests), mirrors src/ layout where a
     ├── conftest.py                  test's primary subject is a single sub-package;
     ├── test_architecture.py         cross-cutting/integration tests stay at tests/ root
     ├── test_daily_runner.py
@@ -164,7 +168,9 @@ momentum-trading/
     ├── core/
     │   ├── test_audit_log.py        hash-chain helper + alert log
     │   ├── test_technical_indicators.py
-    │   └── test_functions_quant_extensions.py   since-inception + trailing-window stats
+    │   ├── test_functions_quant_extensions.py   since-inception + trailing-window stats
+    │   ├── test_fundamentals.py       P/E, PEG, ROE, Debt-to-Equity, Current Ratio
+    │   └── test_macro_data.py         Fed Funds Rate, CPI (FRED)
     ├── execution/
     │   └── test_live_signal.py
     └── interfaces/
@@ -387,11 +393,6 @@ line between "this codebase is well-tested" and "this strategy is proven." Furth
 - Tax-aware return modeling for taxable accounts
 - Real order-book-based capacity/market-impact validation, beyond the current ADV-based
   advisory check
-- Fundamental indicators (P/E, PEG, ROE, Debt-to-Equity, Current Ratio) and macro indicators
-  (Fed Funds Rate, CPI) in the performance reports — deliberately deferred, not built: genuinely
-  new data-sourcing surface (nothing in this codebase fetches either today), needing FMP's
-  fundamentals endpoints (plan-tier availability unconfirmed) and a separate FRED integration
-  for macro data. See `docs/EMAIL_REPORTING.md`'s "What's implemented vs. deferred"
 
 </details>
 

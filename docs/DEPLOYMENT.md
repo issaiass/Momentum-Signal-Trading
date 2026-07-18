@@ -53,7 +53,7 @@ pip install -r requirements-dev.txt
 pytest tests/ -v
 ```
 
-319 tests should pass cleanly. This only confirms code mechanics work on this machine
+348 tests should pass cleanly. This only confirms code mechanics work on this machine
 (dependencies installed correctly, no environment mismatch) — see `TESTING.md` for what the
 suite does and doesn't validate, and how to interpret a failure if one occurs.
 
@@ -156,6 +156,10 @@ it's a pure email-setup check, safe to run before you've done anything else.
    ```
    FMP_API_KEY=your_key_here
    EODHD_API_KEY=your_key_here
+   # Fed Funds Rate / CPI in the "Macro Context" report section -- optional, free signup at
+   # https://fred.stlouisfed.org/docs/api/api_key.html (no cost, ~5 min). Leave unset and the
+   # macro section is simply omitted from reports, no error.
+   FRED_API_KEY=your_key_here
    SMTP_PROVIDER=gmail
    SMTP_HOST=smtp.gmail.com
    SMTP_PORT=587
@@ -274,6 +278,9 @@ rather run Python directly on Windows.
    ```powershell
    [System.Environment]::SetEnvironmentVariable("FMP_API_KEY", "your_key_here", "User")
    [System.Environment]::SetEnvironmentVariable("EODHD_API_KEY", "your_key_here", "User")
+   # Optional -- Fed Funds Rate / CPI in the "Macro Context" report section. Free signup at
+   # https://fred.stlouisfed.org/docs/api/api_key.html. Unset = macro section omitted, no error.
+   [System.Environment]::SetEnvironmentVariable("FRED_API_KEY", "your_key_here", "User")
    [System.Environment]::SetEnvironmentVariable("SMTP_PROVIDER", "gmail", "User")
    [System.Environment]::SetEnvironmentVariable("SMTP_HOST", "smtp.gmail.com", "User")
    [System.Environment]::SetEnvironmentVariable("SMTP_PORT", "587", "User")

@@ -96,26 +96,54 @@ def get_stock_prices(
     # Helper function: Fetch from FMP
     # -------------------------------------------------------------------------
     def _fetch_fmp() -> pd.DataFrame:
-        """Fetch data from Financial Modeling Prep API."""
+        """Fetch data from Financial Modeling Prep API.
+
+        Uses FMP's `/stable/` endpoints, not the legacy `/api/v3/` path this function used
+        before -- FMP shut down every `/api/v3/` endpoint 2025-08-31, and it now returns 403
+        "Legacy Endpoint" regardless of subscription tier (confirmed by live testing against a
+        real key; see CLAUDE.md's core/ notes). Two `/stable/` calls are needed to match the
+        old response shape: `/historical-price-eod/full` for raw OHLCV (needed by
+        execution/live_signal.py's fetch_ohlcv_for_tickers(), which requires plain
+        open/high/low/close/volume for technical indicators) and
+        `/historical-price-eod/dividend-adjusted` for `adjClose` (needed by this module's
+        get_bulk_prices(), whose momentum-ranking price series must be dividend-adjusted --
+        unadjusted close would distort rankings around ex-dividend dates for dividend-paying
+        ETFs). The response is a flat list, unlike `/api/v3/`'s `{"historical": [...]}` wrapper.
+        """
         if not fmp_api_key:
             raise ValueError("FMP API key not provided")
-        
-        url = (
-            f"https://financialmodelingprep.com/api/v3/historical-price-full/"
-            f"{symbol}?from={start_date}&to={end_date}&apikey={fmp_api_key}"
+
+        ohlcv_url = (
+            f"https://financialmodelingprep.com/stable/historical-price-eod/full"
+            f"?symbol={symbol}&from={start_date}&to={end_date}&apikey={fmp_api_key}"
         )
-        
-        response = urlopen(url, context=ssl_context)
-        data = response.read().decode("utf-8")
-        prices = json.loads(data)
-        
+        response = urlopen(ohlcv_url, context=ssl_context)
+        prices = json.loads(response.read().decode("utf-8"))
+
         # Check for valid response
-        if 'historical' not in prices or not prices['historical']:
+        if not prices:
             raise ValueError(f"No data returned from FMP for {symbol}")
-        
-        df = pd.DataFrame(prices['historical']).set_index('date').sort_index()
+
+        df = pd.DataFrame(prices).set_index('date').sort_index()
         df.index = pd.to_datetime(df.index)
-        
+
+        # Dividend-adjusted close -- best-effort second call. Non-fatal if it fails: the raw
+        # OHLCV above still stands, and get_bulk_prices() already falls back to unadjusted
+        # 'close' when 'adjClose' is absent from the frame.
+        try:
+            adj_url = (
+                f"https://financialmodelingprep.com/stable/historical-price-eod/dividend-adjusted"
+                f"?symbol={symbol}&from={start_date}&to={end_date}&apikey={fmp_api_key}"
+            )
+            adj_response = urlopen(adj_url, context=ssl_context)
+            adj_prices = json.loads(adj_response.read().decode("utf-8"))
+            if adj_prices:
+                adj_df = pd.DataFrame(adj_prices).set_index('date')[['adjClose']]
+                adj_df.index = pd.to_datetime(adj_df.index)
+                df = df.join(adj_df, how='left')
+        except Exception:
+            pass
+
         return df
     
     # -------------------------------------------------------------------------

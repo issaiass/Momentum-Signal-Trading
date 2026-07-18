@@ -391,6 +391,26 @@ This confirms monthly is both the default configuration (`holding_period: 1` in
 `config.example.yaml`) and holiday/weekend-aware, and that weekly (and every 2/3-week) cadences
 get the identical trading-calendar treatment, not a separate or weaker mechanism.
 
+## 4.11b. Long-Term vs. Short-Term Momentum
+
+`lookback_period` (the trailing-return window used to RANK tickers, separate from
+`holding_period`'s rebalance cadence) accepts fractional values too, but its granularity is
+tied to `holding_period`'s regime, not its own value. Under the monthly default
+(`holding_period: 1`), `lookback_period` stays in whole months, `12` = the classic
+long-term-momentum default. Under a weekly `holding_period` (`< 1`), `lookback_period` switches
+to week-scale via the same formula `holding_period` itself uses, `0.5` = 2 weeks, `0.75` = 3
+weeks, `1.0` = 4 weeks, `1.5` = 6 weeks, a short-term-momentum configuration:
+```yaml
+default_risk:
+  holding_period: 0.25    # weekly rebalance
+  lookback_period: 0.5    # 2-week momentum window
+```
+See `STRATEGY_THEORY.md`'s "Lookback" item for the theory and the honest caveat that week-scale
+lookbacks depart from the academic 3-12 month range the strategy's underlying research actually
+validated. A lookback shorter than 2 weeks under a weekly `holding_period` triggers a
+non-blocking WARNING (mirrors the `holding_period`-too-frequent warning above), a momentum
+signal that short is dominated by noise.
+
 ## 4.12. Additional capabilities, quick pointers
 
 - **Alternative position sizing**: set `sizing_method: score_proportional` in `config.yaml`'s

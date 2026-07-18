@@ -21,7 +21,8 @@ import momentum_trading.execution.live_signal as live_signal
 from momentum_trading.execution.live_signal import (
     generate_orders, log_orders, measure_live_performance, run_multi_portfolio, get_top_etfs,
     compute_aggregate_drift, derive_entry_date, compute_target_weights,
-    is_rebalance_day, is_holding_period_too_frequent, build_position_performance,
+    is_rebalance_day, is_holding_period_too_frequent, is_lookback_period_too_short,
+    build_position_performance, resolve_momentum_scores, calculate_period_returns,
 )
 from momentum_trading.core.audit_log import read_recent_alerts
 
@@ -87,6 +88,138 @@ class TestIsHoldingPeriodTooFrequent:
 
     def test_monthly_default_is_not_too_frequent(self):
         assert is_holding_period_too_frequent(1.0) is False
+
+
+class TestIsLookbackPeriodTooShort:
+    """
+    Single source of truth for the 'shorter than 2 weeks' threshold used by
+    daily_runner.py's non-blocking WARNING check, only meaningful in the weekly regime
+    (holding_period < 1), these tests pin the exact boundary, including that a 2-week
+    lookback (lookback_period=0.5), the shortest of the documented short-term examples,
+    does NOT warn.
+    """
+
+    def test_two_weeks_is_not_too_short(self):
+        assert is_lookback_period_too_short(0.5, 0.25) is False
+
+    def test_one_week_is_too_short(self):
+        assert is_lookback_period_too_short(0.25, 0.25) is True
+
+    def test_three_weeks_is_not_too_short(self):
+        assert is_lookback_period_too_short(0.75, 0.25) is False
+
+    def test_monthly_regime_is_never_too_short_even_with_a_tiny_value(self):
+        # holding_period >= 1 means lookback_period is interpreted in months, not weeks,
+        # this check only applies to the weekly regime.
+        assert is_lookback_period_too_short(0.1, 1.0) is False
+
+    def test_monthly_default_is_not_too_short(self):
+        assert is_lookback_period_too_short(12.0, 1.0) is False
+
+
+class TestResolveMomentumScores:
+    """
+    resolve_momentum_scores() is where run() decides monthly vs. weekly momentum ranking,
+    ties lookback_period's granularity to holding_period's regime rather than
+    lookback_period's own value. These tests hand-verify the weekly branch's exact
+    arithmetic (not just "doesn't crash") and confirm the monthly branch is byte-for-byte
+    the same computation the old inline code did.
+    """
+
+    def _linear_daily_prices(self, n_business_days, start="2026-01-05"):
+        # Monday start, price grows by exactly 1.0 per business day so resample("W").last()
+        # (which picks each week's Friday close) produces an exact, hand-computable
+        # arithmetic sequence: week k's value is 100 + 4 + 5*k (5 business days/week).
+        dates = pd.bdate_range(start, periods=n_business_days)
+        prices = pd.Series(100.0 + np.arange(n_business_days), index=dates)
+        return pd.DataFrame({"XLK": prices})
+
+    def test_weekly_regime_two_week_lookback(self):
+        # lookback_period=0.5 under a weekly holding_period -> 2 weeks, the shortest of
+        # the documented short-term examples.
+        daily_prices = self._linear_daily_prices(35)  # 7 weeks
+        scores = resolve_momentum_scores(daily_prices, lookback_period=0.5, holding_period=0.25)
+        weekly = daily_prices.resample("W").last()["XLK"]
+        expected = (weekly.iloc[2] - weekly.iloc[0]) / weekly.iloc[0]
+        assert scores["XLK"].iloc[2] == pytest.approx(expected)
+        assert expected == pytest.approx(10 / 104)
+
+    def test_weekly_regime_three_week_lookback(self):
+        daily_prices = self._linear_daily_prices(35)
+        scores = resolve_momentum_scores(daily_prices, lookback_period=0.75, holding_period=0.25)
+        weekly = daily_prices.resample("W").last()["XLK"]
+        expected = (weekly.iloc[3] - weekly.iloc[0]) / weekly.iloc[0]
+        assert scores["XLK"].iloc[3] == pytest.approx(expected)
+        assert expected == pytest.approx(15 / 104)
+
+    def test_weekly_regime_four_week_lookback(self):
+        daily_prices = self._linear_daily_prices(35)
+        scores = resolve_momentum_scores(daily_prices, lookback_period=1.0, holding_period=0.25)
+        weekly = daily_prices.resample("W").last()["XLK"]
+        expected = (weekly.iloc[4] - weekly.iloc[0]) / weekly.iloc[0]
+        assert scores["XLK"].iloc[4] == pytest.approx(expected)
+        assert expected == pytest.approx(20 / 104)
+
+    def test_weekly_regime_six_week_lookback(self):
+        daily_prices = self._linear_daily_prices(50)  # 10 weeks, enough for a 6-week lookback
+        scores = resolve_momentum_scores(daily_prices, lookback_period=1.5, holding_period=0.25)
+        weekly = daily_prices.resample("W").last()["XLK"]
+        expected = (weekly.iloc[6] - weekly.iloc[0]) / weekly.iloc[0]
+        assert scores["XLK"].iloc[6] == pytest.approx(expected)
+        assert expected == pytest.approx(30 / 104)
+
+    def test_tiny_lookback_period_floors_to_one_week(self):
+        # max(1, round(0.05 * 4)) = max(1, 0) = 1 week, mirrors is_rebalance_day()'s
+        # identical floor for holding_period.
+        daily_prices = self._linear_daily_prices(20)
+        scores = resolve_momentum_scores(daily_prices, lookback_period=0.05, holding_period=0.25)
+        weekly = daily_prices.resample("W").last()["XLK"]
+        expected = (weekly.iloc[1] - weekly.iloc[0]) / weekly.iloc[0]
+        assert scores["XLK"].iloc[1] == pytest.approx(expected)
+
+    def test_monthly_regime_matches_the_pre_existing_inline_computation(self):
+        # Regression safety: holding_period >= 1 must produce EXACTLY what the old
+        # inline code in run() did (monthly resample + calculate_period_returns), not a
+        # new/different computation.
+        dates = pd.bdate_range("2024-01-01", "2026-01-01")
+        rng = np.random.default_rng(0)
+        prices = pd.Series(100 + np.cumsum(rng.normal(0, 1, len(dates))), index=dates)
+        daily_prices = pd.DataFrame({"XLK": prices, "QQQ": prices * 1.5})
+
+        actual = resolve_momentum_scores(daily_prices, lookback_period=12.0, holding_period=1.0)
+
+        monthly_prices = daily_prices.resample("ME").last()
+        expected = calculate_period_returns(monthly_prices, period=12)
+
+        pd.testing.assert_frame_equal(actual, expected)
+
+    def test_run_invokes_the_weekly_path_when_holding_period_is_sub_monthly(self, monkeypatch, tmp_path):
+        # Integration confirmation, not just that resolve_momentum_scores() works in
+        # isolation, but that run() actually calls it with cfg.holding_period (not some
+        # other value), end to end, for a real weekly-cadence config.
+        dates = pd.bdate_range("2025-01-01", "2026-07-09")
+        rng = np.random.default_rng(2)
+        data = {t: np.cumprod(1 + rng.normal(0.0005, 0.01, len(dates))) * 100 for t in ["SPY", "QQQ"]}
+        fake_prices = pd.DataFrame(data, index=dates)
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda *a, **k: fake_prices)
+        monkeypatch.chdir(tmp_path)
+
+        calls = []
+        real_resolve = live_signal.resolve_momentum_scores
+
+        def spy_resolve(daily_prices, lookback_period, holding_period):
+            calls.append((lookback_period, holding_period))
+            return real_resolve(daily_prices, lookback_period, holding_period)
+
+        monkeypatch.setattr(live_signal, "resolve_momentum_scores", spy_resolve)
+
+        cfg = BacktestConfig(holding_period=0.25, use_regime_filter=False)
+        live_signal.run(
+            tickers=["SPY", "QQQ"], current_holdings={}, total_value=1000.0, cfg=cfg,
+            top_n=2, lookback_period=0.5, dry_run=True,
+        )
+
+        assert calls == [(0.5, 0.25)]
 
 
 class TestGetTopEtfs:

@@ -66,7 +66,7 @@ class BacktestConfig:
                                              # / is_holding_period_too_frequent()), deliberately
                                              # not hard-blocked, since it's a real, well-defined
                                              # schedule, just an economically inadvisable one.
-    lookback_period: int = 12               # trailing months of returns used to RANK tickers by
+    lookback_period: float = 12.0           # trailing months of returns used to RANK tickers by
                                              # momentum (distinct from holding_period, which
                                              # controls how often you rebalance, not how far back
                                              # the signal looks). LIVE-ONLY, the backtest engine
@@ -76,6 +76,20 @@ class BacktestConfig:
                                              # before run_custom_backtest() ever runs, so this field
                                              # has no effect on backtest results (mirrors
                                              # commission's BACKTEST-ONLY note, opposite direction).
+                                             # Accepts fractional values, but its granularity is
+                                             # tied to holding_period's regime, not its own value:
+                                             # if holding_period < 1 (weekly cadence), lookback_period
+                                             # is ALSO interpreted in week-quarters via the same
+                                             # round(x * 4) formula is_rebalance_day() uses for
+                                             # holding_period (0.5 = 2 weeks, 0.75 = 3 weeks, 1.0 =
+                                             # 4 weeks, 1.5 = 6 weeks), see
+                                             # execution/live_signal.py's resolve_momentum_scores().
+                                             # If holding_period >= 1, lookback_period stays in
+                                             # whole months exactly as before. Values shorter than 2
+                                             # weeks in the weekly regime are allowed but trigger a
+                                             # non-blocking WARNING (see
+                                             # is_lookback_period_too_short()), a momentum signal
+                                             # that short is genuinely noisy.
     initial_capital: float = 100_000.0
     commission: float = 0.0                 # flat $ per trade, BACKTEST-ONLY: only
                                              # run_risk_managed_backtest()'s simulated cash
@@ -205,8 +219,8 @@ class BacktestConfig:
             errors.append(f"max_portfolio_drawdown_pct ({self.max_portfolio_drawdown_pct}) should be in [0, 1.0)")
         if self.holding_period <= 0:
             errors.append(f"holding_period ({self.holding_period}) must be > 0")
-        if self.lookback_period < 1:
-            errors.append(f"lookback_period ({self.lookback_period}) must be >= 1")
+        if self.lookback_period <= 0:
+            errors.append(f"lookback_period ({self.lookback_period}) must be > 0")
         if self.top_n < 1:
             errors.append(f"top_n ({self.top_n}) must be >= 1")
         if self.initial_capital <= 0:

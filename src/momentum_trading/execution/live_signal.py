@@ -119,6 +119,22 @@ def is_holding_period_too_frequent(holding_period: float) -> bool:
     return 0 < holding_period < 0.25
 
 
+def is_lookback_period_too_short(lookback_period: float, holding_period: float) -> bool:
+    """
+    True when the momentum-ranking window is short enough to be dominated by noise rather than
+    real trend, a well-known problem with sub-2-week momentum signals, single-day price moves
+    can flip the ranking. Only meaningful in the weekly regime (holding_period < 1), where
+    lookback_period is interpreted in week-quarters via the same round(x * 4) formula
+    resolve_momentum_scores() uses; always False in the monthly regime (holding_period >= 1),
+    since a whole-month lookback is never "too short" the way a few days is, and
+    BacktestConfig's own > 0 validation already rules out zero/negative values there.
+    """
+    if holding_period >= 1:
+        return False
+    weeks_lookback = max(1, round(lookback_period * 4))
+    return weeks_lookback < 2
+
+
 def is_rebalance_day(holding_period_months: float = 1, exchange: str = "NYSE",
                       reference_day_of_month: int = 1,
                       today: pd.Timestamp | None = None) -> bool:
@@ -184,6 +200,35 @@ def is_rebalance_day(holding_period_months: float = 1, exchange: str = "NYSE",
 # --------------------------------------------------------------------------- #
 def calculate_period_returns(df_prices: pd.DataFrame, period: int = 12) -> pd.DataFrame:
     return df_prices.ffill().pct_change(periods=period)
+
+
+def resolve_momentum_scores(
+    daily_prices: pd.DataFrame, lookback_period: float, holding_period: float,
+) -> pd.DataFrame:
+    """
+    Resamples daily_prices to the granularity matching the strategy's cadence and computes
+    trailing-period returns for momentum ranking, the single place run() decides monthly vs.
+    weekly momentum. Deliberately a separate, directly-testable pure function (no IBKR/network
+    dependency), matching this file's existing pattern (calculate_period_returns()/
+    assign_ranks()/get_top_etfs() are all already small composable pure functions).
+
+    holding_period < 1 (weekly rebalance cadence, see is_rebalance_day()'s identical weekly
+    branch) resamples to WEEKLY and interprets lookback_period in week-quarters via the same
+    round(x * 4) formula: 0.5 = 2 weeks, 0.75 = 3 weeks, 1.0 = 4 weeks, 1.5 = 6 weeks. This ties
+    lookback_period's granularity to holding_period's regime rather than lookback_period's own
+    value, so a short-term (weekly) strategy's lookback window is expressed on the SAME
+    week-scale as its rebalance cadence, not mixed months/weeks, lookback_period=1.0 under a
+    weekly holding_period means "4 weeks", not "1 month".
+
+    holding_period >= 1 (monthly+ cadence) resamples to MONTHLY exactly as before,
+    lookback_period stays in whole months, this branch is byte-for-byte the existing behavior.
+    """
+    if holding_period < 1:
+        weeks_lookback = max(1, round(lookback_period * 4))
+        resampled = daily_prices.resample("W").last()
+        return calculate_period_returns(resampled, period=weeks_lookback)
+    monthly_prices = daily_prices.resample("ME").last()
+    return calculate_period_returns(monthly_prices, period=max(1, round(lookback_period)))
 
 
 def assign_ranks(df_returns: pd.DataFrame) -> pd.DataFrame:
@@ -1385,7 +1430,7 @@ def run(
     total_value: float,
     cfg: BacktestConfig,
     top_n: int = 10,
-    lookback_period: int = 12,
+    lookback_period: float = 12.0,
     dry_run: bool = True,
     ibkr_port: int = 7497,
     fmp_api_key: str | None = None,
@@ -1400,8 +1445,7 @@ def run(
         logger.error("No price data returned; aborting.")
         return {}
 
-    monthly_prices = daily_prices.resample("ME").last()
-    scores = calculate_period_returns(monthly_prices, period=lookback_period).dropna(how="all")
+    scores = resolve_momentum_scores(daily_prices, lookback_period, cfg.holding_period).dropna(how="all")
     ranks = assign_ranks(scores)
     picks = get_top_etfs(ranks, top_n=top_n)
     logger.info("Today's signal picks (top %d): %s", top_n, picks)

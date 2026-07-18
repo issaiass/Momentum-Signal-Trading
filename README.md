@@ -37,7 +37,10 @@ so on purpose.
 - Portfolio-level circuit breaker (% and $ drawdown), idempotent daily scheduling, config-approval
   gate before `--live` will run. Monthly (default) or weekly rebalancing, both targeting the
   first real NYSE trading day of the period via `pandas_market_calendars`, automatically rolling
-  forward past weekends/holidays rather than firing on a fixed calendar date
+  forward past weekends/holidays rather than firing on a fixed calendar date. Long-term
+  (monthly-scale, the academically-studied default) or short-term (weekly-scale, an unvalidated
+  variant) momentum lookback windows, both configurable via `holding_period`/`lookback_period`
+  in `config.example.yaml`
 - Hash-chained, tamper-evident audit logs for trades, email commands, and alerts, three
   separate logs, kept deliberately apart
 - Categorized email notifications (CRITICAL/STANDARD/PERIODIC/DAILY/WARNING) and pydantic-
@@ -54,7 +57,7 @@ so on purpose.
   monthly report, 1-day/1/2/3-week for the daily report)
 - Dockerized, self-scheduling deployment (`docker compose up -d`, internal cron, no manual
   triggering needed for normal operation)
-- 359-test pytest suite covering code mechanics, order sizing, config validation, audit-log
+- 373-test pytest suite covering code mechanics, order sizing, config validation, audit-log
   integrity, multi-portfolio capital math, entirely on synthetic/mocked data, no live broker
   required to run it
 
@@ -163,7 +166,7 @@ momentum-trading/
 │       └── email_diagnostics.py     backs `daily-runner --test-email`, live SMTP+IMAP
 │                                     check independent of config.yaml
 │
-└── tests/                         pytest suite (359 tests), mirrors src/ layout where a
+└── tests/                         pytest suite (373 tests), mirrors src/ layout where a
     ├── conftest.py                  test's primary subject is a single sub-package;
     ├── test_architecture.py         cross-cutting/integration tests stay at tests/ root
     ├── test_daily_runner.py

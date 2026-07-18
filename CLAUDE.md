@@ -104,6 +104,17 @@ that tests enforce, don't casually violate these when editing:
   `holding_period` is a `float`, not just an `int`, values below `1` map onto weeks (`0.25` =
   weekly) via `execution/live_signal.py`'s `is_rebalance_day()`; only `holding_period <= 0` is a
   hard validation error, sub-weekly values (`< 0.25`) are allowed but flagged (see below).
+  `lookback_period` is also a `float` now, not an `int`, only `lookback_period <= 0` is a hard
+  error. Its granularity is tied to `holding_period`'s regime, not its own value:
+  `execution/live_signal.py`'s `resolve_momentum_scores()` interprets `lookback_period` in
+  week-quarters (`round(x * 4)`, same formula `is_rebalance_day()` uses for `holding_period`)
+  when `holding_period < 1`, or whole months otherwise, this is deliberate, a short-term
+  (weekly) strategy's lookback window is expressed on the SAME week-scale as its rebalance
+  cadence, not mixed months/weeks, `lookback_period: 1.0` under a weekly `holding_period` means
+  "4 weeks", not "1 month". `run()` calls `resolve_momentum_scores()` instead of resampling
+  inline, don't reintroduce a hardcoded `resample("ME")` there. `is_lookback_period_too_short()`
+  is the sub-2-week advisory warning, mirrors `is_holding_period_too_frequent()`'s non-blocking
+  pattern, only meaningful in the weekly regime.
   `is_rebalance_day()` targets the first REAL trading day of the period (monthly or weekly), not
   a fixed calendar date: `mcal.get_calendar(exchange)` (default `"NYSE"`) +
   `cal.schedule(start_date, end_date)` builds the exchange's actual trading-session list for the

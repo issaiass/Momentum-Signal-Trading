@@ -27,7 +27,8 @@ import yaml
 import pandas as pd
 
 from .execution.live_signal import (
-    is_rebalance_day, is_holding_period_too_frequent, run, run_multi_portfolio,
+    is_rebalance_day, is_holding_period_too_frequent, is_lookback_period_too_short,
+    run, run_multi_portfolio,
     get_ibkr_positions, get_ibkr_account_value, with_retry,
     place_orders_ibkr, log_orders, write_portfolio_snapshot, get_latest_snapshot,
     derive_entry_date, measure_live_performance, fetch_ohlcv_for_tickers,
@@ -777,6 +778,38 @@ def main():
                     NotificationCategory.WARNING, f"Holding period faster than weekly: {name}",
                     f"<pre>{holding_period_text}</pre>", notification_cfg,
                     plain_text_fallback=holding_period_text,
+                )
+
+            # --- Lookback-period-too-short warning (non-blocking), only meaningful in the
+            #     weekly regime (holding_period < 1), where lookback_period is interpreted in
+            #     week-quarters by resolve_momentum_scores(); a sub-2-week momentum window is a
+            #     real, well-defined signal, just a noisy/whipsaw-prone one. ---
+            if is_lookback_period_too_short(cfg.lookback_period, cfg.holding_period):
+                logger.warning(
+                    "[%s] lookback_period=%s (holding_period=%s) is shorter than 2 weeks, "
+                    "not recommended. A momentum window this short is dominated by noise "
+                    "rather than real trend.", name, cfg.lookback_period, cfg.holding_period,
+                )
+                log_alert(
+                    name, "LOOKBACK_PERIOD_TOO_SHORT", "WARNING",
+                    f"lookback_period={cfg.lookback_period} (holding_period={cfg.holding_period}) "
+                    f"is shorter than 2 weeks.",
+                    log_path=ALERTS_LOG_PATH,
+                )
+                lookback_period_text = (
+                    f"Portfolio '{name}' is configured with lookback_period={cfg.lookback_period} "
+                    f"under holding_period={cfg.holding_period}, a momentum-ranking window "
+                    f"shorter than 2 weeks.\n\n"
+                    f"This is not recommended: a lookback window this short is dominated by "
+                    f"single-day price noise rather than real trend, single-day moves can flip "
+                    f"the ranking. This run is proceeding normally, nothing was blocked, but "
+                    f"consider setting lookback_period to at least 0.5 (2 weeks) under a weekly "
+                    f"holding_period."
+                )
+                send_action_email(
+                    NotificationCategory.WARNING, f"Lookback period too short: {name}",
+                    f"<pre>{lookback_period_text}</pre>", notification_cfg,
+                    plain_text_fallback=lookback_period_text,
                 )
 
             # --- item 1: real positions from IBKR, never local memory. total_value comes

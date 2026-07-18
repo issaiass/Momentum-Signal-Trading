@@ -57,13 +57,28 @@ default_risk:
                                    # 0.75 = every 3 weeks, 1.0 = every month (default), integers
                                    # >1 = every N months. Values below 0.25 (faster than weekly)
                                    # are allowed but trigger a non-blocking WARNING log + email
-                                   # every run, not recommended, since the momentum signal is
-                                   # computed over a monthly-scale lookback_period, so trading
-                                   # faster than weekly adds cost without improving the signal.
+                                   # every run, not recommended, trading faster than weekly adds
+                                   # cost without improving the signal. This is the field that
+                                   # decides long-term vs. short-term momentum, below 1 switches
+                                   # lookback_period below to week-scale too, see its comment.
   lookback_period: 12             # trailing months of returns used to RANK tickers by momentum,
                                    # distinct from holding_period above (how OFTEN you rebalance,
                                    # not how far back the signal looks). LIVE-ONLY, has no effect
                                    # on the backtest engine (which receives pre-computed picks).
+                                   # Also accepts fractional values, but its granularity is tied
+                                   # to holding_period's regime, not its own value: if
+                                   # holding_period < 1 (weekly cadence, short-term momentum),
+                                   # lookback_period is ALSO interpreted in week-quarters via the
+                                   # same round(x * 4) formula as holding_period: 0.5 = 2 weeks,
+                                   # 0.75 = 3 weeks, 1.0 = 4 weeks, 1.5 = 6 weeks. Example, a
+                                   # short-term momentum config:
+                                   #   holding_period: 0.25    # weekly rebalance
+                                   #   lookback_period: 0.5    # 2-week momentum window
+                                   # If holding_period >= 1 (monthly+, long-term momentum),
+                                   # lookback_period stays in whole months, unchanged from
+                                   # above. Values shorter than 2 weeks in the weekly regime are
+                                   # allowed but trigger a non-blocking WARNING, a momentum
+                                   # signal that short is genuinely noisy.
   commission: 0.0                 # flat $ commission charged per trade, BACKTEST-ONLY,
                                    # has no effect on --live (real commission is already
                                    # reflected in your broker's real account balance)

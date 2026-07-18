@@ -34,10 +34,18 @@ the academic literature guarantees it.
 ## How this specific implementation works
 
 1. **Lookback**: trailing N-month total return per ETF, configurable via `config.yaml`'s
-   `default_risk.lookback_period` (or per-portfolio `risk_overrides`), default 12 months.
-   LIVE-ONLY: the backtest engine takes pre-computed picks as input, so this field has no effect
-   on backtest results, a backtest's lookback is set wherever the picks were computed (typically
-   a research notebook's own `calculate_period_returns(..., period=...)` call).
+   `default_risk.lookback_period` (or per-portfolio `risk_overrides`), default 12 months (the
+   3-12 month range the academic literature above studied, "long-term momentum" in this
+   project's terms). LIVE-ONLY: the backtest engine takes pre-computed picks as input, so this
+   field has no effect on backtest results, a backtest's lookback is set wherever the picks were
+   computed (typically a research notebook's own `calculate_period_returns(..., period=...)`
+   call). Under a weekly `holding_period` (`< 1`, see item 5 below), `lookback_period` switches
+   to week-scale instead, `0.5` = 2 weeks, `0.75` = 3 weeks, `1.0` = 4 weeks, `1.5` = 6 weeks
+   ("short-term momentum"). Be aware this week-scale window is a genuine departure from the
+   3-12 month range the Jegadeesh and Titman study above actually validated, the classic
+   literature doesn't cover momentum signals this short, this project's own walk-forward
+   tooling hasn't specifically stress-tested it either. Treat short-term momentum as an
+   unvalidated variant, not an academically-backed alternative.
 2. **Ranking**: all ETFs in the universe are ranked by that trailing return.
 3. **Selection**: the top `top_n` ranked ETFs become the month's picks, configurable via
    `config.yaml`'s `default_risk.top_n` (or per-portfolio `risk_overrides`), default 10,
@@ -48,10 +56,12 @@ the academic literature guarantees it.
 5. **Rebalance**: monthly by default, configurable via `holding_period`, which also accepts
    fractional values mapping onto weeks (`0.25` = weekly, `0.5` = every 2 weeks, `0.75` = every 3
    weeks), with drift-threshold filtering to avoid trading on trivial rebalances. Anything faster
-   than weekly (`< 0.25`) is allowed but actively discouraged: this signal is computed over a
-   monthly-scale `lookback_period`, so rebalancing faster than weekly adds real commission/
-   slippage/whole-share drift cost without any corresponding improvement in signal quality, a
-   non-blocking WARNING (logged and emailed every run) exists specifically to keep that visible.
+   than weekly (`< 0.25`) is allowed but actively discouraged: rebalancing that often adds real
+   commission/slippage/whole-share drift cost without a correspondingly short lookback window to
+   justify it, a non-blocking WARNING (logged and emailed every run) exists specifically to keep
+   that visible. A separate, similar WARNING exists if `lookback_period` itself is set below 2
+   weeks under a weekly `holding_period`, that short a window is dominated by price noise rather
+   than real trend.
 6. **Risk overlays**: regime filter (de-risk when the benchmark is below its long moving
    average), volatility targeting, position caps, correlation penalty, stop-losses, and the
    crash-protection mechanisms sit on top of this core signal, none of them change

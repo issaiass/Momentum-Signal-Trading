@@ -62,6 +62,19 @@ class TestBacktestConfigValidation:
         with pytest.raises(ValueError, match="lookback_period"):
             BacktestConfig(lookback_period=0)
 
+    def test_negative_lookback_period_raises(self):
+        with pytest.raises(ValueError, match="lookback_period"):
+            BacktestConfig(lookback_period=-1)
+
+    def test_fractional_lookback_period_is_valid(self):
+        # lookback_period accepts fractional values now (short-term/weekly momentum
+        # configs, e.g. lookback_period=0.5 under holding_period=0.25 means a 2-week
+        # ranking window, see execution/live_signal.py's resolve_momentum_scores()).
+        # Only zero/negative is a hard error, unlike the old >= 1 integer-only rule.
+        for value in (0.25, 0.5, 0.75, 1.0, 1.5, 12.0):
+            cfg = BacktestConfig(lookback_period=value)
+            assert cfg.lookback_period == value
+
     def test_zero_or_negative_holding_period_raises(self):
         # holding_period must be > 0, 0 or negative months between rebalances is
         # meaningless. This is the ONLY hard validation on holding_period: fractional

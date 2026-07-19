@@ -18,6 +18,7 @@ from momentum_trading.backtest.momentum_backtest import BacktestConfig
 from momentum_trading.core.strategy_signals import (
     resolve_strategy_scores, generate_strategy_monthly_picks,
     select_absolute_momentum_picks, resolve_strategy_picks,
+    resolve_residual_momentum_scores,
 )
 from momentum_trading.execution.live_signal import resolve_momentum_scores
 from momentum_trading.core.functions_quant_extensions import blend_momentum_scores
@@ -108,6 +109,48 @@ class TestMultiTimeframeComposite:
         assert not picks.empty
         for tickers in picks.values:
             assert len(tickers) == 2
+
+
+class TestResolveResidualMomentumScores:
+    """
+    resolve_residual_momentum_scores() (Epic 5): ranks tickers by IDIOSYNCRATIC (benchmark-
+    adjusted) trailing return, not raw total return. Per ticker, estimates market-model beta via
+    OLS on trailing daily returns against `benchmark`, then residual_score = raw_period_return -
+    beta * raw_benchmark_period_return.
+    """
+
+    def _beta_vs_alpha_prices(self, seed=3, n=100):
+        rng = np.random.default_rng(seed)
+        dates = pd.bdate_range("2023-01-01", periods=n)
+        bench_returns = rng.normal(0.003, 0.004, n)
+        bench_prices = 100 * np.cumprod(1 + bench_returns)
+        # A: pure beta=2 leverage on the benchmark, zero idiosyncratic return, a LARGE raw
+        # return fully explained by amplified benchmark exposure.
+        a_prices = 100 * np.cumprod(1 + 2 * bench_returns)
+        # B: beta=1 (tracks the benchmark 1:1) plus a small constant daily idiosyncratic excess,
+        # a SMALLER raw return than A, but genuine alpha, not benchmark-explained.
+        b_prices = 100 * np.cumprod(1 + bench_returns + 0.001)
+        return pd.DataFrame({"BENCH": bench_prices, "A": a_prices, "B": b_prices}, index=dates)
+
+    def test_high_beta_large_raw_return_ranks_below_genuine_alpha(self):
+        prices = self._beta_vs_alpha_prices()
+        scores = resolve_residual_momentum_scores(
+            prices, ["A", "B"], benchmark="BENCH", lookback_period=4, holding_period=1,
+        )
+        latest = scores.dropna(how="all").iloc[-1]
+        # Sanity check on the setup itself: A's RAW return is genuinely larger than B's.
+        raw_a = prices["A"].iloc[-1] / prices["A"].iloc[0] - 1
+        raw_b = prices["B"].iloc[-1] / prices["B"].iloc[0] - 1
+        assert raw_a > raw_b
+        # But the RESIDUAL (idiosyncratic) score ranks B above A, the entire point of this
+        # strategy_type: A's large raw return is fully explained by its 2x benchmark beta.
+        assert latest["B"] > latest["A"]
+
+    def test_missing_benchmark_raises_a_clear_error(self):
+        prices = pd.DataFrame({"A": [100, 101, 102]}, index=pd.bdate_range("2023-01-01", periods=3))
+        with pytest.raises(ValueError, match="BENCH"):
+            resolve_residual_momentum_scores(prices, ["A"], benchmark="BENCH",
+                                              lookback_period=1, holding_period=1)
 
 
 class TestSelectAbsoluteMomentumPicks:

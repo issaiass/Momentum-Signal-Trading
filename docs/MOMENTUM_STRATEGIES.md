@@ -176,4 +176,40 @@ risk_overrides:
   defensive_ticker: BIL       # already existed, reused here, holds this alone if nothing is trending up
 ```
 
-<!-- Epics 4-7 each add their own section below as they land. -->
+## Residual Momentum [`residual_momentum`]
+
+Ranks tickers by IDIOSYNCRATIC (benchmark-adjusted) trailing return rather than raw total
+return, a single-factor market-model residualization (not a full multi-factor model). Per
+rebalance date and ticker, `core/strategy_signals.py`'s `resolve_residual_momentum_scores()`
+estimates market-model beta via OLS (`np.polyfit`, degree 1) on trailing DAILY returns (ticker
+vs `regime_benchmark`, an EXISTING field reused here, no new config needed) over the same
+lookback window `resolve_momentum_scores()` already uses, then:
+
+```
+residual_score = raw_period_return - beta * raw_benchmark_period_return
+```
+
+the portion of the ticker's trailing return NOT explained by its benchmark exposure. A
+high-beta ticker whose entire move is explained by tracking the benchmark (e.g. a leveraged
+beta=2 ETF in a rising market) scores near zero here even with a LARGE raw return; a low-beta
+ticker with genuine idiosyncratic outperformance scores higher, even with a smaller raw return,
+that's the entire point of residualizing.
+
+`regime_benchmark` must be priced alongside the portfolio's own tickers for this to work, same
+"must be priced" requirement already documented for `defensive_ticker`: either add it to that
+portfolio's own `tickers:` list, or (live only) it flows through via `run()`'s
+`extra_price_tickers` mechanism if the caller supplies it. A missing benchmark price raises a
+clear `ValueError` naming the ticker, rather than silently falling back to raw momentum, unlike
+the regime filter's optional no-op, this strategy cannot compute a score AT ALL without its
+benchmark.
+
+```yaml
+risk_overrides:
+  strategy_type: residual_momentum
+  regime_benchmark: SPY       # already existed, reused here as the market-model regressor,
+                               # must be priced (add to this portfolio's own tickers: list)
+```
+
+Fully implemented, LIVE and BACKTEST (`generate_strategy_monthly_picks()`).
+
+<!-- Epics 6-7 each add their own section below as they land. -->

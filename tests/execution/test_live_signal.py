@@ -708,6 +708,59 @@ class TestRunAbsoluteMomentumStrategy:
         assert len(orders) == 1
 
 
+class TestRunResidualMomentumStrategy:
+    """
+    cfg.strategy_type == "residual_momentum" end-to-end through run(), Epic 5 of the
+    selectable-momentum-strategy plan: ranks by benchmark-adjusted (idiosyncratic) trailing
+    return rather than raw total return. Reuses cfg.regime_benchmark ("SPY" default), priced via
+    extra_price_tickers (never widening the ranking universe itself), same isolation pattern
+    TestRunAbsoluteMomentumFilter uses for BIL.
+    """
+
+    def _beta_vs_alpha_prices(self, seed=3, n=100):
+        rng = np.random.default_rng(seed)
+        dates = pd.bdate_range("2023-01-01", periods=n)
+        bench_returns = rng.normal(0.003, 0.004, n)
+        bench_prices = 100 * np.cumprod(1 + bench_returns)
+        # A: pure beta=2 leverage, zero idiosyncratic return, the LARGER raw return.
+        a_prices = 100 * np.cumprod(1 + 2 * bench_returns)
+        # B: beta=1 plus a small constant idiosyncratic daily excess, a SMALLER raw return but
+        # genuine alpha.
+        b_prices = 100 * np.cumprod(1 + bench_returns + 0.001)
+        return pd.DataFrame({"SPY": bench_prices, "A": a_prices, "B": b_prices}, index=dates)
+
+    def test_ranks_genuine_alpha_above_beta_amplified_raw_return(self, monkeypatch, tmp_path):
+        prices = self._beta_vs_alpha_prices()
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False,
+                              strategy_type="residual_momentum", regime_benchmark="SPY")
+        orders = live_signal.run(
+            tickers=["A", "B"], current_holdings={}, total_value=1000.0, cfg=cfg,
+            top_n=1, lookback_period=4.0, dry_run=True, extra_price_tickers=["SPY"],
+        )
+
+        # A has the larger RAW return (2x-leveraged benchmark exposure), but top_n=1 must pick
+        # B, whose smaller raw return is genuine idiosyncratic alpha, not benchmark-explained.
+        assert set(orders.keys()) == {"B"}
+
+    def test_missing_benchmark_price_raises(self, monkeypatch, tmp_path):
+        # SPY not requested via extra_price_tickers, so it's never in daily_prices, this
+        # strategy cannot compute a score at all without its benchmark, must fail loudly.
+        prices = self._beta_vs_alpha_prices()
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False,
+                              strategy_type="residual_momentum", regime_benchmark="SPY")
+        with pytest.raises(ValueError, match="SPY"):
+            live_signal.run(
+                tickers=["A", "B"], current_holdings={}, total_value=1000.0, cfg=cfg,
+                top_n=1, lookback_period=4.0, dry_run=True,
+            )
+
+
 class TestGetTopEtfs:
     """
     get_top_etfs() is where BacktestConfig.top_n actually takes effect, it's

@@ -25,6 +25,7 @@ place_orders_ibkr(), etc.), never at module level.
 """
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 from ..backtest.momentum_backtest import BacktestConfig
@@ -77,10 +78,87 @@ def resolve_strategy_scores(
             monthly_prices, cfg.multi_timeframe_lookbacks, cfg.multi_timeframe_weights,
         )
 
+    if strategy_type == "residual_momentum":
+        # Uses the FULL (unscoped) daily_prices, not scoped_prices: cfg.regime_benchmark is
+        # reused as the market-model regressor and is very likely NOT one of `tickers` itself
+        # (same "must be priced alongside the portfolio's own tickers" precedent already
+        # documented for defensive_ticker).
+        return resolve_residual_momentum_scores(
+            daily_prices, tickers, cfg.regime_benchmark, lookback_period, cfg.holding_period,
+        )
+
     raise ValueError(
         f"resolve_strategy_scores(): unhandled strategy_type {strategy_type!r}, "
         f"this strategy's ranking function hasn't been wired in yet."
     )
+
+
+def resolve_residual_momentum_scores(
+    daily_prices: pd.DataFrame, tickers: list[str], benchmark: str, lookback_period: float,
+    holding_period: float,
+) -> pd.DataFrame:
+    """
+    strategy_type == "residual_momentum" (Epic 5): ranks tickers by IDIOSYNCRATIC
+    (benchmark-adjusted) trailing return rather than raw total return, a single-factor
+    market-model residualization, not a full multi-factor model. Per rebalance date and ticker,
+    estimates market-model beta via OLS (np.polyfit, degree 1) on trailing DAILY returns (ticker
+    vs `benchmark`, cfg.regime_benchmark reused, no new config field needed) over the same
+    lookback window resolve_momentum_scores() already uses, then:
+
+        residual_score = raw_period_return - beta * raw_benchmark_period_return
+
+    the portion of the ticker's trailing return NOT explained by its benchmark exposure. A
+    high-beta ticker whose entire move is explained by tracking the benchmark (e.g. a leveraged
+    beta=2 ETF in a rising market) scores near zero here even with a LARGE raw return; a
+    low-beta ticker with genuine idiosyncratic outperformance scores higher, even with a smaller
+    raw return, this is the entire point of residualizing.
+
+    Requires `benchmark` to be priced in daily_prices (same "must be priced alongside the
+    portfolio's own tickers" requirement already documented for defensive_ticker), a clear
+    ValueError if it isn't, unlike the regime filter's silent no-op (an optional overlay), this
+    strategy cannot compute a score AT ALL without its benchmark.
+    """
+    if benchmark not in daily_prices.columns:
+        raise ValueError(
+            f"resolve_residual_momentum_scores(): benchmark {benchmark!r} is not priced in "
+            f"daily_prices, add it to this portfolio's own tickers: list."
+        )
+
+    scoped_tickers = [t for t in tickers if t in daily_prices.columns]
+    prices = daily_prices[list(dict.fromkeys(scoped_tickers + [benchmark]))]
+
+    if holding_period < 1:
+        resampled = prices.resample("W").last()
+        period = max(1, round(lookback_period * 4))
+    else:
+        resampled = prices.resample("ME").last()
+        period = max(1, round(lookback_period))
+
+    raw_returns = resampled.pct_change(periods=period)
+    daily_returns = prices.pct_change()
+
+    scores = pd.DataFrame(index=raw_returns.index, columns=scoped_tickers, dtype=float)
+    for i, date in enumerate(resampled.index):
+        if i < period:
+            continue
+        window_start = resampled.index[i - period]
+        window = daily_returns.loc[window_start:date].iloc[1:]
+        bench_window = window[benchmark].dropna()
+        bench_raw = raw_returns.loc[date, benchmark]
+        if len(bench_window) < 2 or pd.isna(bench_raw):
+            continue
+        for ticker in scoped_tickers:
+            ticker_raw = raw_returns.loc[date, ticker]
+            if pd.isna(ticker_raw):
+                continue
+            ticker_window = window[ticker].dropna()
+            common = ticker_window.index.intersection(bench_window.index)
+            if len(common) < 2:
+                continue
+            beta = np.polyfit(bench_window.loc[common], ticker_window.loc[common], 1)[0]
+            scores.loc[date, ticker] = ticker_raw - beta * bench_raw
+
+    return scores
 
 
 def select_absolute_momentum_picks(

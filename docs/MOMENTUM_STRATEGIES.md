@@ -274,3 +274,34 @@ risk_overrides:
 ```
 
 LIVE only, no backtest support (see above).
+
+## Best Parameters (Long-Term vs. Short-Term) Per Strategy
+
+Extends `docs/RISK_CONSTRAINTS.md`'s "Recommended Config Presets" rather than inventing a new
+format: every row below starts from that file's **Long-Term Momentum (Monthly)** or **Short-Term
+Momentum (Weekly)** `default_risk` preset (same `holding_period`/`lookback_period`/`top_n`/
+vol-targeting fields, cross-checked warning-free against every advisory constraint there),
+listing ONLY the fields a given `strategy_type` adds or overrides on top of that base, plus a
+one-line rationale. `strategy_type` itself is never part of either base preset (it's the thing
+selecting which row below applies), add it alongside whichever preset you start from.
+
+**Same caveat as `docs/RISK_CONSTRAINTS.md`'s own presets**: warning-free is not the same as
+performance-validated. None of the 6 strategies new to this plan (everything below
+`correlation_weighted_momentum` in the table) have been run against real historical
+out-of-sample data, only synthetic/mocked tests and live paper-account signal generation, see
+`README.md`'s "Project Maturity & Safety" section.
+
+| `strategy_type` | Long-Term (Monthly) additions | Short-Term (Weekly) additions | Rationale |
+|---|---|---|---|
+| `relative_momentum` | *(none, identical to the base preset)* | *(none, identical to the base preset)* | Explicit alias for `momentum`, no strategy-specific fields exist |
+| `dual_momentum` | `use_absolute_momentum: true` | `use_absolute_momentum: true` | The only field this preset actually changes vs. the base (`use_regime_filter: true` and `defensive_ticker: BIL` are already in both base presets) |
+| `volatility_scaled_momentum` | `sizing_method: inverse_vol` | `sizing_method: inverse_vol` | Already the base preset's default in both regimes, setting it explicitly is purely self-documenting |
+| `correlation_weighted_momentum` | `use_correlation_penalty: true`, `correlation_penalty_strength: 0.5` (default), `correlation_lookback_days: 63` (default, ~3 months) | `use_correlation_penalty: true`, `correlation_penalty_strength: 0.5`, `correlation_lookback_days: 21` (~1 month, matches the weekly regime's own faster timescale, same reasoning as `portfolio_vol_lookback` below) | Downweights mutually-correlated picks at sizing time |
+| `rank_sign_momentum` | `sizing_method: equal_weight` | `sizing_method: equal_weight`, `top_n: 3` (tighter than the base weekly preset's `5`, equal-weighting a noisier weekly signal across too many names dilutes conviction further than inverse-vol sizing would) | Non-parametric sizing, ignores score magnitude entirely |
+| `multi_timeframe_composite` | `multi_timeframe_lookbacks: [3, 6, 12]` (default, matches the monthly base preset's own `lookback_period: 12` scale), `multi_timeframe_weights: null` (equal-weighted) | `multi_timeframe_lookbacks: [1, 2, 4]` (weeks, matches the weekly base preset's `lookback_period: 1.0` = 4-week scale), `multi_timeframe_weights: null` | Blends multiple horizons instead of relying on one `lookback_period` |
+| `absolute_momentum` | `defensive_ticker: BIL` (already in the base preset) | `defensive_ticker: BIL` | No cross-sectional `top_n` cutoff at all, `top_n` is set but not enforced for this strategy_type, see its section above |
+| `residual_momentum` | `regime_benchmark: SPY` (already in the base preset, must be priced in the portfolio's own `tickers:`) | `regime_benchmark: SPY` | Beta estimated from trailing DAILY returns regardless of regime, no extra tuning needed beyond ensuring the benchmark is priced |
+| `path_dependent_momentum` | *(none beyond the base preset)* | *(none beyond the base preset)* | Purely a function of `lookback_period`/`holding_period`, already tuned by the base preset |
+| `hybrid_multi_factor`, LIVE-ONLY | `top_n: 5` (tighter than the base monthly preset's `10`, a fundamentals blend is only as good as the vendor data behind it, a smaller, higher-conviction book limits exposure to any single bad fundamentals read) | **Not recommended.** Fundamentals data changes quarterly at most (`get_cached_or_fetch_fundamentals()`'s 7-day cache TTL), a weekly rebalance re-blends the SAME fundamentals snapshot into the ranking almost every cycle, adding cost/turnover without a matching signal update | See `README.md`'s API-key setup for `FMP_API_KEY`/`EODHD_API_KEY`, required for this strategy_type to do anything beyond momentum-only fallback |
+
+<!-- Epic 9 confirms this section and every other doc/code cross-reference above stays accurate. -->

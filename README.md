@@ -58,7 +58,15 @@ README says so on purpose.
   `pandas_market_calendars`, automatically rolling forward past weekends/holidays rather than
   firing on a fixed calendar date. Long-term (monthly-scale, the academically-studied default)
   or short-term (weekly-scale, an unvalidated variant) momentum lookback windows, both
-  configurable via `holding_period`/`lookback_period` in `config.example.yaml`. A full
+  configurable via `holding_period`/`lookback_period` in `config.example.yaml`. An 11-way
+  selectable `strategy_type` field (`config.yaml`'s `default_risk`/`risk_overrides`, independent
+  per portfolio on a shared account, `risk_monitor.py` stays unaware of it by design): the base
+  cross-sectional signal plus Dual, Volatility-Scaled, Correlation-Weighted, and Rank & Sign
+  Momentum (config presets over existing fields), Multi-Timeframe Composite, Absolute
+  (Time-Series), Residual, and Path-Dependent Momentum (new ranking/selection logic, live AND
+  backtest parity), and Hybrid Multi-Factor (momentum + fundamentals blend, LIVE-ONLY, no
+  point-in-time historical fundamentals source exists to backtest it honestly), see
+  `docs/MOMENTUM_STRATEGIES.md`. A full
   Mandatory/Recommended/Nice-to-Have risk-strategy tier map (portfolio- and account-level
   volatility targeting, an Antonacci-style absolute-momentum overlay, a flat position-size cap,
   both circuit breakers, a correlation-spike monitor, and a pre-trade real-time bid-ask spread
@@ -110,7 +118,10 @@ This is a curated subset (the fields most worth tuning to pick a cadence); both 
 specify `target_portfolio_vol`, `portfolio_vol_lookback`, `use_absolute_momentum`,
 `defensive_ticker`, and `max_bid_ask_spread_pct`, see `docs/RISK_CONSTRAINTS.md`'s
 "Recommended Config Presets" section for the complete field list, per-field rationale, and the
-full Mandatory/Recommended/Nice-to-Have risk-strategy tier map.
+full Mandatory/Recommended/Nice-to-Have risk-strategy tier map. Selecting a `strategy_type` (see
+above) adds its own few strategy-specific fields on top of whichever base preset you start from,
+per-strategy long-term/short-term additions and rationale are in `docs/MOMENTUM_STRATEGIES.md`'s
+"Best Parameters (Long-Term vs. Short-Term) Per Strategy" section.
 
 The project tree:
 
@@ -140,8 +151,13 @@ momentum-trading/
 │   ├── EMAIL_COMMANDS.md           remote email commands: syntax, security model
 │   ├── ALERT_LOG.md                alert log schema, every alert_type, how it differs
 │   │                                 from the trade log and email command log
-│   └── RISK_CONSTRAINTS.md         long-term/short-term momentum risk constraints,
-│                                     advisory warnings and opt-in config toggles
+│   ├── RISK_CONSTRAINTS.md         long-term/short-term momentum risk constraints,
+│   │                                 advisory warnings and opt-in config toggles
+│   └── MOMENTUM_STRATEGIES.md      selectable `strategy_type` field: 11 momentum variants
+│                                     (Dual, Volatility-Scaled, Residual, Absolute,
+│                                     Rank & Sign, Hybrid Multi-Factor, Path-Dependent,
+│                                     Correlation-Weighted, Multi-Timeframe Composite), how
+│                                     presets compose, per-strategy best-parameter tables
 │
 ├── notebooks/
 │   ├── research/                  strategy design, signal research, backtesting
@@ -432,6 +448,7 @@ and multi-portfolio/Docker specifics live in `docs/RUNNING.md` and `docs/DEPLOYM
 | Configure/understand email-commanded remote actions (PAUSE/RESUME/etc.) | `docs/EMAIL_COMMANDS.md` |
 | Understand the alert log (what's recorded, how it differs from the trade/email-command logs) | `docs/ALERT_LOG.md` |
 | Understand the long-term/short-term momentum risk constraints (turnover, skip-month, vol budget) | `docs/RISK_CONSTRAINTS.md` |
+| Choose/understand a selectable momentum `strategy_type` (Dual, Residual, Absolute, Hybrid Multi-Factor, etc.), per-strategy best-parameter presets | `docs/MOMENTUM_STRATEGIES.md` |
 
 </details>
 

@@ -333,6 +333,39 @@ class TestResolveTargetWeights:
             BacktestConfig(position_vol_budget=-0.01)
 
 
+class TestApplyPositionCaps:
+    """
+    _apply_position_caps() isolated directly (Epic 3 of the layered risk-management plan,
+    "Position Size Hard-Cap", Mandatory tier), previously only exercised indirectly through
+    TestResolveTargetWeights (which always goes through the full sizing pipeline). This
+    function is already fully implemented and shared live+backtest (resolve_target_weights()
+    calls it unconditionally at line 524), this closes a real test-coverage gap, not a
+    behavior gap.
+    """
+
+    def test_hand_computed_redistribution(self):
+        from momentum_trading.backtest.momentum_backtest import _apply_position_caps
+        # A exceeds the 0.5 cap by 0.1, B is the only under-cap ticker, so the full excess
+        # redistributes to B: A -> 0.5, B -> 0.4 + 0.1 = 0.5.
+        result = _apply_position_caps({"A": 0.6, "B": 0.4}, max_weight=0.5)
+        assert result["A"] == pytest.approx(0.5)
+        assert result["B"] == pytest.approx(0.5)
+        assert sum(result.values()) == pytest.approx(1.0)
+
+    def test_no_ticker_ever_exceeds_the_cap(self):
+        from momentum_trading.backtest.momentum_backtest import _apply_position_caps
+        result = _apply_position_caps({"A": 0.7, "B": 0.2, "C": 0.1}, max_weight=0.35)
+        assert all(w <= 0.35 + 1e-9 for w in result.values())
+        assert sum(result.values()) == pytest.approx(1.0)
+
+    def test_already_under_cap_is_unaffected(self):
+        from momentum_trading.backtest.momentum_backtest import _apply_position_caps
+        weights = {"A": 0.4, "B": 0.35, "C": 0.25}
+        result = _apply_position_caps(weights, max_weight=0.5)
+        for t in weights:
+            assert result[t] == pytest.approx(weights[t])
+
+
 class TestComputeVolScalar:
     """
     compute_vol_scalar() extracted from run_risk_managed_backtest()'s inline

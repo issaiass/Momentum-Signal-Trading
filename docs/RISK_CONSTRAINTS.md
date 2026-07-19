@@ -175,6 +175,32 @@ work (add it to that portfolio's own `tickers:` list in `config.yaml`), there is
 widening of the price fetch for it, unlike the orphaned-ticker reconciliation's
 `extra_price_tickers` mechanism (a deliberately different, narrower feature).
 
+## Position Size Hard-Cap [Mandatory tier]
+
+`max_position_weight` (default `0.35`): a flat, single-name cap, identical for every ticker
+regardless of its own volatility, "no position may exceed this fraction of the book." Was
+already fully implemented before this plan, this section just gives it the explicit, named
+documentation entry it hadn't had (it previously only appeared as a `config.example.yaml`
+comment, not a documented constraint in its own right).
+
+Implemented by `_apply_position_caps()` (`backtest/momentum_backtest.py`), an iterative
+cap-and-redistribute pass (not a full LP solve): any ticker over the cap is clamped to it, the
+excess is redistributed proportionally across every under-cap ticker, repeated up to 10 passes,
+then renormalized to sum to `1.0`. Applied unconditionally inside `resolve_target_weights()`
+(the single shared sizing function both the backtest engine and `execution/live_signal.py`'s
+`compute_target_weights()` call), so the cap is genuinely identical live and backtested, not a
+parallel reimplementation. Applies even when `custom_weights` is supplied (a hand-specified
+allocation can still get capped, see `TestResolveTargetWeights::test_custom_weights_capped_when_infeasible`'s
+documented edge case: when the cap makes the requested split mathematically infeasible, e.g. 2
+assets and a 0.35 cap can sum to at most 0.70, the iterative algorithm converges to an equal
+split rather than erroring or silently violating the cap).
+
+Your own tier description's 5-10% example is achievable by simply setting a tighter
+`max_position_weight`, this isn't a missing feature, the default (`0.35`) is just a looser
+starting point. `position_vol_budget` (Allow/disallow constraints above) is a complementary,
+NOT redundant, per-ticker cap applied AFTER this flat one, varying by each ticker's own
+volatility rather than being identical for every ticker.
+
 ## Recommended Config Presets
 
 These are two starting-point `default_risk` presets, one long-term (monthly), one short-term

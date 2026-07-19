@@ -1031,6 +1031,37 @@ class TestBuildPositionPerformance:
         assert result["XLF"]["return_pct"] == pytest.approx(-0.10)
 
 
+class TestLivePositionCap:
+    """
+    max_position_weight's live-path enforcement (Epic 3 of the layered risk-management plan,
+    "Position Size Hard-Cap", Mandatory tier), previously untested on the live path even
+    though the mechanism itself was already correct (compute_target_weights() ->
+    resolve_target_weights() -> _apply_position_caps(), the exact same shared function the
+    backtest calls, per resolve_target_weights()'s own "single source of truth" docstring).
+    This closes a real test-coverage gap, not a behavior gap.
+    """
+
+    def test_compute_target_weights_never_exceeds_max_position_weight(self, tmp_path):
+        rng = np.random.default_rng(21)
+        dates = pd.bdate_range("2024-01-01", periods=90)
+        n = len(dates)
+        # A is near-flat (very low vol) which inverse-vol sizing would otherwise
+        # overweight heavily; B and C carry ordinary vol.
+        a = 100 * np.cumprod(1 + rng.normal(0.0002, 0.0005, n))
+        b = 50 * np.cumprod(1 + rng.normal(0.0002, 0.02, n))
+        c = 75 * np.cumprod(1 + rng.normal(0.0002, 0.02, n))
+        prices = pd.DataFrame({"A": a, "B": b, "C": c}, index=dates)
+
+        cfg = BacktestConfig(use_regime_filter=False, use_correlation_spike_regime=False,
+                              max_position_weight=0.35)
+        alerts_path = str(tmp_path / "alerts_log.csv")
+        weights, _ = compute_target_weights(["A", "B", "C"], prices, cfg,
+                                              portfolio="p1", alerts_log_path=alerts_path)
+
+        assert max(weights.values()) <= cfg.max_position_weight + 1e-9
+        assert sum(weights.values()) == pytest.approx(1.0)
+
+
 class TestRealizedWeightedPortfolioVol:
     """
     _realized_weighted_portfolio_vol(), the live substitute for momentum_backtest.py's

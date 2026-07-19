@@ -19,6 +19,7 @@ from momentum_trading.core.strategy_signals import (
     resolve_strategy_scores, generate_strategy_monthly_picks,
     select_absolute_momentum_picks, resolve_strategy_picks,
     resolve_residual_momentum_scores, resolve_path_dependent_momentum_scores,
+    resolve_hybrid_multi_factor_scores,
 )
 from momentum_trading.execution.live_signal import resolve_momentum_scores
 from momentum_trading.core.functions_quant_extensions import blend_momentum_scores
@@ -194,6 +195,98 @@ class TestResolvePathDependentMomentumScores:
             prices, ["SMOOTH", "CHOPPY"], lookback_period=4, holding_period=1,
         )
         assert "EXTRA" not in scores.columns
+
+
+class TestResolveStrategyScoresHybridMultiFactorDispatch:
+    """
+    resolve_strategy_scores()'s "hybrid_multi_factor" branch, LIVE-ONLY: fetches fundamentals
+    per ticker via core/fundamentals.py's get_cached_or_fetch_fundamentals() (mocked here, no
+    real network/cache), then delegates to resolve_hybrid_multi_factor_scores().
+    """
+
+    def test_dispatches_and_fetches_fundamentals_per_ticker(self, monkeypatch):
+        import momentum_trading.core.strategy_signals as strategy_signals
+
+        calls = []
+
+        def fake_fetch(ticker, fmp_api_key, eodhd_api_key):
+            calls.append((ticker, fmp_api_key, eodhd_api_key))
+            return {"pe_ratio": 15, "roe": 0.15}
+
+        monkeypatch.setattr(strategy_signals, "get_cached_or_fetch_fundamentals", fake_fetch)
+
+        prices = _synthetic_prices()
+        cfg = BacktestConfig(holding_period=1, strategy_type="hybrid_multi_factor")
+        result = strategy_signals.resolve_strategy_scores(
+            prices, ["A", "B", "C"], cfg, cfg.lookback_period,
+            fmp_api_key="fmp-key", eodhd_api_key="eodhd-key",
+        )
+        assert not result.empty
+        assert set(t for t, _, _ in calls) == {"A", "B", "C"}
+        assert all(fmp == "fmp-key" and eodhd == "eodhd-key" for _, fmp, eodhd in calls)
+
+    def test_generate_strategy_monthly_picks_raises_not_implemented(self):
+        # No point-in-time historical fundamentals exist, backtesting this strategy_type would
+        # silently look-ahead bias the result, must fail loudly instead.
+        prices = _synthetic_prices()
+        cfg = BacktestConfig(holding_period=1, strategy_type="hybrid_multi_factor")
+        with pytest.raises(NotImplementedError, match="hybrid_multi_factor"):
+            generate_strategy_monthly_picks(prices, ["A", "B", "C"], cfg, cfg.lookback_period, top_n=2)
+
+
+class TestResolveHybridMultiFactorScores:
+    """
+    resolve_hybrid_multi_factor_scores() (Epic 7, LIVE-ONLY): blends a momentum percentile rank
+    with a Quality/Value fundamentals composite percentile rank (lower P/E + PEG + Debt-to-Equity,
+    higher ROE + Current Ratio score better), simple average of the two. A strong-momentum,
+    poor-fundamentals ticker can rank below a moderate-momentum, strong-fundamentals one, proving
+    this is a genuine blend, not momentum-only with fundamentals as a tiebreaker.
+    """
+
+    def _momentum_prices(self):
+        # A: strongest trailing return. B: moderate. C: weakest.
+        dates = pd.bdate_range("2023-01-01", periods=90)
+        n = len(dates)
+        a = np.linspace(100, 150, n)  # +50%
+        b = np.linspace(100, 120, n)  # +20%
+        c = np.linspace(100, 110, n)  # +10%
+        return pd.DataFrame({"A": a, "B": b, "C": c}, index=dates)
+
+    def _fundamentals(self):
+        return {
+            "A": {"pe_ratio": 80, "peg_ratio": 5.0, "debt_to_equity": 3.0, "roe": 0.02, "current_ratio": 0.8},
+            "B": {"pe_ratio": 12, "peg_ratio": 0.8, "debt_to_equity": 0.3, "roe": 0.25, "current_ratio": 2.5},
+            "C": {"pe_ratio": 20, "peg_ratio": 1.5, "debt_to_equity": 1.0, "roe": 0.10, "current_ratio": 1.5},
+        }
+
+    def test_strong_momentum_poor_fundamentals_ranks_below_moderate_momentum_strong_fundamentals(self):
+        prices = self._momentum_prices()
+        scores = resolve_hybrid_multi_factor_scores(
+            prices, ["A", "B", "C"], lookback_period=3, holding_period=1,
+            fundamentals_by_ticker=self._fundamentals(),
+        )
+        latest = scores.dropna(how="all").iloc[-1]
+
+        # A has the strongest RAW momentum.
+        raw_a = prices["A"].iloc[-1] / prices["A"].iloc[0] - 1
+        raw_b = prices["B"].iloc[-1] / prices["B"].iloc[0] - 1
+        assert raw_a > raw_b
+
+        # But B's vastly better fundamentals push its BLENDED score above A's.
+        assert latest["B"] > latest["A"]
+
+    def test_missing_fundamentals_falls_back_to_momentum_only(self):
+        # A ticker with no fundamentals data at all (vendor outage, no API key) must not crash
+        # or get penalized to zero, it degrades gracefully to momentum-only for that ticker,
+        # matching core/fundamentals.py's own established graceful-degradation contract.
+        prices = self._momentum_prices()
+        scores = resolve_hybrid_multi_factor_scores(
+            prices, ["A", "B", "C"], lookback_period=3, holding_period=1,
+            fundamentals_by_ticker={"B": self._fundamentals()["B"]},
+        )
+        latest = scores.dropna(how="all").iloc[-1]
+        assert pd.notna(latest["A"])
+        assert pd.notna(latest["C"])
 
 
 class TestSelectAbsoluteMomentumPicks:

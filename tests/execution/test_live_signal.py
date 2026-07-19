@@ -805,6 +805,48 @@ class TestRunPathDependentMomentumStrategy:
         assert len(orders) == 2
 
 
+class TestRunHybridMultiFactorStrategy:
+    """
+    cfg.strategy_type == "hybrid_multi_factor" end-to-end through run(), Epic 7 of the
+    selectable-momentum-strategy plan, LIVE-ONLY. Fundamentals fetching
+    (get_cached_or_fetch_fundamentals()) is mocked here, no real network/cache, matching this
+    suite's synthetic/mocked-only convention.
+    """
+
+    def _momentum_prices(self):
+        dates = pd.bdate_range("2023-01-01", periods=90)
+        n = len(dates)
+        a = np.linspace(100, 150, n)  # strongest raw momentum
+        b = np.linspace(100, 120, n)  # moderate raw momentum
+        c = np.linspace(100, 110, n)  # weakest raw momentum
+        return pd.DataFrame({"A": a, "B": b, "C": c}, index=dates)
+
+    def test_strong_fundamentals_can_overcome_weaker_raw_momentum(self, monkeypatch, tmp_path):
+        import momentum_trading.core.strategy_signals as strategy_signals
+
+        fundamentals = {
+            "A": {"pe_ratio": 80, "peg_ratio": 5.0, "debt_to_equity": 3.0, "roe": 0.02, "current_ratio": 0.8},
+            "B": {"pe_ratio": 12, "peg_ratio": 0.8, "debt_to_equity": 0.3, "roe": 0.25, "current_ratio": 2.5},
+            "C": {"pe_ratio": 20, "peg_ratio": 1.5, "debt_to_equity": 1.0, "roe": 0.10, "current_ratio": 1.5},
+        }
+        monkeypatch.setattr(strategy_signals, "get_cached_or_fetch_fundamentals",
+                             lambda ticker, fmp, eodhd: fundamentals.get(ticker, {}))
+
+        prices = self._momentum_prices()
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False,
+                              strategy_type="hybrid_multi_factor")
+        orders = live_signal.run(
+            tickers=["A", "B", "C"], current_holdings={}, total_value=1000.0, cfg=cfg,
+            top_n=1, lookback_period=3.0, dry_run=True,
+        )
+
+        # A has the stronger RAW momentum, but B's vastly better fundamentals win the blend.
+        assert set(orders.keys()) == {"B"}
+
+
 class TestGetTopEtfs:
     """
     get_top_etfs() is where BacktestConfig.top_n actually takes effect, it's

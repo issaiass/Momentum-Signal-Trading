@@ -31,6 +31,7 @@ import pandas as pd
 from ..backtest.momentum_backtest import BacktestConfig
 from ..execution.live_signal import resolve_momentum_scores, assign_ranks
 from .functions_quant_extensions import blend_momentum_scores
+from .fundamentals import get_cached_or_fetch_fundamentals
 
 # strategy_type values whose SCORING is identical to the base per-ticker trailing-return score
 # resolve_momentum_scores() already computes. Most of these only affect SIZING/EXPOSURE (via
@@ -49,6 +50,7 @@ _BASE_SCORE_STRATEGY_TYPES = (
 
 def resolve_strategy_scores(
     daily_prices: pd.DataFrame, tickers: list[str], cfg: BacktestConfig, lookback_period: float,
+    fmp_api_key: str | None = None, eodhd_api_key: str | None = None,
 ) -> pd.DataFrame:
     """
     Dispatches on cfg.strategy_type to the right per-strategy scoring function. Scopes
@@ -59,6 +61,10 @@ def resolve_strategy_scores(
     Returns the same shape resolve_momentum_scores() already does: a DataFrame of trailing
     scores, index=resampled period dates, columns=tickers, drop-in compatible with
     assign_ranks()/get_top_etfs().
+
+    fmp_api_key/eodhd_api_key are ONLY used by strategy_type == "hybrid_multi_factor" (fetching
+    fundamentals via core/fundamentals.py's get_cached_or_fetch_fundamentals()), None default is
+    a no-op for every other strategy_type, byte-identical to before these params existed.
     """
     scoped_prices = daily_prices[list(tickers)]
     strategy_type = getattr(cfg, "strategy_type", "momentum")
@@ -90,6 +96,20 @@ def resolve_strategy_scores(
     if strategy_type == "path_dependent_momentum":
         return resolve_path_dependent_momentum_scores(
             scoped_prices, tickers, lookback_period, cfg.holding_period,
+        )
+
+    if strategy_type == "hybrid_multi_factor":
+        # LIVE-ONLY (docs/MOMENTUM_STRATEGIES.md): fetches fundamentals fresh (or cache-hit,
+        # get_cached_or_fetch_fundamentals()'s existing 7-day file cache) per ticker, reusing
+        # core/fundamentals.py UNCHANGED, same graceful-degradation contract (a ticker with no
+        # fundamentals access from either vendor just returns {}, handled gracefully by
+        # resolve_hybrid_multi_factor_scores() itself).
+        fundamentals_by_ticker = {
+            t: get_cached_or_fetch_fundamentals(t, fmp_api_key, eodhd_api_key)
+            for t in tickers if t in scoped_prices.columns
+        }
+        return resolve_hybrid_multi_factor_scores(
+            scoped_prices, tickers, lookback_period, cfg.holding_period, fundamentals_by_ticker,
         )
 
     raise ValueError(
@@ -220,6 +240,82 @@ def resolve_path_dependent_momentum_scores(
     return scores
 
 
+# Fundamentals metrics from core/fundamentals.py where a LOWER value is better (cheaper
+# valuation, less leverage) vs. a HIGHER value is better (profitability, liquidity).
+_LOWER_IS_BETTER_METRICS = ("pe_ratio", "peg_ratio", "debt_to_equity")
+_HIGHER_IS_BETTER_METRICS = ("roe", "current_ratio")
+
+
+def _quality_value_percentile_scores(
+    tickers: list[str], fundamentals_by_ticker: dict[str, dict],
+) -> dict[str, float]:
+    """
+    One composite Quality/Value percentile per ticker (0 to 1, higher = better fundamentals),
+    the simple average of 5 independently cross-sectionally percentile-ranked metrics from
+    core/fundamentals.py's existing fetch (pe_ratio, peg_ratio, debt_to_equity: lower is better;
+    roe, current_ratio: higher is better). A metric missing for some tickers is ranked only
+    across the tickers that HAVE it (never zero-filled, a genuinely missing metric doesn't
+    penalize a ticker), and a ticker missing a given metric just gets averaged over fewer
+    metrics, not penalized for the gap itself.
+    """
+    per_metric_pct: dict[str, dict[str, float]] = {}
+    for metric in _LOWER_IS_BETTER_METRICS + _HIGHER_IS_BETTER_METRICS:
+        values = {
+            t: fundamentals_by_ticker.get(t, {}).get(metric)
+            for t in tickers
+            if fundamentals_by_ticker.get(t, {}).get(metric) is not None
+        }
+        if not values:
+            continue
+        higher_is_better = metric in _HIGHER_IS_BETTER_METRICS
+        per_metric_pct[metric] = pd.Series(values).rank(pct=True, ascending=higher_is_better).to_dict()
+
+    composite: dict[str, float] = {}
+    for ticker in tickers:
+        available = [per_metric_pct[m][ticker] for m in per_metric_pct if ticker in per_metric_pct[m]]
+        if available:
+            composite[ticker] = sum(available) / len(available)
+    return composite
+
+
+def resolve_hybrid_multi_factor_scores(
+    daily_prices: pd.DataFrame, tickers: list[str], lookback_period: float, holding_period: float,
+    fundamentals_by_ticker: dict[str, dict],
+) -> pd.DataFrame:
+    """
+    strategy_type == "hybrid_multi_factor" (Epic 7), LIVE-ONLY (see
+    generate_strategy_monthly_picks()'s NotImplementedError for this strategy_type, and
+    docs/MOMENTUM_STRATEGIES.md's callout): blends a momentum percentile rank with the
+    Quality/Value composite percentile from _quality_value_percentile_scores() above, simple
+    average of the two, per ticker. A strong-momentum, poor-fundamentals ticker can rank BELOW a
+    moderate-momentum, strong-fundamentals one, a genuine blend, not momentum-only with
+    fundamentals as a tiebreaker.
+
+    `fundamentals_by_ticker` is the caller's already-fetched (or cache-hit) dict from
+    core/fundamentals.py's get_cached_or_fetch_fundamentals(), reused UNCHANGED here, this
+    function does no fetching itself. Only TODAY's fundamentals snapshot exists (no
+    point-in-time history), so the SAME Quality/Value percentile is applied to every historical
+    row of the returned DataFrame, only the LATEST row (what run() actually consumes) is
+    meaningful, consistent with this strategy_type's LIVE-ONLY status. A ticker with no
+    fundamentals data at all degrades gracefully to momentum-only (matches
+    core/fundamentals.py's own graceful-degradation contract), never crashes or zero-penalizes.
+    """
+    scoped_tickers = [t for t in tickers if t in daily_prices.columns]
+    momentum_scores = resolve_momentum_scores(daily_prices[scoped_tickers], lookback_period, holding_period)
+    momentum_pct = momentum_scores.rank(axis=1, pct=True)
+
+    quality_value_pct = _quality_value_percentile_scores(scoped_tickers, fundamentals_by_ticker)
+
+    scores = pd.DataFrame(index=momentum_pct.index, columns=scoped_tickers, dtype=float)
+    for ticker in scoped_tickers:
+        qv = quality_value_pct.get(ticker)
+        if qv is None:
+            scores[ticker] = momentum_pct[ticker]
+        else:
+            scores[ticker] = (momentum_pct[ticker] + qv) / 2
+    return scores
+
+
 def select_absolute_momentum_picks(
     latest_scores: pd.Series | None, tickers: list[str], defensive_ticker: str,
 ) -> list[str]:
@@ -269,7 +365,23 @@ def generate_strategy_monthly_picks(
     strategy_type-aware. A date whose scores are all-NaN (e.g. the lookback window isn't
     satisfied yet at the start of the history) is skipped entirely, not included with an empty
     pick list.
+
+    strategy_type == "hybrid_multi_factor" raises NotImplementedError, not a silent wrong
+    number: core/fundamentals.py only ever fetches TODAY's/latest fundamentals snapshot (file-
+    cached, 7-day TTL), there is no point-in-time HISTORICAL fundamentals data source anywhere
+    in this project or its free-tier vendors. Applying today's fundamentals across a multi-year
+    backtest history would silently introduce severe look-ahead bias, this strategy_type is
+    LIVE-ONLY by design (docs/MOMENTUM_STRATEGIES.md), a real fix would need a separately-scoped
+    paid point-in-time fundamentals vendor, out of scope here.
     """
+    if getattr(cfg, "strategy_type", "momentum") == "hybrid_multi_factor":
+        raise NotImplementedError(
+            "generate_strategy_monthly_picks(): strategy_type='hybrid_multi_factor' is "
+            "LIVE-ONLY, no backtest support. core/fundamentals.py only fetches today's/latest "
+            "fundamentals snapshot, there is no point-in-time historical fundamentals data "
+            "source, applying current fundamentals across historical dates would silently "
+            "introduce look-ahead bias. See docs/MOMENTUM_STRATEGIES.md."
+        )
     scores = resolve_strategy_scores(daily_prices, tickers, cfg, lookback_period).dropna(how="all")
     ranks = assign_ranks(scores)
     picks = {}

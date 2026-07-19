@@ -1806,7 +1806,22 @@ def run(
     # generate_strategy_monthly_picks(). Dispatches on cfg.strategy_type; "momentum" (the
     # default) and every strategy_type that only affects sizing/exposure are byte-identical to
     # calling resolve_momentum_scores() directly, per its own regression test.
-    scores = resolve_strategy_scores(daily_prices, tickers, cfg, lookback_period).dropna(how="all")
+    #
+    # Deliberately reads FMP_API_KEY/EODHD_API_KEY directly from the environment here, NOT this
+    # function's own fmp_api_key/eodhd_api_key params (those are scoped to fetch_live_prices()'s
+    # PRICE vendor selection above, and daily_runner.py deliberately never populates them, real
+    # production price data comes from yfinance, confirmed by every prior epic's live
+    # validation). Reusing them here would have silently switched the real production price
+    # vendor for EVERY portfolio/strategy_type the first time daily_runner.py started passing
+    # real keys through, an unrelated, unbudgeted side effect of wiring up ONLY
+    # hybrid_multi_factor's fundamentals fetch. Same os.environ.get() pattern daily_runner.py's
+    # OTHER existing fundamentals call sites already use, is a no-op (get_cached_or_fetch_
+    # fundamentals() returns {} gracefully) for every strategy_type except hybrid_multi_factor,
+    # which is the only branch that actually calls it.
+    scores = resolve_strategy_scores(
+        daily_prices, tickers, cfg, lookback_period,
+        os.environ.get("FMP_API_KEY"), os.environ.get("EODHD_API_KEY"),
+    ).dropna(how="all")
     ranks = assign_ranks(scores)
     latest_scores = scores.iloc[-1] if not scores.empty else None
     latest_ranks_row = ranks.iloc[-1] if not ranks.empty else None

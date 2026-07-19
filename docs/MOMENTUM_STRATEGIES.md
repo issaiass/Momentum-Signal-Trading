@@ -237,4 +237,40 @@ risk_overrides:
 
 Fully implemented, LIVE and BACKTEST (`generate_strategy_monthly_picks()`).
 
-<!-- Epic 7 adds its own section below as it lands. -->
+## Hybrid Multi-Factor [`hybrid_multi_factor`], LIVE-ONLY, no backtest support
+
+Blends a momentum percentile rank with a Quality/Value fundamentals composite percentile rank,
+a simple average of the two, per ticker. `core/strategy_signals.py`'s
+`resolve_hybrid_multi_factor_scores()` builds the Quality/Value half from `core/fundamentals.py`'s
+EXISTING fields (reused via `get_cached_or_fetch_fundamentals()` unchanged, this strategy does
+no fetching of its own): P/E Ratio, PEG Ratio, and Debt-to-Equity score better LOWER; ROE and
+Current Ratio score better HIGHER. Each of the 5 metrics is independently cross-sectionally
+percentile-ranked across the portfolio's tickers (a metric missing for some tickers is ranked
+only across the tickers that HAVE it, never zero-filled), then averaged into one composite
+percentile per ticker. A strong-momentum, poor-fundamentals ticker can rank BELOW a
+moderate-momentum, strong-fundamentals one, a genuine blend, not momentum-only with fundamentals
+as a tiebreaker. A ticker with no fundamentals data at all (vendor outage, no API key
+configured) degrades gracefully to momentum-only for that ticker, matching
+`core/fundamentals.py`'s own established graceful-degradation contract, never crashes or
+zero-penalizes.
+
+**Known limitation, LIVE-ONLY by design, not an oversight**: `core/fundamentals.py` only ever
+fetches TODAY's/latest fundamentals snapshot (file-cached, 7-day TTL), there is no
+point-in-time HISTORICAL fundamentals data source anywhere in this project or its free-tier
+vendors (FMP/EODHD). Genuinely backtesting a fundamentals-blended strategy needs the
+fundamentals that were ACTUALLY KNOWN at each historical rebalance date; applying TODAY's
+fundamentals across a multi-year backtest history would silently introduce severe look-ahead
+bias, a fabricated, misleading backtest number, exactly what this project's "Known Gaps"
+documentation culture (see `README.md`'s "Project Maturity & Safety" section) exists to avoid.
+`core/strategy_signals.py`'s `generate_strategy_monthly_picks()` explicitly raises a
+`NotImplementedError` naming this exact reason for `strategy_type: hybrid_multi_factor`, rather
+than silently producing a look-ahead-biased number. A real fix would need a separately-scoped
+paid point-in-time fundamentals vendor, out of scope for this plan.
+
+```yaml
+risk_overrides:
+  strategy_type: hybrid_multi_factor   # LIVE-ONLY, generate_strategy_monthly_picks() raises
+                                        # NotImplementedError if backtested, see above
+```
+
+LIVE only, no backtest support (see above).

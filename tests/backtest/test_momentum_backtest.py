@@ -234,6 +234,29 @@ class TestBacktestRuns:
         assert not df.empty
         assert "tearsheet" in df.attrs
 
+    def test_absolute_momentum_backtest_picks_feed_the_engine_cleanly(self, synthetic_daily_prices):
+        # Epic 3 of the selectable-momentum-strategy plan: generate_strategy_monthly_picks()
+        # (core/strategy_signals.py), routed through resolve_strategy_picks(), gives
+        # absolute_momentum real historical backtest parity, no cross-sectional top_n cutoff,
+        # every ticker with a positive own trailing score held each period.
+        from momentum_trading.core.strategy_signals import generate_strategy_monthly_picks
+        tickers = list(synthetic_daily_prices.columns)
+        cfg = BacktestConfig(holding_period=1, strategy_type="absolute_momentum",
+                              defensive_ticker=tickers[0])
+        picks = generate_strategy_monthly_picks(synthetic_daily_prices, tickers, cfg,
+                                                 lookback_period=cfg.lookback_period, top_n=2)
+        assert not picks.empty
+        # Never capped at top_n=2, absolute_momentum can hold more (or fewer) tickers per period,
+        # only that every pick stays within the given universe.
+        for held in picks.values:
+            assert 1 <= len(held) <= len(tickers)
+            assert set(held).issubset(set(tickers))
+
+        df = run_custom_backtest(picks, synthetic_daily_prices, holding_period=1, commission=0,
+                                  initial_capital=1000.0)
+        assert not df.empty
+        assert "tearsheet" in df.attrs
+
     def test_correlation_penalty_run_succeeds(self, synthetic_monthly_picks, synthetic_daily_prices):
         df = run_custom_backtest(synthetic_monthly_picks, synthetic_daily_prices,
                                   initial_capital=1000.0, use_correlation_penalty=True)

@@ -1791,7 +1791,7 @@ def run(
     # FROM this module (core/'s deliberate one-directional exception, see that module's own
     # docstring), so a top-level import here would be circular. Importing inside the function
     # body breaks the cycle, the same established pattern this file already uses for ibapi.
-    from ..core.strategy_signals import resolve_strategy_scores
+    from ..core.strategy_signals import resolve_strategy_scores, resolve_strategy_picks
 
     price_tickers = tickers if not extra_price_tickers else list(dict.fromkeys(list(tickers) + list(extra_price_tickers)))
     daily_prices = with_retry(fetch_live_prices, 3, 2.0, price_tickers, fmp_api_key=fmp_api_key, eodhd_api_key=eodhd_api_key)
@@ -1808,10 +1808,14 @@ def run(
     # calling resolve_momentum_scores() directly, per its own regression test.
     scores = resolve_strategy_scores(daily_prices, tickers, cfg, lookback_period).dropna(how="all")
     ranks = assign_ranks(scores)
-    picks = get_top_etfs(ranks, top_n=top_n)
-    logger.info("Today's signal picks (top %d): %s", top_n, picks)
-
     latest_scores = scores.iloc[-1] if not scores.empty else None
+    latest_ranks_row = ranks.iloc[-1] if not ranks.empty else None
+    # resolve_strategy_picks() (core/strategy_signals.py) dispatches on cfg.strategy_type:
+    # "absolute_momentum" bypasses the cross-sectional top_n cutoff entirely (every ticker with
+    # a positive own trailing score is held, defensive_ticker alone otherwise), every other
+    # strategy_type is byte-identical to the existing get_top_etfs(ranks, top_n=top_n) call.
+    picks = resolve_strategy_picks(latest_scores, latest_ranks_row, tickers, cfg, top_n)
+    logger.info("Today's signal picks (top %d, strategy_type=%s): %s", top_n, cfg.strategy_type, picks)
 
     # --- Absolute Momentum (Macro) overlay: any pick with negative OWN trailing momentum
     #     (not just its rank relative to other picks) gets swapped for cfg.defensive_ticker,

@@ -31,14 +31,16 @@ from ..backtest.momentum_backtest import BacktestConfig
 from ..execution.live_signal import resolve_momentum_scores, assign_ranks
 from .functions_quant_extensions import blend_momentum_scores
 
-# strategy_type values that only affect SIZING/EXPOSURE (via daily_runner.py's
-# apply_strategy_type_preset() feeding the existing resolve_target_weights()/
-# compute_target_weights() machinery), never RANKING. All fall through to the existing
-# resolve_momentum_scores() unchanged. Every other strategy_type dispatches to a genuinely new
-# ranking function below, added incrementally, one per epic.
-_SIZING_ONLY_STRATEGY_TYPES = (
+# strategy_type values whose SCORING is identical to the base per-ticker trailing-return score
+# resolve_momentum_scores() already computes. Most of these only affect SIZING/EXPOSURE (via
+# daily_runner.py's apply_strategy_type_preset() feeding the existing resolve_target_weights()/
+# compute_target_weights() machinery), never RANKING; "absolute_momentum" (Epic 3) is the one
+# exception, its SCORE is the same base per-ticker score, only SELECTION differs (no
+# cross-sectional top_n cutoff, see resolve_strategy_picks() below). Every other strategy_type
+# dispatches to a genuinely new ranking function below, added incrementally, one per epic.
+_BASE_SCORE_STRATEGY_TYPES = (
     "momentum", "relative_momentum", "dual_momentum", "volatility_scaled_momentum",
-    "correlation_weighted_momentum",
+    "correlation_weighted_momentum", "absolute_momentum",
 )
 
 
@@ -58,7 +60,7 @@ def resolve_strategy_scores(
     scoped_prices = daily_prices[list(tickers)]
     strategy_type = getattr(cfg, "strategy_type", "momentum")
 
-    if strategy_type in _SIZING_ONLY_STRATEGY_TYPES:
+    if strategy_type in _BASE_SCORE_STRATEGY_TYPES:
         return resolve_momentum_scores(
             scoped_prices, lookback_period, cfg.holding_period, cfg.skip_month_guardrail,
         )
@@ -79,6 +81,44 @@ def resolve_strategy_scores(
     )
 
 
+def select_absolute_momentum_picks(
+    latest_scores: pd.Series | None, tickers: list[str], defensive_ticker: str,
+) -> list[str]:
+    """
+    strategy_type == "absolute_momentum" (Epic 3): no cross-sectional ranking/top_n cutoff at
+    all, every ticker in `tickers` whose OWN trailing score is strictly positive is held,
+    [defensive_ticker] alone if latest_scores is None (no score history yet) or nothing in the
+    universe has a positive score. A zero score is not positive, a flat trailing return is not
+    momentum.
+    """
+    if latest_scores is None:
+        return [defensive_ticker]
+    scoped = latest_scores.reindex(tickers).dropna()
+    held = scoped[scoped > 0].index.tolist()
+    return held if held else [defensive_ticker]
+
+
+def resolve_strategy_picks(
+    scores_row: pd.Series | None, ranks_row: pd.Series | None, tickers: list[str],
+    cfg: BacktestConfig, top_n: int,
+) -> list[str]:
+    """
+    Centralizes the "cross-sectional top_n cutoff vs. absolute per-ticker selection" decision,
+    shared by run() (live) and generate_strategy_monthly_picks() (backtest), so they can't
+    diverge on it. Every strategy_type other than "absolute_momentum" replicates
+    get_top_etfs()'s exact behavior (ranks_row.nsmallest(top_n)), just against a single
+    already-sliced row instead of a full history DataFrame.
+    """
+    strategy_type = getattr(cfg, "strategy_type", "momentum")
+
+    if strategy_type == "absolute_momentum":
+        return select_absolute_momentum_picks(scores_row, tickers, cfg.defensive_ticker)
+
+    if ranks_row is None:
+        return []
+    return ranks_row.nsmallest(top_n).index.tolist()
+
+
 def generate_strategy_monthly_picks(
     daily_prices: pd.DataFrame, tickers: list[str], cfg: BacktestConfig, lookback_period: float,
     top_n: int,
@@ -95,8 +135,12 @@ def generate_strategy_monthly_picks(
     ranks = assign_ranks(scores)
     picks = {}
     for date in ranks.index:
-        row = ranks.loc[date].dropna()
-        if row.empty:
+        ranks_row = ranks.loc[date].dropna()
+        scores_row = scores.loc[date].dropna() if date in scores.index else None
+        if ranks_row.empty and (scores_row is None or scores_row.empty):
             continue
-        picks[date] = row.nsmallest(top_n).index.tolist()
+        selected = resolve_strategy_picks(scores_row, ranks_row, tickers, cfg, top_n)
+        if not selected:
+            continue
+        picks[date] = selected
     return pd.Series(picks)

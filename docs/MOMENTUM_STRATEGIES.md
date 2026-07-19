@@ -131,4 +131,34 @@ pipeline every other strategy uses. Fully implemented, LIVE and BACKTEST (via
 `generate_strategy_monthly_picks()`, the first strategy this plan gave real historical backtest
 parity to, not just a live-only preview).
 
-<!-- Epics 3-7 each add their own section below as they land. -->
+## Absolute (Time-Series) Momentum [`absolute_momentum`]
+
+A genuinely different SELECTION mode, not just a sizing/exposure change: no cross-sectional
+ranking and no `top_n` cutoff at all. `core/strategy_signals.py`'s
+`select_absolute_momentum_picks()` checks EACH ticker in the portfolio's universe against its
+OWN trailing score (the same per-ticker score `resolve_momentum_scores()` already computes,
+scoring is unchanged, only selection differs): a strictly positive score holds the ticker, a
+zero or negative score does not. If nothing in the universe has a positive score, the whole book
+falls back to `defensive_ticker` (already an existing field, reused as-is, no new config needed)
+alone. Depending on how many tickers currently have positive momentum, the resulting pick count
+can be smaller OR larger than `top_n`, that cutoff simply does not apply to this strategy_type.
+
+This is distinct from two pre-existing, easily-confused mechanisms:
+- `use_regime_filter`: ONE benchmark (default SPY) scaling the WHOLE book's exposure, not a
+  per-ticker decision.
+- `use_absolute_momentum` (the `dual_momentum` preset field): a POST-relative-ranking swap, only
+  ever applied to tickers that already survived the cross-sectional `top_n` cutoff, still
+  fundamentally a relative-momentum variant underneath.
+
+`resolve_strategy_picks()` (`core/strategy_signals.py`) is the shared centralizing dispatcher
+`execution/live_signal.py`'s `run()` and `generate_strategy_monthly_picks()` (backtest) both call,
+so live and backtest can never diverge on this "top_n cutoff vs. absolute per-ticker selection"
+decision. Fully implemented, LIVE and BACKTEST.
+
+```yaml
+risk_overrides:
+  strategy_type: absolute_momentum
+  defensive_ticker: BIL       # already existed, reused here, holds this alone if nothing is trending up
+```
+
+<!-- Epics 4-7 each add their own section below as they land. -->

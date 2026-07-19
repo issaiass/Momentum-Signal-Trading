@@ -17,6 +17,7 @@ import pytest
 from momentum_trading.backtest.momentum_backtest import BacktestConfig
 from momentum_trading.core.strategy_signals import (
     resolve_strategy_scores, generate_strategy_monthly_picks,
+    select_absolute_momentum_picks, resolve_strategy_picks,
 )
 from momentum_trading.execution.live_signal import resolve_momentum_scores
 from momentum_trading.core.functions_quant_extensions import blend_momentum_scores
@@ -107,6 +108,78 @@ class TestMultiTimeframeComposite:
         assert not picks.empty
         for tickers in picks.values:
             assert len(tickers) == 2
+
+
+class TestSelectAbsoluteMomentumPicks:
+    """
+    select_absolute_momentum_picks() (Epic 3): a genuinely different selection mode, no
+    cross-sectional ranking/top_n cutoff at all, every ticker whose OWN trailing score is
+    positive is held, defensive_ticker alone otherwise.
+    """
+
+    def test_all_positive_universe_holds_everything(self):
+        scores = pd.Series({"A": 0.05, "B": 0.02, "C": 0.10})
+        result = select_absolute_momentum_picks(scores, ["A", "B", "C"], "BIL")
+        assert set(result) == {"A", "B", "C"}
+
+    def test_mixed_universe_holds_only_the_positive_trend_subset(self):
+        scores = pd.Series({"A": 0.05, "B": -0.02, "C": 0.10})
+        result = select_absolute_momentum_picks(scores, ["A", "B", "C"], "BIL")
+        assert set(result) == {"A", "C"}
+
+    def test_all_negative_resolves_to_defensive_ticker_only(self):
+        scores = pd.Series({"A": -0.05, "B": -0.02, "C": -0.10})
+        result = select_absolute_momentum_picks(scores, ["A", "B", "C"], "BIL")
+        assert result == ["BIL"]
+
+    def test_none_scores_resolves_to_defensive_ticker_only(self):
+        # No score history available yet, conservative fallback, not a crash.
+        result = select_absolute_momentum_picks(None, ["A", "B", "C"], "BIL")
+        assert result == ["BIL"]
+
+    def test_zero_score_is_not_positive(self):
+        # A flat/zero trailing return is not "positive momentum", must not be held.
+        scores = pd.Series({"A": 0.0, "B": 0.05})
+        result = select_absolute_momentum_picks(scores, ["A", "B"], "BIL")
+        assert set(result) == {"B"}
+
+    def test_ignores_tickers_outside_the_given_universe(self):
+        scores = pd.Series({"A": 0.05, "EXTRA": 0.99})
+        result = select_absolute_momentum_picks(scores, ["A"], "BIL")
+        assert result == ["A"]
+
+
+class TestResolveStrategyPicks:
+    """
+    resolve_strategy_picks() centralizes the "top_n cross-sectional cutoff vs. absolute
+    per-ticker selection" decision, shared by run() (live) and
+    generate_strategy_monthly_picks() (backtest), so they can't diverge on it.
+    """
+
+    def test_default_strategy_type_matches_get_top_etfs_exactly(self):
+        from momentum_trading.execution.live_signal import get_top_etfs
+        scores_row = pd.Series({"A": 0.05, "B": 0.02, "C": 0.10})
+        ranks_row = scores_row.rank(ascending=False)
+        cfg = BacktestConfig(holding_period=1)
+        result = resolve_strategy_picks(scores_row, ranks_row, ["A", "B", "C"], cfg, top_n=2)
+
+        ranks_df = pd.DataFrame([ranks_row])
+        expected = get_top_etfs(ranks_df, top_n=2)
+        assert set(result) == set(expected)
+
+    def test_absolute_momentum_bypasses_top_n_entirely(self):
+        # 3 tickers all positive, top_n=1, but absolute_momentum must hold ALL of them, not cap
+        # at top_n, that cross-sectional cutoff is exactly what this strategy doesn't use.
+        scores_row = pd.Series({"A": 0.05, "B": 0.02, "C": 0.10})
+        ranks_row = scores_row.rank(ascending=False)
+        cfg = BacktestConfig(holding_period=1, strategy_type="absolute_momentum", defensive_ticker="BIL")
+        result = resolve_strategy_picks(scores_row, ranks_row, ["A", "B", "C"], cfg, top_n=1)
+        assert set(result) == {"A", "B", "C"}
+
+    def test_none_ranks_row_returns_empty_for_default_strategy(self):
+        cfg = BacktestConfig(holding_period=1)
+        result = resolve_strategy_picks(None, None, ["A", "B"], cfg, top_n=2)
+        assert result == []
 
 
 class TestGenerateStrategyMonthlyPicks:

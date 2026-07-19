@@ -633,6 +633,81 @@ class TestRunMultiTimeframeComposite:
         assert all(o["action"] == "BUY" for o in orders.values())
 
 
+class TestRunAbsoluteMomentumStrategy:
+    """
+    cfg.strategy_type == "absolute_momentum" end-to-end through run(), Epic 3 of the
+    selectable-momentum-strategy plan: a genuinely different selection mode, no cross-sectional
+    ranking/top_n cutoff at all, every ticker whose OWN trailing score is positive is held,
+    defensive_ticker alone otherwise. Distinct from cfg.use_absolute_momentum (a post-relative-
+    ranking swap, still fundamentally a relative-momentum variant underneath, TestRunAbsoluteMomentumFilter above).
+    """
+
+    def _mixed_trend_prices(self, seed=11):
+        dates = pd.bdate_range("2024-01-01", "2024-05-15")
+        rng = np.random.default_rng(seed)
+        n = len(dates)
+        # A and B both rise (positive absolute momentum), C declines (negative), BIL flat.
+        a = np.linspace(50, 100, n) * (1 + rng.normal(0, 0.001, n))
+        b = np.linspace(60, 90, n) * (1 + rng.normal(0, 0.001, n))
+        c = np.linspace(100, 50, n) * (1 + rng.normal(0, 0.001, n))
+        bil = np.full(n, 100.0) * (1 + rng.normal(0, 0.0001, n))
+        return pd.DataFrame({"A": a, "B": b, "C": c, "BIL": bil}, index=dates)
+
+    def test_bypasses_top_n_and_holds_every_positive_trend_ticker(self, monkeypatch, tmp_path):
+        prices = self._mixed_trend_prices()
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False,
+                              strategy_type="absolute_momentum", defensive_ticker="BIL")
+        orders = live_signal.run(
+            tickers=["A", "B", "C"], current_holdings={}, total_value=1000.0, cfg=cfg,
+            top_n=1, lookback_period=1.0, dry_run=True, extra_price_tickers=["BIL"],
+        )
+
+        # top_n=1 would normally cap this at a single pick, absolute_momentum must ignore that
+        # cutoff entirely and hold BOTH positive-trend tickers, C (negative) excluded.
+        assert set(orders.keys()) == {"A", "B"}
+        assert orders["A"]["action"] == "BUY"
+        assert orders["B"]["action"] == "BUY"
+
+    def test_all_negative_universe_resolves_to_defensive_ticker_only(self, monkeypatch, tmp_path):
+        dates = pd.bdate_range("2024-01-01", "2024-05-15")
+        rng = np.random.default_rng(13)
+        n = len(dates)
+        a = np.linspace(100, 50, n) * (1 + rng.normal(0, 0.001, n))
+        b = np.linspace(100, 60, n) * (1 + rng.normal(0, 0.001, n))
+        bil = np.full(n, 100.0) * (1 + rng.normal(0, 0.0001, n))
+        prices = pd.DataFrame({"A": a, "B": b, "BIL": bil}, index=dates)
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False,
+                              strategy_type="absolute_momentum", defensive_ticker="BIL")
+        orders = live_signal.run(
+            tickers=["A", "B"], current_holdings={}, total_value=1000.0, cfg=cfg,
+            top_n=2, lookback_period=1.0, dry_run=True, extra_price_tickers=["BIL"],
+        )
+
+        assert set(orders.keys()) == {"BIL"}
+        assert orders["BIL"]["action"] == "BUY"
+
+    def test_default_strategy_type_is_byte_identical_to_before_this_feature(self, monkeypatch, tmp_path):
+        # Regression: strategy_type unset (the default "momentum") must still respect top_n
+        # exactly as before this feature existed.
+        prices = self._mixed_trend_prices()
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False)
+        orders = live_signal.run(
+            tickers=["A", "B", "C"], current_holdings={}, total_value=1000.0, cfg=cfg,
+            top_n=1, lookback_period=1.0, dry_run=True,
+        )
+
+        assert len(orders) == 1
+
+
 class TestGetTopEtfs:
     """
     get_top_etfs() is where BacktestConfig.top_n actually takes effect, it's

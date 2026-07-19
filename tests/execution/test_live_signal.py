@@ -25,7 +25,7 @@ from momentum_trading.execution.live_signal import (
     is_lookback_shorter_than_holding, is_lookback_to_holding_ratio_too_low,
     compute_turnover, is_turnover_too_high, most_recent_rebalance_target_date,
     build_position_performance, resolve_momentum_scores, calculate_period_returns,
-    _realized_weighted_portfolio_vol,
+    _realized_weighted_portfolio_vol, apply_absolute_momentum_filter,
 )
 from momentum_trading.core.audit_log import read_recent_alerts
 
@@ -493,6 +493,84 @@ class TestRunExtraPriceTickers:
         assert "OLD" not in orders
 
 
+class TestRunAbsoluteMomentumFilter:
+    """
+    cfg.use_absolute_momentum end-to-end through run(), wired right after picks are selected
+    (before signal_context/sizing/vol-scaling/regime-filtering all act on the FINAL pick list),
+    Epic 2 of the layered risk-management plan. BIL is priced via extra_price_tickers here
+    purely to isolate the test (proves the OVERLAY, not natural relative ranking, is what
+    introduces it); production usage should add defensive_ticker to the portfolio's own
+    tickers: list instead (documented on BacktestConfig.defensive_ticker).
+    """
+
+    def _declining_and_flat_prices(self, seed=5):
+        dates = pd.bdate_range("2024-01-01", "2024-05-15")
+        rng = np.random.default_rng(seed)
+        n = len(dates)
+        a = np.linspace(100, 50, n) * (1 + rng.normal(0, 0.001, n))
+        b = np.linspace(100, 60, n) * (1 + rng.normal(0, 0.001, n))
+        bil = np.full(n, 100.0) * (1 + rng.normal(0, 0.0001, n))
+        return pd.DataFrame({"A": a, "B": b, "BIL": bil}, index=dates)
+
+    def test_all_negative_absolute_momentum_swaps_entire_book_to_defensive_ticker(self, monkeypatch, tmp_path):
+        prices = self._declining_and_flat_prices()
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False,
+                              use_absolute_momentum=True, defensive_ticker="BIL")
+        orders = live_signal.run(
+            tickers=["A", "B"], current_holdings={}, total_value=1000.0, cfg=cfg,
+            top_n=2, lookback_period=1.0, dry_run=True, extra_price_tickers=["BIL"],
+        )
+
+        # Both A and B have negative trailing (1-month) momentum, declining monotonically,
+        # both get swapped for the defensive ticker instead of held.
+        assert set(orders.keys()) == {"BIL"}
+        assert orders["BIL"]["action"] == "BUY"
+
+    def test_default_disabled_is_byte_identical_to_before_this_feature(self, monkeypatch, tmp_path):
+        # Regression: use_absolute_momentum=False (default) must resolve to the SAME picks as
+        # before this feature existed, both A and B held despite negative absolute momentum,
+        # mirrors skip_month_guardrail's exact precedent for an opt-in signal-construction change.
+        prices = self._declining_and_flat_prices()
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False)
+        orders = live_signal.run(
+            tickers=["A", "B"], current_holdings={}, total_value=1000.0, cfg=cfg,
+            top_n=2, lookback_period=1.0, dry_run=True,
+        )
+
+        assert set(orders.keys()) == {"A", "B"}
+        assert orders["A"]["action"] == "BUY"
+        assert orders["B"]["action"] == "BUY"
+
+    def test_mixed_positive_and_negative_only_swaps_the_negative_one(self, monkeypatch, tmp_path):
+        dates = pd.bdate_range("2024-01-01", "2024-05-15")
+        rng = np.random.default_rng(9)
+        n = len(dates)
+        # A rises (positive absolute momentum), B declines (negative), BIL flat.
+        a = np.linspace(50, 100, n) * (1 + rng.normal(0, 0.001, n))
+        b = np.linspace(100, 60, n) * (1 + rng.normal(0, 0.001, n))
+        bil = np.full(n, 100.0) * (1 + rng.normal(0, 0.0001, n))
+        prices = pd.DataFrame({"A": a, "B": b, "BIL": bil}, index=dates)
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False,
+                              use_absolute_momentum=True, defensive_ticker="BIL")
+        orders = live_signal.run(
+            tickers=["A", "B"], current_holdings={}, total_value=1000.0, cfg=cfg,
+            top_n=2, lookback_period=1.0, dry_run=True, extra_price_tickers=["BIL"],
+        )
+
+        assert set(orders.keys()) == {"A", "BIL"}
+        assert orders["A"]["action"] == "BUY"
+        assert orders["BIL"]["action"] == "BUY"
+
+
 class TestGetTopEtfs:
     """
     get_top_etfs() is where BacktestConfig.top_n actually takes effect, it's
@@ -525,6 +603,44 @@ class TestGetTopEtfs:
         # unnecessary in practice, nsmallest() degrades gracefully on its own.
         picks = get_top_etfs(self._ranks(), top_n=10)
         assert len(picks) == 5
+
+
+class TestApplyAbsoluteMomentumFilter:
+    """
+    apply_absolute_momentum_filter(), the live-trading wrapper around
+    core/functions_quant_extensions.py's absolute_momentum_overlay() (Epic 2 of the layered
+    risk-management plan). That function was fully coded (Antonacci-style dual momentum: any
+    pick with a negative own trailing return gets swapped for a defensive/cash ticker) but
+    called NOWHERE, this wrapper reuses it directly (wraps the single live picks list in a
+    length-1 Series, calls the shared function, unwraps the result) rather than reimplementing
+    the swap rule, so backtest and live can never diverge on it.
+    """
+
+    def test_all_positive_picks_unchanged(self):
+        picks = ["A", "B"]
+        scores = pd.Series({"A": 0.05, "B": 0.02})
+        result = apply_absolute_momentum_filter(picks, scores, defensive_ticker="BIL")
+        assert result == ["A", "B"]
+
+    def test_some_negative_picks_swapped_with_duplicates_collapsed(self):
+        picks = ["A", "B", "C"]
+        scores = pd.Series({"A": 0.05, "B": -0.01, "C": -0.02})
+        result = apply_absolute_momentum_filter(picks, scores, defensive_ticker="BIL")
+        assert result == ["A", "BIL"]
+
+    def test_all_negative_picks_resolves_to_defensive_ticker_only(self):
+        picks = ["A", "B"]
+        scores = pd.Series({"A": -0.01, "B": -0.02})
+        result = apply_absolute_momentum_filter(picks, scores, defensive_ticker="BIL")
+        assert result == ["BIL"]
+
+    def test_none_scores_returns_picks_unchanged(self):
+        # No momentum_scores available (e.g. empty ranking history) -> conservative no-op,
+        # not an error, matches this file's existing "unavailable data degrades gracefully"
+        # convention (e.g. staleness/None checks elsewhere in this module).
+        picks = ["A", "B"]
+        result = apply_absolute_momentum_filter(picks, None, defensive_ticker="BIL")
+        assert result == ["A", "B"]
 
 
 class TestGenerateOrders:

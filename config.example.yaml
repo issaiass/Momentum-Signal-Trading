@@ -104,6 +104,23 @@ default_risk:
                                    # lookback_period actually picks each rebalance, a real
                                    # signal-construction change, not just a new warning. See
                                    # docs/RISK_CONSTRAINTS.md.
+  use_absolute_momentum: false    # the "Absolute Momentum (Macro)" constraint (Mandatory tier,
+                                   # docs/RISK_CONSTRAINTS.md): Antonacci-style dual momentum,
+                                   # when true, any pick whose OWN trailing return (not just its
+                                   # rank relative to other picks) is negative gets swapped for
+                                   # defensive_ticker below instead of being held. Distinct from
+                                   # use_regime_filter above, which scales the WHOLE book by one
+                                   # benchmark's trend, this swaps INDIVIDUAL picks by their own
+                                   # momentum, complementary, can both be enabled at once.
+                                   # Default false, deliberately opt-in like skip_month_guardrail
+                                   # above: enabling it changes what the SAME picks actually
+                                   # resolve to each rebalance, a real signal-construction
+                                   # change, not just a new warning.
+  defensive_ticker: BIL           # only meaningful when use_absolute_momentum is true, the
+                                   # ticker substituted in for a negative-absolute-momentum pick
+                                   # (e.g. 'BIL' T-bill ETF, 'SHY' short treasuries). Must be
+                                   # priced alongside the portfolio's own tickers for this to
+                                   # work, add it to that portfolio's own tickers: list above.
   persist_dry_run_state: false    # DRY-RUN-ONLY, no effect in --live (the broker is always
                                    # the source of truth there). Default false preserves
                                    # dry-run's existing behavior exactly: current_positions is

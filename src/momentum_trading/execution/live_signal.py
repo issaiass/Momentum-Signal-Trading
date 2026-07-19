@@ -61,6 +61,7 @@ from ..backtest.momentum_backtest import (
     detect_correlation_spike,
     compute_vol_scalar,
 )
+from ..core.functions_quant_extensions import absolute_momentum_overlay
 
 logger = logging.getLogger("live_signal")
 if not logger.handlers:
@@ -319,6 +320,35 @@ def get_top_etfs(df_ranks: pd.DataFrame, top_n: int = 10) -> list[str]:
     """Live version returns a plain list for "today", not a Series over history."""
     latest = df_ranks.iloc[-1]
     return latest.nsmallest(top_n).index.tolist()
+
+
+def apply_absolute_momentum_filter(
+    picks: list[str], latest_scores: pd.Series | None, defensive_ticker: str,
+) -> list[str]:
+    """
+    Live-trading wrapper around core/functions_quant_extensions.py's
+    absolute_momentum_overlay() (Antonacci-style dual momentum): reuses that function directly
+    rather than reimplementing its swap rule, so backtest and live can never silently diverge
+    on it, the same "one shared function" principle resolve_target_weights() already
+    establishes for sizing.
+
+    absolute_momentum_overlay() operates on a pd.Series of {date: picks} against a
+    pd.DataFrame of {date: {ticker: score}}, both keyed by a date index (its natural shape when
+    driven by a backtest's monthly_picks history). Live trading only ever has ONE "today", so
+    this wraps `picks` in a length-1 Series under a placeholder date, calls the shared function,
+    and unwraps the single result.
+
+    latest_scores=None (no momentum-score history available yet) degrades conservatively to a
+    no-op, returning `picks` unchanged, rather than raising or dropping everything to
+    defensive_ticker on missing data.
+    """
+    if latest_scores is None:
+        return picks
+    placeholder_date = pd.Timestamp("2000-01-01")
+    picks_series = pd.Series({placeholder_date: list(picks)})
+    scores_df = pd.DataFrame([latest_scores], index=[placeholder_date])
+    filtered = absolute_momentum_overlay(picks_series, scores_df, defensive_ticker=defensive_ticker)
+    return list(filtered.loc[placeholder_date])
 
 
 def fetch_live_prices(
@@ -1644,13 +1674,24 @@ def run(
     picks = get_top_etfs(ranks, top_n=top_n)
     logger.info("Today's signal picks (top %d): %s", top_n, picks)
 
+    latest_scores = scores.iloc[-1] if not scores.empty else None
+
+    # --- Absolute Momentum (Macro) overlay: any pick with negative OWN trailing momentum
+    #     (not just its rank relative to other picks) gets swapped for cfg.defensive_ticker,
+    #     BEFORE signal_context/sizing/vol-scaling/regime-filtering, so every downstream step
+    #     acts on the FINAL pick list. Opt-in, byte-identical to before this feature when
+    #     disabled (default). See apply_absolute_momentum_filter(). ---
+    if cfg.use_absolute_momentum:
+        filtered_picks = apply_absolute_momentum_filter(picks, latest_scores, cfg.defensive_ticker)
+        if filtered_picks != picks:
+            logger.info("Absolute momentum filter: %s -> %s", picks, filtered_picks)
+        picks = filtered_picks
+
     # Capture rank/score context so a trade can be reviewed
     # later with "why" (e.g. "XLK was rank 2 of 10"), not just "what" was traded.
     signal_context = {}
-    latest_scores = None
     if not ranks.empty:
         latest_ranks = ranks.iloc[-1]
-        latest_scores = scores.iloc[-1] if not scores.empty else None
         for t in picks:
             signal_context[t] = {
                 "rank": int(latest_ranks[t]) if t in latest_ranks.index and pd.notna(latest_ranks[t]) else None,

@@ -84,6 +84,20 @@ class TestBacktestConfigValidation:
         with pytest.raises(ValueError, match="max_turnover_pct"):
             BacktestConfig(max_turnover_pct=1.5)
 
+    def test_use_absolute_momentum_defaults_false(self):
+        # Deliberately opt-in, like skip_month_guardrail: enabling it changes what the SAME
+        # picks actually resolve to, must never flip on by accident from an old config.yaml.
+        assert BacktestConfig().use_absolute_momentum is False
+
+    def test_defensive_ticker_defaults_to_bil(self):
+        assert BacktestConfig().defensive_ticker == "BIL"
+
+    def test_empty_defensive_ticker_raises(self):
+        with pytest.raises(ValueError, match="defensive_ticker"):
+            BacktestConfig(defensive_ticker="")
+        with pytest.raises(ValueError, match="defensive_ticker"):
+            BacktestConfig(defensive_ticker="   ")
+
     def test_persist_dry_run_state_defaults_false(self):
         # Default false preserves dry-run's existing behavior exactly: current_positions is {}
         # on every invocation, this must never flip on by accident from an old config.yaml.

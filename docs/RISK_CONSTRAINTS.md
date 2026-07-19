@@ -138,6 +138,43 @@ min(max_gross_exposure, regime_scalar * vol_scalar)`, exactly matching the backt
 composition order. A bearish regime AND a high-vol realized book can both be active at once,
 both scalars apply together.
 
+## Absolute Momentum (Macro) [Mandatory tier]
+
+`use_absolute_momentum` (default `false`, opt-in like `skip_month_guardrail`) + `defensive_ticker`
+(default `"BIL"`): the Antonacci-style "dual momentum" fix. Relative momentum (picking the top-N
+by rank) says nothing about whether those winners are winning in ABSOLUTE terms, in a broad
+drawdown the "top N" can all still have negative trailing returns and the strategy holds them
+anyway. When enabled, any pick whose OWN trailing return is negative is swapped for
+`defensive_ticker` instead of being held.
+
+Two mechanisms already existed here, worth distinguishing clearly:
+- **`use_regime_filter`** (pre-existing): a benchmark SMA trend filter (SPY vs. its 200D SMA by
+  default), scales the WHOLE book's gross exposure down to `min_gross_exposure` in a downtrend.
+  One signal, applied uniformly to every position.
+- **`use_absolute_momentum`** (this constraint, new): swaps INDIVIDUAL picks by their OWN
+  trailing momentum, a per-ticker check, not a whole-book scalar.
+
+These are complementary, not redundant, and can both be enabled at once: the regime filter
+throttles overall exposure based on the market's trend; the absolute momentum overlay decides
+WHICH tickers are even worth holding in the first place. A broad drawdown typically trips both.
+
+Implemented via `execution/live_signal.py`'s `apply_absolute_momentum_filter()`, a thin wrapper
+around `core/functions_quant_extensions.py`'s `absolute_momentum_overlay()` (which existed,
+fully coded, since before this constraint was wired in, but was never called anywhere until
+now), reusing that function directly rather than reimplementing the swap rule so backtest and
+live can never silently diverge on it. Wired into `run()` right after picks are selected,
+BEFORE sizing/vol-scaling/regime-filtering, so every downstream step (Volatility Scaling above,
+Position Size Hard-Cap, the regime filter) all act on the FINAL, post-filter pick list.
+
+**LIVE-ONLY** (same as `skip_month_guardrail`/`lookback_period`): the backtest engine consumes
+pre-computed `monthly_picks`, it never ranks tickers itself, so this constraint has no effect on
+a backtest run, only on `daily_runner.py`'s live rebalance loop.
+
+`defensive_ticker` must be priced alongside the portfolio's own tickers for this to actually
+work (add it to that portfolio's own `tickers:` list in `config.yaml`), there is no automatic
+widening of the price fetch for it, unlike the orphaned-ticker reconciliation's
+`extra_price_tickers` mechanism (a deliberately different, narrower feature).
+
 ## Recommended Config Presets
 
 These are two starting-point `default_risk` presets, one long-term (monthly), one short-term

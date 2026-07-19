@@ -102,6 +102,30 @@ class BacktestConfig:
                                              # picks each rebalance, a real signal-construction
                                              # change, not just a new warning. See
                                              # execution/live_signal.py's resolve_momentum_scores().
+    use_absolute_momentum: bool = False     # LIVE-ONLY, the "Absolute Momentum (Macro)"
+                                             # constraint (Mandatory tier, docs/RISK_CONSTRAINTS.md):
+                                             # Antonacci-style dual momentum, when True, any pick
+                                             # whose OWN trailing return (not just its rank
+                                             # relative to other picks) is negative gets swapped
+                                             # for defensive_ticker below instead of being held.
+                                             # Distinct from use_regime_filter above, which scales
+                                             # the WHOLE book by one benchmark's trend, this swaps
+                                             # INDIVIDUAL picks by their own momentum, the two are
+                                             # complementary, not redundant, can both be enabled at
+                                             # once. Default False, deliberately opt-in like
+                                             # skip_month_guardrail above: enabling it changes what
+                                             # the SAME picks actually resolve to each rebalance, a
+                                             # real signal-construction change, not just a new
+                                             # warning. See execution/live_signal.py's
+                                             # apply_absolute_momentum_filter(), which reuses
+                                             # core/functions_quant_extensions.py's
+                                             # absolute_momentum_overlay() directly.
+    defensive_ticker: str = "BIL"           # only meaningful when use_absolute_momentum is True,
+                                             # the ticker substituted in for a negative-absolute-
+                                             # momentum pick (e.g. 'BIL' T-bill ETF, 'SHY' short
+                                             # treasuries). Must be priced alongside the portfolio's
+                                             # own tickers for this to work (add it to that
+                                             # portfolio's own tickers: list in config.yaml).
     persist_dry_run_state: bool = False     # DRY-RUN-ONLY, no effect in --live (the broker is
                                              # always the source of truth there). Default False
                                              # preserves dry-run's existing behavior exactly:
@@ -308,6 +332,8 @@ class BacktestConfig:
             errors.append(f"target_portfolio_vol ({self.target_portfolio_vol}) must be > 0")
         if self.position_vol_budget is not None and self.position_vol_budget <= 0:
             errors.append(f"position_vol_budget ({self.position_vol_budget}) must be > 0 or None")
+        if not self.defensive_ticker or not self.defensive_ticker.strip():
+            errors.append(f"defensive_ticker ({self.defensive_ticker!r}) must be a non-empty string")
         if not (0 <= self.correlation_penalty_strength <= 1.0):
             errors.append(f"correlation_penalty_strength ({self.correlation_penalty_strength}) should be in [0, 1.0]")
         if self.liquidity_stress_multiplier < 1.0:

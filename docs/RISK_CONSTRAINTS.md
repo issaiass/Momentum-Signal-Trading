@@ -358,6 +358,13 @@ values. They tune `daily_runner.py`'s LIVE signal generation only, `lookback_per
 so neither preset explains or predicts any backtest chart's result, that's a separate question,
 governed entirely by `top_n`/`holding_period` at picks-generation time, not by these fields.
 
+Both presets below also cover the newer Mandatory/Nice-to-Have tier fields from "The full
+risk-strategy tier map" above (`target_portfolio_vol`, `portfolio_vol_lookback`,
+`use_absolute_momentum`, `defensive_ticker`, `max_bid_ask_spread_pct`), all `default_risk`-scoped
+like every other field here. `account_wide_max_drawdown_pct` is deliberately NOT in either preset
+block: it's a TOP-LEVEL, account-scoped field, not per-portfolio/per-regime, see the note after
+both presets below.
+
 ### Long-Term Momentum (Monthly)
 
 ```yaml
@@ -368,6 +375,12 @@ skip_month_guardrail: false     # matches config.example.yaml's shipped default,
                                  # relying on this guardrail
 max_turnover_pct: 0.20          # default
 position_vol_budget: null       # default, optional
+target_portfolio_vol: 0.15      # default, the standard portfolio-level vol target
+portfolio_vol_lookback: 21      # default, ~1 month of trading days
+use_absolute_momentum: false    # shipped default, opt-in, a real signal-construction change
+defensive_ticker: BIL           # only relevant if use_absolute_momentum is enabled above
+max_bid_ask_spread_pct: null    # default, disabled (requires a live, paid real-time
+                                 # market-data subscription, see docs/DEPLOYMENT.md)
 top_n: 10
 sizing_method: inverse_vol
 max_position_weight: 0.35
@@ -380,6 +393,10 @@ max_position_weight: 0.35
 | Momentum Persistence | `12 > 1` | Passes, the signal is far older than the holding window |
 | Lookback-to-Hold Ratio | `12 / 1 = 12` | At the top of the roughly 3-12 recommended band, not below 3, no warning |
 | `skip_month_guardrail` | `false` | Shipped default, an opt-in change to signal construction, not enabled by default here either |
+| `target_portfolio_vol` | `0.15` | The standard, unmodified default, no reason specific to the monthly regime to tighten it |
+| `portfolio_vol_lookback` | `21` | ~1 month, matches the monthly rebalance cadence's own natural timescale |
+| `use_absolute_momentum` | `false` | Same opt-in precedent as `skip_month_guardrail`, a real signal-construction change, not enabled by default here either |
+| `max_bid_ask_spread_pct` | `null` | Disabled by default, real-time market data is a real operational dependency (paid subscription), not something to silently assume is available |
 
 ### Short-Term Momentum (Weekly)
 
@@ -390,6 +407,15 @@ skip_month_guardrail: false     # confirmed no-op in the weekly regime regardles
 max_turnover_pct: 0.20          # default, more likely to be visited under weekly cadence,
                                  # that's expected/informational, not a sign of misconfiguration
 position_vol_budget: null       # default, optional
+target_portfolio_vol: 0.12      # tighter than the monthly preset's 0.15, the weekly regime's
+                                 # signal is noisier and unvalidated (see below), a smaller
+                                 # aggregate risk budget is the more conservative starting point
+portfolio_vol_lookback: 10      # ~2 weeks, shorter than the monthly preset's 21, more
+                                 # responsive to fast-changing conditions under a weekly
+                                 # rebalance cadence, matching its own faster timescale
+use_absolute_momentum: false    # same opt-in precedent as the monthly preset
+defensive_ticker: BIL           # only relevant if use_absolute_momentum is enabled above
+max_bid_ask_spread_pct: null    # same reasoning as the monthly preset
 top_n: 5                        # more concentrated, a shorter lookback carries a noisier signal
 sizing_method: inverse_vol      # kept as the safer default under short-term noise
 max_position_weight: 0.35
@@ -402,12 +428,25 @@ max_position_weight: 0.35
 | Momentum Persistence | `4wk > 1wk` | Passes |
 | Lookback-to-Hold Ratio | `4 / 1 = 4` | Above `3`, no warning |
 | `top_n` | `5` | A shorter, noisier signal window argues for fewer, higher-conviction picks |
+| `target_portfolio_vol` | `0.12` | Tighter than the monthly preset, a more conservative aggregate risk budget given the weekly regime's noisier, unvalidated signal |
+| `portfolio_vol_lookback` | `10` | ~2 weeks, more responsive than the monthly preset's 21, matching the weekly cadence's own faster timescale |
+| `use_absolute_momentum` | `false` | Same opt-in precedent as the monthly preset |
+| `max_bid_ask_spread_pct` | `null` | Same reasoning as the monthly preset |
 
 **Treat the short-term preset as unvalidated**, same caveat `docs/STRATEGY_THEORY.md` already
 states for weekly-scale momentum in general, this is a genuine departure from the 3-12 month
 range the academic literature actually studied, warning-free is not the same as
 performance-validated for either preset, it only means the values respect this file's own
 documented advisory thresholds.
+
+### Account-wide breaker: applies once per account, not per regime
+
+`account_wide_max_drawdown_pct` (top-level, `0.0` = disabled by default) is orthogonal to which
+momentum regime any given portfolio in the account uses, one real IBKR account can hold a mix of
+long-term and short-term portfolios under a SINGLE account-wide value. There is no "long-term"
+vs. "short-term" recommended value for this field the way there is for the regime-scoped fields
+above, set it once, based on your own real capital-preservation tolerance for the WHOLE account,
+independent of any individual portfolio's cadence. See "Drawdown Circuit Breaker" above.
 
 ## Independence from `risk_monitor.py`
 

@@ -52,16 +52,20 @@ README says so on purpose.
   capital"); fixed (non-null) portfolios reserve their capital first, and if multiple portfolios
   are null, they split the remaining account value equally, the resolved sum across every
   portfolio can never exceed the real account value, see `docs/RUNNING.md`
-- Portfolio-level circuit breaker (% and $ drawdown), idempotent daily scheduling, config-approval
-  gate before `--live` will run. Monthly (default) or weekly rebalancing, both targeting the
-  first real NYSE trading day of the period via `pandas_market_calendars`, automatically rolling
-  forward past weekends/holidays rather than firing on a fixed calendar date. Long-term
-  (monthly-scale, the academically-studied default) or short-term (weekly-scale, an unvalidated
-  variant) momentum lookback windows, both configurable via `holding_period`/`lookback_period`
-  in `config.example.yaml`. Six long-term/short-term risk constraints (advisory warnings for
-  Momentum Persistence, Lookback-to-Hold Ratio, and Turnover Limit; opt-in config toggles for
-  the Skip-Month Guardrail and per-position Volatility-Adjustment budget), see
-  `docs/RISK_CONSTRAINTS.md`. Restart-safe by construction in `--live` mode (broker-sourced
+- Portfolio-level AND account-wide circuit breakers (% and $ drawdown), idempotent daily
+  scheduling, config-approval gate before `--live` will run. Monthly (default) or weekly
+  rebalancing, both targeting the first real NYSE trading day of the period via
+  `pandas_market_calendars`, automatically rolling forward past weekends/holidays rather than
+  firing on a fixed calendar date. Long-term (monthly-scale, the academically-studied default)
+  or short-term (weekly-scale, an unvalidated variant) momentum lookback windows, both
+  configurable via `holding_period`/`lookback_period` in `config.example.yaml`. A full
+  Mandatory/Recommended/Nice-to-Have risk-strategy tier map (portfolio- and account-level
+  volatility targeting, an Antonacci-style absolute-momentum overlay, a flat position-size cap,
+  both circuit breakers, a correlation-spike monitor, and a pre-trade real-time bid-ask spread
+  gate), plus the original six long-term/short-term advisory warnings and config toggles
+  (Momentum Persistence, Lookback-to-Hold Ratio, Turnover Limit, Skip-Month Guardrail,
+  per-position Volatility-Adjustment budget), see `docs/RISK_CONSTRAINTS.md`. Restart-safe by
+  construction in `--live` mode (broker-sourced
   holdings, calendar-derived scheduling, persisted local/bind-mounted state, both native Python
   and Docker), plus a non-blocking `MISSED_REBALANCE_DAY` warning if a scheduled rebalance was
   missed entirely while the app was off, automatic safe reconciliation of a ticker orphaned from
@@ -101,6 +105,12 @@ and rationale in `docs/RISK_CONSTRAINTS.md`'s "Recommended Config Presets" secti
 |---|---|---|---|---|
 | Long-Term Momentum (Monthly) | `1` | `12` | `10` | Academically-studied default cadence |
 | Short-Term Momentum (Weekly) | `0.25` | `1.0` | `5` | Unvalidated variant, see `docs/STRATEGY_THEORY.md` |
+
+This is a curated subset (the fields most worth tuning to pick a cadence); both presets also
+specify `target_portfolio_vol`, `portfolio_vol_lookback`, `use_absolute_momentum`,
+`defensive_ticker`, and `max_bid_ask_spread_pct`, see `docs/RISK_CONSTRAINTS.md`'s
+"Recommended Config Presets" section for the complete field list, per-field rationale, and the
+full Mandatory/Recommended/Nice-to-Have risk-strategy tier map.
 
 The project tree:
 

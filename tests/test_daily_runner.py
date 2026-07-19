@@ -19,6 +19,7 @@ from momentum_trading.backtest.momentum_backtest import BacktestConfig
 from momentum_trading.daily_runner import (
     load_config, validate_config_schema, already_ran_today, mark_ran_today, send_alert_email,
     check_and_handle_time_stops, check_and_handle_stop_losses, resolve_total_values, check_ticker_overlap,
+    has_run_on_or_after,
 )
 from momentum_trading.core.audit_log import read_recent_alerts
 
@@ -229,6 +230,75 @@ class TestIdempotency:
         assert already_ran_today(tag) is False
         mark_ran_today(tag)
         assert already_ran_today(tag) is True
+
+    def test_as_of_checks_a_specific_past_date_not_today(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        import momentum_trading.daily_runner as daily_runner
+        import momentum_trading.risk.circuit_breaker as circuit_breaker
+        monkeypatch.setattr(circuit_breaker, "LOCK_DIR", tmp_path / "data")
+        monkeypatch.setattr(daily_runner, "LOCK_DIR", tmp_path / "data")
+
+        import datetime as dt
+        tag = "test_portfolio"
+        past_date = dt.date(2026, 1, 2)
+
+        # No lock exists for that past date yet, and today's own lock is unrelated.
+        assert already_ran_today(tag, as_of=past_date) is False
+        mark_ran_today(tag)  # marks TODAY, not past_date
+        assert already_ran_today(tag, as_of=past_date) is False  # still false, unaffected
+
+        # Directly write a lock file for the past date, as if it HAD run that day.
+        (tmp_path / "data" / f"last_run_{tag}_20260102.lock").write_text("x")
+        assert already_ran_today(tag, as_of=past_date) is True
+
+
+class TestHasRunOnOrAfter:
+    """
+    Backs the missed-rebalance-day check's "has this period already been handled somehow"
+    question. Deliberately a RANGE check, not an exact-date match: a manual --force-rebalance
+    catch-up marks TODAY's own date, never the missed period's original target date, so an
+    exact-date check would keep warning forever even after the user follows the warning's own
+    suggested remedy. This must clear the moment ANY lock exists on or after the missed date.
+    """
+
+    def _isolate(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        import momentum_trading.daily_runner as daily_runner
+        import momentum_trading.risk.circuit_breaker as circuit_breaker
+        monkeypatch.setattr(circuit_breaker, "LOCK_DIR", tmp_path / "data")
+        monkeypatch.setattr(daily_runner, "LOCK_DIR", tmp_path / "data")
+        (tmp_path / "data").mkdir(exist_ok=True)
+
+    def test_no_locks_at_all_is_false(self, tmp_path, monkeypatch):
+        import datetime as dt
+        self._isolate(tmp_path, monkeypatch)
+        assert has_run_on_or_after("rebalance_p1", dt.date(2026, 7, 1)) is False
+
+    def test_only_older_lock_is_false(self, tmp_path, monkeypatch):
+        import datetime as dt
+        self._isolate(tmp_path, monkeypatch)
+        (tmp_path / "data" / "last_run_rebalance_p1_20260601.lock").write_text("x")
+        assert has_run_on_or_after("rebalance_p1", dt.date(2026, 7, 1)) is False
+
+    def test_exact_date_lock_is_true(self, tmp_path, monkeypatch):
+        import datetime as dt
+        self._isolate(tmp_path, monkeypatch)
+        (tmp_path / "data" / "last_run_rebalance_p1_20260701.lock").write_text("x")
+        assert has_run_on_or_after("rebalance_p1", dt.date(2026, 7, 1)) is True
+
+    def test_later_catch_up_lock_is_true(self, tmp_path, monkeypatch):
+        # The exact scenario this exists for: missed on 2026-07-01, manually caught up via
+        # --force-rebalance on 2026-07-19, which marks 20260719, not 20260701.
+        import datetime as dt
+        self._isolate(tmp_path, monkeypatch)
+        (tmp_path / "data" / "last_run_rebalance_p1_20260719.lock").write_text("x")
+        assert has_run_on_or_after("rebalance_p1", dt.date(2026, 7, 1)) is True
+
+    def test_different_portfolio_tag_is_ignored(self, tmp_path, monkeypatch):
+        import datetime as dt
+        self._isolate(tmp_path, monkeypatch)
+        (tmp_path / "data" / "last_run_rebalance_p2_20260719.lock").write_text("x")
+        assert has_run_on_or_after("rebalance_p1", dt.date(2026, 7, 1)) is False
 
 
 class TestAlertFallback:

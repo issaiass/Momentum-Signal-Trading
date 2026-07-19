@@ -23,7 +23,7 @@ from momentum_trading.execution.live_signal import (
     compute_aggregate_drift, derive_entry_date, compute_target_weights,
     is_rebalance_day, is_holding_period_too_frequent, is_lookback_period_too_short,
     is_lookback_shorter_than_holding, is_lookback_to_holding_ratio_too_low,
-    compute_turnover, is_turnover_too_high,
+    compute_turnover, is_turnover_too_high, most_recent_rebalance_target_date,
     build_position_performance, resolve_momentum_scores, calculate_period_returns,
 )
 from momentum_trading.core.audit_log import read_recent_alerts
@@ -74,6 +74,39 @@ class TestIsRebalanceDay:
         # holiday-aware, the same as the pre-existing monthly branch already was.
         assert is_rebalance_day(0.25, today=pd.Timestamp("2026-02-16")) is False
         assert is_rebalance_day(0.25, today=pd.Timestamp("2026-02-17")) is True
+
+
+class TestMostRecentRebalanceTargetDate:
+    """
+    Distinct from is_rebalance_day() (which only answers "is TODAY the day"), this answers
+    "when was the last day I should have rebalanced", used to detect a rebalance day the
+    process/container was not running to catch, not to gate today's own run.
+    """
+
+    def test_finds_the_missed_monthly_date(self):
+        # Jan 2, 2026 was the real first trading day of January (Jan 1 is New Year's Day).
+        # Asking "as of" a later date in the same month with no rebalance since should find it.
+        found = most_recent_rebalance_target_date(1, today=pd.Timestamp("2026-01-10"))
+        assert found == pd.Timestamp("2026-01-02")
+
+    def test_finds_the_missed_weekly_date(self):
+        # 2026-01-05 (Monday) was the target day of that week under a weekly cadence.
+        found = most_recent_rebalance_target_date(0.25, today=pd.Timestamp("2026-01-08"))
+        assert found == pd.Timestamp("2026-01-05")
+
+    def test_only_looks_strictly_before_today(self):
+        # today itself is a rebalance day, but this function only searches BEFORE today, so it
+        # must return the PRIOR period's target, not today's own date.
+        found = most_recent_rebalance_target_date(1, today=pd.Timestamp("2026-01-02"))
+        assert found is not None
+        assert found < pd.Timestamp("2026-01-02")
+
+    def test_holiday_aware_like_is_rebalance_day(self):
+        # Presidents' Day 2026 (Mon 2026-02-16) shifts to Tuesday 2026-02-17 under a weekly
+        # cadence, same holiday-awareness is_rebalance_day() itself has, confirmed here since
+        # this function is built directly on top of it.
+        found = most_recent_rebalance_target_date(0.25, today=pd.Timestamp("2026-02-20"))
+        assert found == pd.Timestamp("2026-02-17")
 
 
 class TestIsHoldingPeriodTooFrequent:

@@ -411,6 +411,53 @@ validated. A lookback shorter than 2 weeks under a weekly `holding_period` trigg
 non-blocking WARNING (mirrors the `holding_period`-too-frequent warning above), a momentum
 signal that short is dominated by noise.
 
+## 4.11c. Restart and Resume Behavior
+
+If you close the app (native Python, `Ctrl+C`) or stop the container and start it again later,
+does it resume from where it left off, or start over? Short answer, confirmed by reading the
+actual scheduling/state code, not assumed:
+
+**`--live` mode already resumes correctly, by construction, no action needed from you**:
+- Scheduling is never a counter. `is_rebalance_day()` (see 4.11a above) recomputes purely from
+  TODAY's real date against the NYSE calendar every single run, there is no "days since last
+  rebalance" value to get stale or desynced by an outage.
+- Current holdings in `--live` mode are a REAL broker query every run
+  (`get_ibkr_positions()`), never local memory, so the broker itself, not this app, is the
+  source of truth for "what do I currently hold." A restart changes nothing about what's
+  actually held.
+- Everything scheduling/risk state depends on (idempotency lock files, circuit-breaker
+  halt/peak-equity state, trade/alert/email-command logs, portfolio snapshots) lives under
+  `data/`/`logs/`. For native Python, that's just a local directory on disk, unaffected by
+  process restarts. For Docker, `docker-compose.yml` bind-mounts `./data:/app/data` and
+  `./logs:/app/logs` to the host, this persists across both `docker stop`/`start` AND
+  `docker compose down`/`up` (the `Dockerfile`'s own `VOLUME` declaration is superseded by
+  these compose bind mounts; only deleting the host `./data`/`./logs` folders directly would
+  lose this state).
+
+**Dry-run mode (no `--live`) does NOT persist a simulated portfolio across restarts.**
+`current_positions` is always `{}` at the start of every dry-run invocation, by design, dry-run
+previews signal/sizing/order-generation logic, it was never meant to be a stateful paper-trading
+engine, see `README.md`'s "Project Maturity & Safety" section for the broader `--force-rebalance`
+scope caveat. Each dry-run run always starts from a hypothetical flat/no-holdings state. If you
+want an actual persistent paper portfolio without real money at risk, use `--live --port 7497`
+against a real IBKR paper account, that path already resumes correctly for the reasons above,
+since the broker (paper or real) is genuinely the source of truth either way. The trade log's
+`dry_run=True` rows remain the durable record of "what a dry-run would have done," across every
+run, they're just not read back to reconstruct a simulated position.
+
+**One real gap, closed by this project**: if the process/container was off through an ENTIRE
+scheduled rebalance day, there is no automatic catch-up, that day's rebalance never happens.
+This is a deliberate, alert-only design choice (see "Your confirmed choices" reasoning in this
+project's own change history), not an oversight left unaddressed: a non-blocking
+`MISSED_REBALANCE_DAY` WARNING (logged and emailed, same pattern as every other advisory check
+in this project) fires on the next run when a scheduled rebalance date has no recorded run since
+it passed. It stays silent once ANY run happens on or after that missed date, including a manual
+catch-up via `daily-runner --force-rebalance --live`, so following the warning's own suggested
+remedy correctly clears it on the next run rather than nagging indefinitely. It also stays
+silent for a portfolio's very first run ever (nothing to have missed yet). It does NOT
+automatically re-run the missed rebalance for you, that decision (and its price, necessarily
+today's, not the missed day's) is left to you.
+
 ## 4.12. Additional capabilities, quick pointers
 
 - **Alternative position sizing**: set `sizing_method: score_proportional` in `config.yaml`'s

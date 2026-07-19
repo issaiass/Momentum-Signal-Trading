@@ -58,7 +58,10 @@ README says so on purpose.
   in `config.example.yaml`. Six long-term/short-term risk constraints (advisory warnings for
   Momentum Persistence, Lookback-to-Hold Ratio, and Turnover Limit; opt-in config toggles for
   the Skip-Month Guardrail and per-position Volatility-Adjustment budget), see
-  `docs/RISK_CONSTRAINTS.md`
+  `docs/RISK_CONSTRAINTS.md`. Restart-safe by construction in `--live` mode (broker-sourced
+  holdings, calendar-derived scheduling, persisted local/bind-mounted state, both native Python
+  and Docker), plus a non-blocking `MISSED_REBALANCE_DAY` warning if a scheduled rebalance was
+  missed entirely while the app was off, see `docs/RUNNING.md`'s "Restart and Resume Behavior"
 - Hash-chained, tamper-evident audit logs for trades, email commands, and alerts, three
   separate logs, kept deliberately apart
 - Categorized email notifications (CRITICAL/STANDARD/PERIODIC/DAILY/WARNING) and pydantic-
@@ -79,7 +82,7 @@ README says so on purpose.
   monthly report, 1-day/1/2/3-week for the daily report)
 - Dockerized, self-scheduling deployment (`docker compose up -d`, internal cron, no manual
   triggering needed for normal operation)
-- 413-test pytest suite covering code mechanics, order sizing, config validation, audit-log
+- 423-test pytest suite covering code mechanics, order sizing, config validation, audit-log
   integrity, multi-portfolio capital math, entirely on synthetic/mocked data, no live broker
   required to run it
 
@@ -202,7 +205,7 @@ momentum-trading/
 │       └── email_diagnostics.py     backs `daily-runner --test-email`, live SMTP+IMAP
 │                                     check independent of config.yaml
 │
-└── tests/                         pytest suite (413 tests), mirrors src/ layout where a
+└── tests/                         pytest suite (423 tests), mirrors src/ layout where a
     ├── conftest.py                  test's primary subject is a single sub-package;
     ├── test_architecture.py         cross-cutting/integration tests stay at tests/ root
     ├── test_daily_runner.py

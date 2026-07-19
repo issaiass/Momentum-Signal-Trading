@@ -227,6 +227,28 @@ that tests enforce, don't casually violate these when editing:
   `metadata.approved_by`/`approved_date` are set. `--port`'s default reads the `IBKR_PORT` env
   var (falling back to `7497`), mirrors `execution/live_signal.py`'s existing `IBKR_HOST` env
   var pattern; an explicit `--port` on the command line always overrides it.
+  Restart/resume safety is intentional and already correct in `--live` mode BY CONSTRUCTION,
+  confirmed by reading the code, not assumed: `is_rebalance_day()` recomputes purely from
+  today's real date every run (no stored "days since last rebalance" counter to desync), and
+  `get_ibkr_positions()` is a real broker query every run (never local memory), so a restart
+  changes nothing about actual holdings. Don't "fix" this by adding new persisted local
+  position state, that would introduce exactly the drift-from-the-broker risk this
+  architecture deliberately avoids. `has_run_on_or_after(tag, since_date)` (a range check over
+  `data/last_run_{tag}_*.lock` files, distinct from `already_ran_today(tag, as_of=...)`'s
+  exact-date check) backs the one confirmed gap that WAS worth closing: `MISSED_REBALANCE_DAY`,
+  a non-blocking WARNING (same triple-step pattern as this file's other advisory checks) when
+  a scheduled rebalance date passed with no run recorded since. Deliberately a range check, not
+  an exact-date match, so a manual `--force-rebalance` catch-up (which marks TODAY's date, never
+  the missed period's original target date) correctly clears the warning on the next run
+  instead of nagging forever. `execution/live_signal.py`'s
+  `most_recent_rebalance_target_date()` is the pure calendar half of this (finds the most
+  recent date STRICTLY BEFORE today that was itself a rebalance day, built directly on
+  `is_rebalance_day()`), `daily_runner.py`'s wiring adds the file-existence half and the
+  "portfolio has run at least once before" guard (skips a brand-new portfolio's very first
+  run, nothing to have missed yet). See `docs/RUNNING.md`'s "4.11c. Restart and Resume
+  Behavior" for the full user-facing explanation, including dry-run mode's deliberate lack of
+  persisted simulated-portfolio state (unrelated to this gap, a separate, intentional design
+  choice).
 
 **Config flow**: `config.yaml` (gitignored; copy from `config.example.yaml`) →
 `daily_runner.load_config()` builds one `BacktestConfig` per portfolio from

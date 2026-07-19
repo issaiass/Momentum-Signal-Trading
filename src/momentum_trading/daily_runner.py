@@ -29,7 +29,7 @@ import pandas as pd
 from .execution.live_signal import (
     is_rebalance_day, is_holding_period_too_frequent, is_lookback_period_too_short,
     is_lookback_shorter_than_holding, is_lookback_to_holding_ratio_too_low,
-    compute_turnover, is_turnover_too_high,
+    compute_turnover, is_turnover_too_high, most_recent_rebalance_target_date,
     run, run_multi_portfolio,
     get_ibkr_positions, get_ibkr_account_value, with_retry,
     place_orders_ibkr, log_orders, write_portfolio_snapshot, get_latest_snapshot,
@@ -111,10 +111,39 @@ def send_alert_email(subject: str, body: str) -> None:
 # --------------------------------------------------------------------------- #
 # IDEMPOTENCY (item 3)
 # --------------------------------------------------------------------------- #
-def already_ran_today(tag: str = "rebalance") -> bool:
+def already_ran_today(tag: str = "rebalance", as_of=None) -> bool:
+    """
+    as_of : date | None, optional, backward compatible. Every pre-existing call site (no as_of
+    passed) checks TODAY's own lock file, unchanged. Pass a specific date to check whether a
+    PAST date's lock file exists instead, used by the missed-rebalance-day check to ask "was
+    there a lock file for the date that got missed", not just today.
+    """
     LOCK_DIR.mkdir(exist_ok=True)
-    lock_file = LOCK_DIR / f"last_run_{tag}_{datetime.today().strftime('%Y%m%d')}.lock"
+    day = as_of if as_of is not None else datetime.today().date()
+    lock_file = LOCK_DIR / f"last_run_{tag}_{day.strftime('%Y%m%d')}.lock"
     return lock_file.exists()
+
+
+def has_run_on_or_after(tag: str, since_date) -> bool:
+    """
+    True if ANY rebalance lock file for this tag is dated on or after since_date, not just an
+    exact match. Used by the missed-rebalance-day check: an exact-date match
+    (already_ran_today(as_of=...)) would keep warning forever after a manual catch-up, since a
+    --force-rebalance run always marks TODAY's own date, never retroactively marks the missed
+    period's original target date. This answers the real question, "has ANYTHING run to handle
+    this period since it was missed", so a manual --force-rebalance catch-up correctly clears
+    the warning on the next run instead of nagging indefinitely.
+    """
+    LOCK_DIR.mkdir(exist_ok=True)
+    for lock_file in LOCK_DIR.glob(f"last_run_{tag}_*.lock"):
+        date_str = lock_file.stem.rsplit("_", 1)[-1]
+        try:
+            lock_date = datetime.strptime(date_str, "%Y%m%d").date()
+        except ValueError:
+            continue  # unexpected filename shape, ignore rather than crash the check
+        if lock_date >= since_date:
+            return True
+    return False
 
 
 def mark_ran_today(tag: str = "rebalance") -> None:
@@ -924,6 +953,53 @@ def main():
                     f"<pre>{ratio_text}</pre>", notification_cfg,
                     plain_text_fallback=ratio_text,
                 )
+
+            # --- Missed-rebalance-day constraint (non-blocking): the process/container was not
+            #     running on a date that should have been a scheduled rebalance day, so it never
+            #     happened, silently, by construction (is_rebalance_day() only ever asks "is
+            #     TODAY the day", it has no memory of a day it never got to check). Alert-only,
+            #     no automatic catch-up, see docs/RUNNING.md. Skipped entirely when today IS
+            #     itself a rebalance day (about to run normally below, nothing was missed), when
+            #     --force-rebalance is set (not the automatic path this targets), or when this
+            #     portfolio has never successfully run before (a brand-new deployment has
+            #     nothing to have missed). Uses has_run_on_or_after(), not an exact-date lock
+            #     check, specifically so that manually running --force-rebalance to catch up
+            #     clears this warning on the NEXT run, rather than nagging forever, since a
+            #     forced run marks TODAY's own date, never the missed period's original
+            #     target date. ---
+            has_run_before = any(LOCK_DIR.glob(f"last_run_rebalance_{name}_*.lock"))
+            if (not args.force_rebalance and has_run_before
+                    and not is_rebalance_day(holding_period_months=cfg.holding_period)):
+                missed_date = most_recent_rebalance_target_date(holding_period_months=cfg.holding_period)
+                if missed_date is not None and not has_run_on_or_after(
+                    f"rebalance_{name}", missed_date.date(),
+                ):
+                    logger.warning(
+                        "[%s] Missed scheduled rebalance on %s, the process was not running "
+                        "that day, no automatic catch-up was performed.",
+                        name, missed_date.date(),
+                    )
+                    log_alert(
+                        name, "MISSED_REBALANCE_DAY", "WARNING",
+                        f"Scheduled rebalance on {missed_date.date()} was missed, no lock file "
+                        f"found for that date.",
+                        log_path=ALERTS_LOG_PATH,
+                    )
+                    missed_text = (
+                        f"Portfolio '{name}' had a scheduled rebalance on "
+                        f"{missed_date.date()} (holding_period={cfg.holding_period}), but no "
+                        f"record of it running exists, the process or container was not "
+                        f"running that day.\n\n"
+                        f"No automatic catch-up was performed, this run is proceeding "
+                        f"normally against today's own schedule. If you want that missed "
+                        f"rebalance applied now, using today's prices, run daily-runner "
+                        f"--force-rebalance --live for '{name}' manually."
+                    )
+                    send_action_email(
+                        NotificationCategory.WARNING, f"Missed rebalance day: {name}",
+                        f"<pre>{missed_text}</pre>", notification_cfg,
+                        plain_text_fallback=missed_text,
+                    )
 
             # --- item 1: real positions from IBKR, never local memory. total_value comes
             #     from resolved_total_values, resolved once above the loop. ---

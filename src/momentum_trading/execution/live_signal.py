@@ -238,6 +238,32 @@ def is_rebalance_day(holding_period_months: float = 1, exchange: str = "NYSE",
     return is_target
 
 
+def most_recent_rebalance_target_date(holding_period_months: float = 1, exchange: str = "NYSE",
+                                        reference_day_of_month: int = 1,
+                                        today: pd.Timestamp | None = None) -> pd.Timestamp | None:
+    """
+    The most recent date STRICTLY BEFORE today that was itself a rebalance day
+    (is_rebalance_day() would have returned True had it been asked about that date), or None if
+    none falls within the lookback window. Distinct from is_rebalance_day() itself, which only
+    answers "is TODAY the day", this answers "when was the last day I should have rebalanced",
+    used to detect a rebalance day that was missed entirely (the process/container wasn't
+    running that day), not just to gate today's own run.
+
+    Pure, no file I/O, same injectable `today` pattern as is_rebalance_day() for testing.
+
+    lookback_days=40 is a fixed margin, comfortably covering the monthly regime (at most ~31
+    days between target days) and every weekly/multi-week holding_period variant this project
+    supports, without needing to know holding_period's own cadence length in advance.
+    """
+    today = (today if today is not None else pd.Timestamp.today()).normalize()
+    lookback_days = 40
+    for offset in range(1, lookback_days + 1):
+        candidate = today - pd.Timedelta(days=offset)
+        if is_rebalance_day(holding_period_months, exchange, reference_day_of_month, today=candidate):
+            return candidate
+    return None
+
+
 # --------------------------------------------------------------------------- #
 # 1. SIGNAL GENERATION, identical logic to Notebook 2, run on live data
 # --------------------------------------------------------------------------- #

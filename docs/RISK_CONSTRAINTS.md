@@ -306,6 +306,25 @@ section. `None` (the default) makes ZERO new IBKR calls, byte-identical to befor
 existed. LIVE-ONLY, dry-run never opens an IBKR connection at all, consistent with every other
 IBKR-dependent check in this codebase.
 
+## Hard-to-Borrow (HTB) Sentinel [Nice-to-Have tier]: Not Applicable
+
+Confirmed by an exhaustive full-codebase search, not assumed: this system is strictly
+long-only. The only `action` values ever produced anywhere are `"BUY"`, `"SELL"`, and `"HOLD"`
+(`execution/live_signal.py`'s `generate_orders()`, and every downstream consumer: order
+placement, the order-log CSV schema, FIFO P&L parsing); `SELL` always means closing or reducing
+an existing LONG position back toward flat, never opening a short. Every position weight
+computed anywhere (`resolve_target_weights()`'s sizing, `_apply_position_caps()`, gross-exposure
+scaling) is non-negative by construction, `min_gross_exposure`'s defensive de-risking reduces
+exposure toward cash, it never flips to a negative/short weight. No config field, CLI flag, or
+IBKR margin/borrow API call (`whatIfOrder`, a shortable-shares check, anything) exists anywhere
+in this codebase for opening a short position.
+
+"Ensuring a stock is borrowable before submitting orders" therefore doesn't apply: there is no
+short leg for it to protect. This isn't a partially-implemented feature missing a piece, it's a
+tier item this system's design doesn't need. If short-selling were ever added to this project
+(a much larger undertaking than any other constraint in this document, out of scope here), HTB
+checking would need to be built from scratch, no scaffolding for it exists today.
+
 ## Recommended Config Presets
 
 These are two starting-point `default_risk` presets, one long-term (monthly), one short-term

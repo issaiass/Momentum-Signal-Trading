@@ -63,6 +63,29 @@ def get_effective_max_drawdown_pct(name: str, configured_value: float) -> float:
     return min(configured_value, override_value)
 
 
+ACCOUNT_WIDE_PEAK_NAME = "__account__"
+
+
+def compute_account_wide_drawdown(current_account_value: float, peak_account_equity: float) -> dict:
+    """
+    Pure drawdown formula backing the account-wide (Recommended tier, docs/RISK_CONSTRAINTS.md)
+    circuit breaker, no I/O, same shape as check_circuit_breaker()'s existing per-portfolio
+    drawdown_pct/drawdown_dollar math below. Peak-equity persistence and halting live in
+    daily_runner.py's check_account_wide_drawdown_breaker(), which calls this.
+
+    Returns {drawdown_pct, drawdown_dollar}, drawdown_pct is negative on a loss (matches
+    check_circuit_breaker()'s existing sign convention: tripped when drawdown_pct <=
+    -max_drawdown_pct). peak_account_equity <= 0 (nothing tracked yet) returns zero drawdown
+    rather than dividing by zero.
+    """
+    if peak_account_equity <= 0:
+        return {"drawdown_pct": 0.0, "drawdown_dollar": 0.0}
+    return {
+        "drawdown_pct": (current_account_value - peak_account_equity) / peak_account_equity,
+        "drawdown_dollar": peak_account_equity - current_account_value,
+    }
+
+
 def check_circuit_breaker(name: str, total_value: float, cfg: BacktestConfig, alert_fn=None) -> bool:
     """
     Tracks peak equity across runs (persisted to disk, since daily_runner.py
@@ -82,20 +105,30 @@ def check_circuit_breaker(name: str, total_value: float, cfg: BacktestConfig, al
 
     Returns True if trading should be halted (skip rebalance) for this portfolio.
     """
-    if (cfg.max_portfolio_drawdown_pct <= 0 and cfg.max_dollar_drawdown is None
-            and not _max_drawdown_override_path(name).exists()):
-        return False  # both config breakers disabled and no active email override
-
     LOCK_DIR.mkdir(exist_ok=True)
-    peak_path = _peak_equity_path(name)
     halt_path = _halt_flag_path(name)
 
+    # --- The halt-flag check happens FIRST, unconditionally, regardless of whether THIS
+    #     portfolio's own drawdown breaker is configured. The flag can be written by a source
+    #     other than this function's own trip logic below (risk_monitor.py's write_halt_flag(),
+    #     an email-commanded PAUSE, the account-wide breaker), all of which reuse this SAME
+    #     file specifically so daily_runner.py's rebalance gate needs only one check. Checking
+    #     it AFTER the "both config breakers disabled" early return (the old, buggy order) meant
+    #     an externally-written halt was SILENTLY IGNORED whenever this portfolio's own
+    #     max_portfolio_drawdown_pct/max_dollar_drawdown were left at their shipped defaults
+    #     (0.0/None, the common case), making risk_monitor.py's entire documented purpose
+    #     ineffective for any portfolio that hadn't separately opted into its own breaker. ---
     if halt_path.exists():
         logger.warning("[%s] Circuit breaker HALT still in effect (from %s). "
                         "Call resume_trading() to clear it after review.",
                         name, halt_path.read_text().strip())
         return True
 
+    if (cfg.max_portfolio_drawdown_pct <= 0 and cfg.max_dollar_drawdown is None
+            and not _max_drawdown_override_path(name).exists()):
+        return False  # both config breakers disabled and no active email override, and not halted
+
+    peak_path = _peak_equity_path(name)
     prior_peak = float(peak_path.read_text()) if peak_path.exists() else total_value
     new_peak = max(prior_peak, total_value)
     peak_path.write_text(str(new_peak))

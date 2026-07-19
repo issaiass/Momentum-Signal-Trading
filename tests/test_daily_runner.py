@@ -122,6 +122,32 @@ class TestConfigSchemaValidation:
         validate_config_schema(ok_true, "test.yaml")   # should not raise
         validate_config_schema(ok_false, "test.yaml")  # should not raise
 
+    def test_missing_account_wide_max_drawdown_pct_is_valid(self):
+        # 0.0 (disabled) is the implicit default when the field is absent, an existing
+        # config.yaml without this field must load exactly as before this feature existed.
+        ok = {"portfolios": {"p1": {"tickers": ["SPY"]}}}
+        validate_config_schema(ok, "test.yaml")  # should not raise
+
+    def test_account_wide_max_drawdown_pct_in_range_is_valid(self):
+        ok = {"portfolios": {"p1": {"tickers": ["SPY"]}}, "account_wide_max_drawdown_pct": 0.25}
+        validate_config_schema(ok, "test.yaml")  # should not raise
+
+    def test_account_wide_max_drawdown_pct_out_of_range_raises(self):
+        bad_negative = {"portfolios": {"p1": {"tickers": ["SPY"]}}, "account_wide_max_drawdown_pct": -0.1}
+        with pytest.raises(ValueError, match="account_wide_max_drawdown_pct"):
+            validate_config_schema(bad_negative, "test.yaml")
+        # >= 1.0 would mean "halt only after losing 100%+", can never trigger, disables the
+        # feature while looking configured, same reasoning as max_portfolio_drawdown_pct's
+        # existing BacktestConfig validation.
+        bad_too_high = {"portfolios": {"p1": {"tickers": ["SPY"]}}, "account_wide_max_drawdown_pct": 1.0}
+        with pytest.raises(ValueError, match="account_wide_max_drawdown_pct"):
+            validate_config_schema(bad_too_high, "test.yaml")
+
+    def test_account_wide_max_drawdown_pct_wrong_type_raises(self):
+        bad = {"portfolios": {"p1": {"tickers": ["SPY"]}}, "account_wide_max_drawdown_pct": "0.2"}
+        with pytest.raises(ValueError, match="account_wide_max_drawdown_pct"):
+            validate_config_schema(bad, "test.yaml")
+
 
 class TestLoadConfig:
     """
@@ -537,6 +563,124 @@ class TestCircuitBreaker:
 
         cfg = BacktestConfig()  # max_portfolio_drawdown_pct=0.0 by default
         assert check_circuit_breaker("p", 100.0, cfg) is False  # -90% drawdown, but disabled
+
+    def test_externally_written_halt_flag_is_respected_even_with_breaker_disabled(self, tmp_path, monkeypatch):
+        # REGRESSION for a real, pre-existing bug found while building the account-wide breaker
+        # (Epic 4 of the layered risk-management plan): check_circuit_breaker()'s early return
+        # ("both config breakers disabled, nothing to check") used to skip the halt_path.exists()
+        # check ENTIRELY, meaning a halt flag written by an EXTERNAL source (risk_monitor.py's
+        # write_halt_flag(), an email-commanded PAUSE, or the new account-wide breaker) was
+        # SILENTLY IGNORED by daily_runner.py's rebalance gate whenever this specific portfolio's
+        # OWN max_portfolio_drawdown_pct/max_dollar_drawdown were left at their shipped defaults
+        # (0.0/None), which is the common case. This made risk_monitor.py's entire documented
+        # purpose ("writes a halt flag file daily_runner.py checks and respects") silently
+        # ineffective for any portfolio that hadn't separately opted into its own drawdown
+        # breaker. Confirmed by direct reproduction before this fix (check_circuit_breaker()
+        # returned False despite the flag file existing on disk).
+        monkeypatch.chdir(tmp_path)
+        import momentum_trading.risk.circuit_breaker as circuit_breaker
+        monkeypatch.setattr(circuit_breaker, "LOCK_DIR", tmp_path / "data")
+        circuit_breaker.LOCK_DIR.mkdir(exist_ok=True)
+        from momentum_trading.risk.circuit_breaker import check_circuit_breaker, _halt_flag_path
+        from momentum_trading.backtest.momentum_backtest import BacktestConfig
+
+        _halt_flag_path("p1").write_text("2026-01-01T00:00:00 | risk_monitor.py: some halt reason")
+        cfg = BacktestConfig()  # both breakers at their default-disabled values
+        assert check_circuit_breaker("p1", 1000.0, cfg) is True
+
+
+class TestComputeAccountWideDrawdown:
+    """
+    compute_account_wide_drawdown() (Epic 4 of the layered risk-management plan, "Drawdown
+    Circuit Breaker", Recommended tier, account-wide variant): a pure hand-verifiable formula,
+    same shape as check_circuit_breaker()'s existing per-portfolio drawdown_pct/drawdown_dollar
+    math, no I/O.
+    """
+
+    def test_hand_computed_drawdown(self):
+        from momentum_trading.risk.circuit_breaker import compute_account_wide_drawdown
+        result = compute_account_wide_drawdown(current_account_value=8000.0, peak_account_equity=10000.0)
+        assert result["drawdown_pct"] == pytest.approx(-0.20)
+        assert result["drawdown_dollar"] == pytest.approx(2000.0)
+
+    def test_no_drawdown_when_at_peak(self):
+        from momentum_trading.risk.circuit_breaker import compute_account_wide_drawdown
+        result = compute_account_wide_drawdown(current_account_value=10000.0, peak_account_equity=10000.0)
+        assert result["drawdown_pct"] == pytest.approx(0.0)
+        assert result["drawdown_dollar"] == pytest.approx(0.0)
+
+    def test_zero_peak_does_not_divide_by_zero(self):
+        from momentum_trading.risk.circuit_breaker import compute_account_wide_drawdown
+        result = compute_account_wide_drawdown(current_account_value=0.0, peak_account_equity=0.0)
+        assert result["drawdown_pct"] == pytest.approx(0.0)
+        assert result["drawdown_dollar"] == pytest.approx(0.0)
+
+
+class TestAccountWideCircuitBreaker:
+    """
+    check_account_wide_drawdown_breaker(), the halting wiring built on top of
+    compute_account_wide_drawdown() above. Distinct from TestCircuitBreaker's per-portfolio
+    breaker: this evaluates the SUM of every portfolio's resolved capital against ONE
+    account-wide peak, and when tripped, halts EVERY portfolio at once (writes each one's own
+    circuit_breaker_halted_<name>.flag, the exact file the existing per-portfolio rebalance
+    gate already checks, no new gating code path needed downstream).
+    """
+
+    def _isolate(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        import momentum_trading.risk.circuit_breaker as circuit_breaker
+        monkeypatch.setattr(circuit_breaker, "LOCK_DIR", tmp_path / "data")
+        monkeypatch.setattr(daily_runner, "LOCK_DIR", tmp_path / "data")
+        monkeypatch.setattr(circuit_breaker, "ALERTS_LOG_PATH", str(tmp_path / "data" / "alerts_log.csv"))
+        monkeypatch.setattr(daily_runner, "ALERTS_LOG_PATH", str(tmp_path / "data" / "alerts_log.csv"))
+
+    def test_disabled_by_default(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        from momentum_trading.daily_runner import check_account_wide_drawdown_breaker
+        # 0.0 = disabled, matches max_portfolio_drawdown_pct's exact convention, must never
+        # halt anything even under a severe drawdown when left at its default.
+        tripped = check_account_wide_drawdown_breaker(["p1", "p2"], 100.0, max_drawdown_pct=0.0)
+        assert tripped is False
+        assert not (tmp_path / "data" / "circuit_breaker_halted_p1.flag").exists()
+        assert not (tmp_path / "data" / "circuit_breaker_halted_p2.flag").exists()
+
+    def test_breach_halts_every_portfolio(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        from momentum_trading.daily_runner import check_account_wide_drawdown_breaker
+
+        assert check_account_wide_drawdown_breaker(["p1", "p2"], 10000.0, max_drawdown_pct=0.20) is False
+        assert check_account_wide_drawdown_breaker(["p1", "p2"], 12000.0, max_drawdown_pct=0.20) is False  # new peak
+        tripped = check_account_wide_drawdown_breaker(["p1", "p2"], 9000.0, max_drawdown_pct=0.20)  # -25% from peak
+        assert tripped is True
+        assert (tmp_path / "data" / "circuit_breaker_halted_p1.flag").exists()
+        assert (tmp_path / "data" / "circuit_breaker_halted_p2.flag").exists()
+
+    def test_resuming_each_portfolio_individually_clears_its_own_halt(self, tmp_path, monkeypatch):
+        # Per the plan: resuming reuses the EXISTING per-portfolio resume_trading(), no new
+        # resume mechanism, since the account-wide breaker writes to the SAME halt-flag file
+        # check_circuit_breaker()/resume_trading() already manage.
+        self._isolate(tmp_path, monkeypatch)
+        from momentum_trading.daily_runner import check_account_wide_drawdown_breaker
+        from momentum_trading.risk.circuit_breaker import resume_trading
+
+        check_account_wide_drawdown_breaker(["p1", "p2"], 10000.0, max_drawdown_pct=0.20)
+        check_account_wide_drawdown_breaker(["p1", "p2"], 7000.0, max_drawdown_pct=0.20)
+        assert (tmp_path / "data" / "circuit_breaker_halted_p1.flag").exists()
+        resume_trading("p1")
+        assert not (tmp_path / "data" / "circuit_breaker_halted_p1.flag").exists()
+        assert (tmp_path / "data" / "circuit_breaker_halted_p2.flag").exists()  # untouched
+
+    def test_alert_fn_called_with_every_affected_portfolio_named(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        from momentum_trading.daily_runner import check_account_wide_drawdown_breaker
+
+        calls = []
+        check_account_wide_drawdown_breaker(["p1", "p2"], 10000.0, max_drawdown_pct=0.20)
+        check_account_wide_drawdown_breaker(["p1", "p2"], 7000.0, max_drawdown_pct=0.20,
+                                             alert_fn=lambda subject, body: calls.append((subject, body)))
+        assert len(calls) == 1
+        subject, body = calls[0]
+        assert "p1" in body and "p2" in body
 
 
 class TestMaxDrawdownEmailOverride:

@@ -201,6 +201,49 @@ starting point. `position_vol_budget` (Allow/disallow constraints above) is a co
 NOT redundant, per-ticker cap applied AFTER this flat one, varying by each ticker's own
 volatility rather than being identical for every ticker.
 
+## Drawdown Circuit Breaker [Recommended tier]
+
+Three now-distinct loss-protection layers exist, worth telling apart clearly:
+
+| Layer | Scope | Halts | Config |
+|---|---|---|---|
+| `risk/circuit_breaker.py`'s `check_circuit_breaker()` (pre-existing) | PER-PORTFOLIO, that portfolio's own peak equity | Only that one portfolio's new entries (does NOT force-liquidate existing positions) | `default_risk.max_portfolio_drawdown_pct` / `max_dollar_drawdown` (per-portfolio, `risk_overrides` can differ per portfolio) |
+| `check_account_wide_drawdown_breaker()` (this constraint, new) | ACCOUNT-WIDE, one peak for the SUM of every portfolio's resolved capital | EVERY portfolio sharing the real IBKR account at once | top-level `account_wide_max_drawdown_pct` (account-scoped, not per-portfolio) |
+| `risk/risk_monitor.py` (pre-existing, independent process) | PER-PORTFOLIO, realized loss only (not peak-relative drawdown) | That one portfolio | `--max-loss-pct` CLI flag, separately scheduled |
+
+The account-wide breaker reuses the EXACT SAME halt-flag mechanism the other two already use
+(`circuit_breaker_halted_<name>.flag`, one file per portfolio), writing it for every portfolio
+in the account when tripped, so `daily_runner.py`'s existing per-portfolio rebalance gate needs
+no new code path to respect it, and resuming still uses the existing
+`daily-runner --resume-trading <name>`, called once per affected portfolio, per the "no new
+resume mechanism" design goal.
+
+**A real, pre-existing bug was found and fixed while building this**: `check_circuit_breaker()`
+used to skip its own `halt_path.exists()` check ENTIRELY whenever the CALLING portfolio's own
+`max_portfolio_drawdown_pct`/`max_dollar_drawdown` were both at their shipped defaults
+(`0.0`/`null`, the common case), an early-return optimization that predates this account-wide
+feature. This meant a halt flag written by ANY external source, `risk_monitor.py`'s
+`write_halt_flag()` (its entire documented purpose), an email-commanded PAUSE, or now this new
+account-wide breaker, was SILENTLY IGNORED by the rebalance gate for any portfolio that hadn't
+separately opted into its own per-portfolio drawdown breaker. Confirmed by direct reproduction
+before the fix (`check_circuit_breaker()` returned `False` despite the flag file existing on
+disk), fixed by checking `halt_path.exists()` FIRST, unconditionally, before the "both breakers
+disabled" early return, see `check_circuit_breaker()`'s own updated docstring/comments and
+`TestCircuitBreaker::test_externally_written_halt_flag_is_respected_even_with_breaker_disabled`.
+This was a genuine safety gap in already-shipped functionality (`risk_monitor.py`'s halting,
+email PAUSE), not something newly introduced by this constraint, it was only DISCOVERED while
+adding this constraint's own halt-flag reuse.
+
+**Independent peak tracking, deliberately**: the account-wide peak (`data/peak_equity___account__.txt`)
+is a SEPARATE file from any portfolio's own `peak_equity_<name>.txt`, so resuming one portfolio
+via `resume_trading(name)` does NOT reset the account-wide peak. If the account's real capital
+hasn't actually recovered above the tripped threshold, this breaker will re-trip and re-halt
+every portfolio again on the next run, even ones just individually resumed, a genuine
+capital-preservation kill-switch property, not a bug. Delete
+`data/peak_equity___account__.txt` manually (no code path does this automatically) to force a
+fresh account-wide peak baseline despite an unrecovered loss, only as a deliberate, reviewed
+decision.
+
 ## Recommended Config Presets
 
 These are two starting-point `default_risk` presets, one long-term (monthly), one short-term

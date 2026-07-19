@@ -203,6 +203,26 @@ that tests enforce, don't casually violate these when editing:
   dependency-injected (`alert_fn` param) specifically so `risk/` has zero import dependency on
   `interfaces/`, enforced by an AST-based test
   (`test_risk_module_has_no_dependency_on_interfaces_module`), not just a convention.
+  `check_circuit_breaker()`'s `halt_path.exists()` check MUST run first, unconditionally,
+  before the "both config breakers disabled" early return, confirmed by a real bug found (and
+  fixed) while building the account-wide breaker below: the old order let that early return
+  skip the halt-flag check entirely whenever the CALLING portfolio's own
+  `max_portfolio_drawdown_pct`/`max_dollar_drawdown` were at their shipped defaults (the common
+  case), silently ignoring a halt flag written by ANY external source
+  (`risk/risk_monitor.py`'s `write_halt_flag()`, an email-commanded PAUSE, the account-wide
+  breaker), making `risk_monitor.py`'s entire documented purpose ineffective for any portfolio
+  that hadn't separately opted into its own breaker. Don't reintroduce that ordering.
+  `compute_account_wide_drawdown()` (pure, no I/O) plus `ACCOUNT_WIDE_PEAK_NAME` back
+  `daily_runner.py`'s `check_account_wide_drawdown_breaker()` (Recommended tier,
+  docs/RISK_CONSTRAINTS.md): ONE peak tracked for the SUM of every portfolio's resolved
+  capital (`account_wide_max_drawdown_pct`, top-level config field, not per-portfolio), when
+  tripped it writes EVERY portfolio's own `circuit_breaker_halted_<name>.flag` (reusing the
+  exact mechanism above, no new gating code path), distinct from the per-portfolio breaker
+  which only halts that one portfolio. Its peak-equity file
+  (`data/peak_equity___account__.txt`) is deliberately separate from any portfolio's own, so
+  resuming one portfolio via `resume_trading()` does NOT reset the account-wide peak, an
+  unrecovered account will re-trip and re-halt everyone again on the next run, a deliberate
+  kill-switch property, not a bug.
 - **`risk/risk_monitor.py`**, an intentionally *independent* read-only oversight process. It
   must not import `daily_runner.load_config()`/`BacktestConfig` or share P&L-computation code
   with `execution/live_signal.py`, the whole point is that a bug in the trading logic can't

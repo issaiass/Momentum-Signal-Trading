@@ -46,6 +46,7 @@ from .backtest.momentum_backtest import BacktestConfig
 from .risk.circuit_breaker import (
     LOCK_DIR, check_circuit_breaker, resume_trading, get_effective_max_drawdown_pct,
     _halt_flag_path, _peak_equity_path, _skip_next_flag_path, _max_drawdown_override_path,
+    compute_account_wide_drawdown, ACCOUNT_WIDE_PEAK_NAME,
 )
 from .interfaces.notifications import (
     NotificationCategory, send_action_email, send_standard_action,
@@ -288,6 +289,18 @@ def validate_config_schema(raw: dict, path: str) -> None:
     if default_risk and not isinstance(default_risk, dict):
         errors.append(f"top-level default_risk: must be a mapping, got {type(default_risk).__name__}")
 
+    # --- account_wide_max_drawdown_pct is account-scoped, not per-portfolio, deliberately a
+    #     TOP-LEVEL field, not inside default_risk/risk_overrides (a per-portfolio override of
+    #     an account-wide concept would be incoherent, which portfolio's override would win?).
+    #     0.0 (default, absent) = disabled, matches max_portfolio_drawdown_pct's convention. ---
+    account_wide_max_drawdown_pct = raw.get("account_wide_max_drawdown_pct", 0.0)
+    if not isinstance(account_wide_max_drawdown_pct, (int, float)) or isinstance(account_wide_max_drawdown_pct, bool) \
+            or not (0 <= account_wide_max_drawdown_pct < 1.0):
+        errors.append(
+            f"account_wide_max_drawdown_pct: must be a number in [0, 1.0), got "
+            f"{account_wide_max_drawdown_pct!r}, 0 disables it (the default)."
+        )
+
     # --- total_value: null is valid for ANY number of portfolios (zero, one, or several).
     #     null means "an equal share of the account remainder after every fixed portfolio's
     #     allocation", resolve_total_values() splits the remainder equally across every null
@@ -483,6 +496,74 @@ def _check_circuit_breaker_with_alert(name: str, total_value: float, cfg: Backte
 
 def _resume_trading_with_alert(name: str) -> None:
     resume_trading(name, alert_fn=send_alert_email)
+
+
+def check_account_wide_drawdown_breaker(
+    portfolio_names: list[str], current_account_value: float, max_drawdown_pct: float, alert_fn=None,
+) -> bool:
+    """
+    Account-wide (Recommended tier, docs/RISK_CONSTRAINTS.md) circuit breaker, distinct from
+    check_circuit_breaker()'s existing PER-PORTFOLIO one: tracks ONE peak equity for the SUM of
+    every portfolio's resolved capital (current_account_value, the caller passes
+    sum(resolve_total_values(...).values()), not a second real-account-value fetch), and when
+    the drawdown from that peak exceeds max_drawdown_pct, halts EVERY portfolio in
+    portfolio_names at once.
+
+    Reuses the EXISTING per-portfolio halt-flag mechanism (writes circuit_breaker_halted_<name>.flag
+    for each name, the exact file the rebalance gate already checks via check_circuit_breaker()),
+    no new gating code path needed downstream, and resuming a portfolio reuses the EXISTING
+    resume_trading(name), no new resume mechanism.
+
+    Peak-equity persistence is separate from every per-portfolio peak (a distinct file, keyed by
+    ACCOUNT_WIDE_PEAK_NAME), so resuming one portfolio does NOT reset the account-wide peak, an
+    intentional, conservative design: if the account's real capital hasn't actually recovered
+    above the tripped threshold, this breaker will re-trip and re-halt every portfolio again on
+    the next run, even ones just individually resumed. This is a genuine capital-preservation
+    kill-switch property, not a bug, see docs/RISK_CONSTRAINTS.md. Delete
+    data/peak_equity___account__.txt manually (no code path does this automatically) to force a
+    fresh account-wide peak baseline despite an unrecovered loss, if that's a deliberate,
+    reviewed decision.
+
+    max_drawdown_pct <= 0 disables this entirely (matches max_portfolio_drawdown_pct's exact
+    convention), the default.
+    """
+    if max_drawdown_pct <= 0:
+        return False
+
+    LOCK_DIR.mkdir(exist_ok=True)
+    peak_path = _peak_equity_path(ACCOUNT_WIDE_PEAK_NAME)
+    prior_peak = float(peak_path.read_text()) if peak_path.exists() else current_account_value
+    new_peak = max(prior_peak, current_account_value)
+    peak_path.write_text(str(new_peak))
+
+    result = compute_account_wide_drawdown(current_account_value, new_peak)
+    if result["drawdown_pct"] > -max_drawdown_pct:
+        return False
+
+    for name in portfolio_names:
+        _halt_flag_path(name).write_text(f"{datetime.now().isoformat()} | account-wide circuit breaker")
+
+    reason = (f"Account-wide drawdown {result['drawdown_pct']:.1%} <= -{max_drawdown_pct:.1%} "
+              f"(peak account value ${new_peak:,.2f}, current ${current_account_value:,.2f}).")
+    logger.warning("ACCOUNT-WIDE CIRCUIT BREAKER TRIPPED: %s Halting rebalances for ALL portfolios: %s.",
+                    reason, portfolio_names)
+    log_alert("ALL", "ACCOUNT_WIDE_CIRCUIT_BREAKER_TRIPPED", "CRITICAL", reason, log_path=ALERTS_LOG_PATH)
+    if alert_fn:
+        alert_fn(
+            "ACCOUNT-WIDE CIRCUIT BREAKER TRIPPED",
+            f"{reason}\n\nEvery portfolio sharing this account has been HALTED: "
+            f"{', '.join(portfolio_names)}.\n\n"
+            f"Review before resuming each individually with daily-runner --resume-trading <name>.",
+        )
+    return True
+
+
+def _check_account_wide_drawdown_breaker_with_alert(
+    portfolio_names: list[str], current_account_value: float, max_drawdown_pct: float,
+) -> bool:
+    return check_account_wide_drawdown_breaker(
+        portfolio_names, current_account_value, max_drawdown_pct, alert_fn=send_alert_email,
+    )
 
 
 def check_and_apply_email_commands(portfolio_names: list[str], ibkr_port: int, dry_run: bool,
@@ -890,6 +971,18 @@ def main():
                 f"<pre>{overallocation_text}</pre>", notification_cfg,
                 plain_text_fallback=overallocation_text,
             )
+
+    # --- Account-wide drawdown circuit breaker (Recommended tier, docs/RISK_CONSTRAINTS.md),
+    #     evaluated ONCE per run (not per-portfolio), against the SUM of every portfolio's
+    #     already-resolved capital (reuses resolve_total_values()'s output above, not a second
+    #     real-account-value fetch). Disabled by default (account_wide_max_drawdown_pct: 0.0).
+    #     Runs in BOTH dry-run and --live, same as the existing per-portfolio circuit breaker
+    #     check inside the rebalance loop below, harmless in dry-run since no real orders are
+    #     ever placed there regardless. ---
+    _check_account_wide_drawdown_breaker_with_alert(
+        list(portfolios.keys()), sum(resolved_total_values.values()),
+        cfg_raw.get("account_wide_max_drawdown_pct", 0.0),
+    )
 
     # --- Check for and apply email commands (opt-in, silent no-op if unconfigured) ---
     try:

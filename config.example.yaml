@@ -267,6 +267,19 @@ default_risk:
                                        # (live derives "days held" from the trade log); respects
                                        # auto_execute_stop_loss (flag-only vs. auto-exit) in live.
 
+# Account-wide Drawdown Circuit Breaker (Recommended tier, docs/RISK_CONSTRAINTS.md),
+# deliberately a TOP-LEVEL field, not inside default_risk/risk_overrides: it's account-scoped,
+# not per-portfolio (a per-portfolio override of an account-wide concept would be incoherent,
+# which portfolio's override would win?). Distinct from default_risk.max_portfolio_drawdown_pct
+# above, which is PER-PORTFOLIO (halts only that one portfolio). This tracks ONE peak for the
+# SUM of every portfolio's resolved capital, and when tripped, halts EVERY portfolio sharing
+# this real IBKR account at once (writes each one's own circuit_breaker_halted_<name>.flag, the
+# same file the per-portfolio breaker already uses, so resuming still uses the existing
+# `daily-runner --resume-trading <name>`, called once per affected portfolio).
+account_wide_max_drawdown_pct: 0.0    # 0 = disabled (default); e.g. 0.25 = halt ALL portfolios
+                                       # when the account's total resolved capital drops 25%
+                                       # from its own tracked peak
+
 portfolios:
   portfolio1:
     tickers: [SPY, QQQ, XLK, XLF, XLE, XLY, XLP, XLU, GLD, TLT, BIL]

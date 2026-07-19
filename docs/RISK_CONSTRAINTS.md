@@ -108,6 +108,36 @@ just with a per-ticker cap dict instead of one global scalar. Also not in tensio
 across all tickers AFTER weight composition is finalized, a separate axis (overall scale, not
 per-position shape).
 
+## Volatility Scaling (Portfolio-Level) [Mandatory tier]
+
+`target_portfolio_vol` (default `0.15`, annualized), distinct from `position_vol_budget` above
+(which caps a SINGLE ticker's weight): scales the WHOLE book's gross exposure to hit a target
+annualized volatility, shrinking the entire portfolio in a high-vol regime and letting it run up
+to `max_gross_exposure` (default `1.0`) in a calm one, clamped at the floor `min_gross_exposure`
+(default `0.20`) so it never fully flatlines to 0% invested.
+
+`compute_vol_scalar(realized_vol, target_portfolio_vol, min_gross_exposure, max_gross_exposure)`
+(`backtest/momentum_backtest.py`) is the single shared formula: `np.clip(target_portfolio_vol /
+realized_vol, min_gross_exposure, max_gross_exposure)`, falling back to `max_gross_exposure` when
+`realized_vol` is `None` or `0` (not enough history to scale down safely). Used identically by
+both paths:
+- **Backtest**: `run_risk_managed_backtest()` measures `realized_vol` from the simulated
+  `portfolio_history` equity curve over `portfolio_vol_lookback` trading days (default `21`,
+  `_realized_portfolio_vol()`).
+- **Live**: `execution/live_signal.py`'s `compute_target_weights()` measures `realized_vol` from
+  the trailing `daily_prices` at the just-resolved target weights (`_realized_weighted_portfolio_vol()`,
+  no simulated equity curve exists live, this is the honest substitute, the same "trailing data,
+  not a simulated ledger" pattern `_inverse_vol_weights()` already uses for position sizing).
+
+**This closes a real gap**: before this, portfolio-level vol targeting existed ONLY in the
+backtest engine, `live_signal.py` had no aggregate risk-exposure throttling at all, only
+position-level inverse-vol sizing and the regime/correlation-spike gross-exposure scalars.
+
+**Composes multiplicatively, not a replacement for anything else**: `gross_exposure =
+min(max_gross_exposure, regime_scalar * vol_scalar)`, exactly matching the backtest's existing
+composition order. A bearish regime AND a high-vol realized book can both be active at once,
+both scalars apply together.
+
 ## Recommended Config Presets
 
 These are two starting-point `default_risk` presets, one long-term (monthly), one short-term

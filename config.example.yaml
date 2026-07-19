@@ -144,6 +144,30 @@ default_risk:
   use_regime_filter: true         # true = skip new entries when regime_benchmark is below its SMA
   regime_benchmark: SPY           # benchmark ticker the regime filter checks against
   regime_sma_window: 150          # trading days in the regime filter's moving average
+  target_portfolio_vol: 0.15      # the "Volatility Scaling" constraint (Mandatory tier,
+                                   # docs/RISK_CONSTRAINTS.md): annualized vol target for the
+                                   # WHOLE book, distinct from position_vol_budget below (which
+                                   # caps a SINGLE ticker's weight). Realized portfolio vol over
+                                   # portfolio_vol_lookback trading days is compared to this
+                                   # target, gross exposure is scaled by target/realized
+                                   # (clamped to [min_gross_exposure, max_gross_exposure]),
+                                   # shrinking the whole book in a high-vol regime, letting it
+                                   # run up to max_gross_exposure in a calm one. Applies to both
+                                   # backtest and --live (compute_vol_scalar(), shared code, same
+                                   # formula in both paths). Composes multiplicatively with the
+                                   # regime filter above and the correlation-spike check below,
+                                   # not a replacement for either.
+  portfolio_vol_lookback: 21      # trailing trading days used to estimate realized portfolio
+                                   # vol for the target_portfolio_vol scaling above (~1 month)
+  vol_lookback_days: 63           # trailing trading days used for inverse-vol POSITION sizing
+                                   # (~3 months), distinct from portfolio_vol_lookback above,
+                                   # which is for the PORTFOLIO-level scalar, not per-ticker weights
+  max_gross_exposure: 1.0         # never lever the book above 100% invested, an upper clamp on
+                                   # every gross-exposure scalar (regime filter, vol targeting,
+                                   # correlation spike) combined
+  min_gross_exposure: 0.20        # floor so a bad regime/high vol/correlation spike never fully
+                                   # flatlines the book to 0% invested, the same floor all three
+                                   # defensive scalars above clamp down to
   max_position_weight: 0.35       # single-name cap, e.g. 0.35 = no position over 35% of the book,
                                    # FLAT, identical for every ticker regardless of its own vol
   position_vol_budget: null       # the "Volatility-Adjustment" (Scaling) constraint. null

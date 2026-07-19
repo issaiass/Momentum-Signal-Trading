@@ -59,6 +59,7 @@ from ..backtest.momentum_backtest import (
     BacktestConfig,
     resolve_target_weights,
     detect_correlation_spike,
+    compute_vol_scalar,
 )
 
 logger = logging.getLogger("live_signal")
@@ -438,6 +439,41 @@ def check_price_staleness(daily_prices: pd.DataFrame, max_staleness_minutes: int
     }
 
 
+def _realized_weighted_portfolio_vol(
+    weights: dict, daily_prices: pd.DataFrame, as_of: pd.Timestamp, lookback_days: int,
+) -> float | None:
+    """
+    Live substitute for momentum_backtest.py's _realized_portfolio_vol(), which measures
+    realized vol from a simulated portfolio_history equity curve that doesn't exist in live
+    trading (no local ledger is ever trusted as portfolio truth, see get_ibkr_positions()'s own
+    docstring). Instead, estimates forward risk directly from trailing daily_prices at the
+    given target weights, the same "trailing data, not a simulated ledger" pattern
+    _inverse_vol_weights() already uses for position-level sizing: combine each ticker's daily
+    return by its target weight into one weighted daily-return series, then annualize its std
+    dev over lookback_days.
+
+    Returns None if there isn't enough trailing history for ANY weighted ticker, or if none of
+    `weights`' tickers are even present in daily_prices, mirroring _realized_portfolio_vol()'s
+    own None-when-insufficient-data behavior; compute_vol_scalar() falls back to
+    max_gross_exposure in that case, the same "not enough information to scale down" behavior
+    the backtest already has.
+    """
+    tickers = [t for t in weights if t in daily_prices.columns]
+    if not tickers:
+        return None
+    window = daily_prices[tickers].loc[:as_of].tail(lookback_days + 1)
+    if len(window) < lookback_days + 1:
+        return None
+    rets = window.pct_change().dropna(how="all")
+    if rets.empty:
+        return None
+    w = pd.Series({t: weights[t] for t in tickers})
+    weighted_rets = (rets[tickers].fillna(0.0) * w).sum(axis=1)
+    if weighted_rets.empty:
+        return None
+    return float(weighted_rets.std() * np.sqrt(252))
+
+
 # --------------------------------------------------------------------------- #
 # 2. RISK-MANAGED TARGET WEIGHTS, same internals as momentum_backtest.py
 # --------------------------------------------------------------------------- #
@@ -490,7 +526,19 @@ def compute_target_weights(
             log_alert(portfolio, "CORRELATION_SPIKE_DETECTED", "WARNING",
                       f"Reducing exposure to {cfg.min_gross_exposure:.0%}", log_path=alerts_log_path)
 
-    gross_exposure = min(cfg.max_gross_exposure, regime_scalar)
+    # --- Portfolio-level volatility targeting, live-trading equivalent of the backtest's
+    #     target_portfolio_vol scaling (momentum_backtest.py's run_risk_managed_backtest,
+    #     regime_scalar * vol_scalar). Previously ONLY existed in the backtest, live trading
+    #     had no aggregate exposure throttling at all. Composes multiplicatively with
+    #     regime_scalar exactly like the backtest, not a replacement for it. ---
+    realized_vol = _realized_weighted_portfolio_vol(weights, daily_prices, as_of, cfg.portfolio_vol_lookback)
+    vol_scalar = compute_vol_scalar(realized_vol, cfg.target_portfolio_vol,
+                                     cfg.min_gross_exposure, cfg.max_gross_exposure)
+    logger.info("Volatility targeting: realized_vol=%s target=%.2f -> scalar=%.2f",
+                f"{realized_vol:.2%}" if realized_vol is not None else "n/a",
+                cfg.target_portfolio_vol, vol_scalar)
+
+    gross_exposure = min(cfg.max_gross_exposure, regime_scalar * vol_scalar)
     return weights, gross_exposure
 
 

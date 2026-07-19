@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from momentum_trading.backtest.momentum_backtest import BacktestConfig
+from momentum_trading.backtest.momentum_backtest import BacktestConfig, compute_vol_scalar
 import momentum_trading.execution.live_signal as live_signal
 from momentum_trading.execution.live_signal import (
     generate_orders, log_orders, measure_live_performance, run_multi_portfolio, get_top_etfs,
@@ -25,6 +25,7 @@ from momentum_trading.execution.live_signal import (
     is_lookback_shorter_than_holding, is_lookback_to_holding_ratio_too_low,
     compute_turnover, is_turnover_too_high, most_recent_rebalance_target_date,
     build_position_performance, resolve_momentum_scores, calculate_period_returns,
+    _realized_weighted_portfolio_vol,
 )
 from momentum_trading.core.audit_log import read_recent_alerts
 
@@ -912,6 +913,127 @@ class TestBuildPositionPerformance:
         assert set(result.keys()) == {"XLK", "XLF"}
         assert result["XLK"]["return_pct"] == pytest.approx(0.10)
         assert result["XLF"]["return_pct"] == pytest.approx(-0.10)
+
+
+class TestRealizedWeightedPortfolioVol:
+    """
+    _realized_weighted_portfolio_vol(), the live substitute for momentum_backtest.py's
+    _realized_portfolio_vol(): live trading has no simulated equity curve (portfolio_history)
+    to measure realized vol from, so this estimates it directly from trailing daily_prices at
+    the given target weights, the same "trailing data, not a simulated ledger" pattern
+    _inverse_vol_weights() already uses for position-level sizing.
+    """
+
+    def _two_ticker_prices(self, n=40, vol_a=0.01, vol_b=0.01, seed=3):
+        rng = np.random.default_rng(seed)
+        dates = pd.bdate_range("2024-01-01", periods=n)
+        a = 100 * np.cumprod(1 + rng.normal(0, vol_a, n))
+        b = 50 * np.cumprod(1 + rng.normal(0, vol_b, n))
+        return pd.DataFrame({"A": a, "B": b}, index=dates)
+
+    def test_matches_hand_computed_weighted_return_series_vol(self):
+        prices = self._two_ticker_prices(n=40)
+        weights = {"A": 0.5, "B": 0.5}
+        as_of = prices.index[-1]
+        result = _realized_weighted_portfolio_vol(weights, prices, as_of, lookback_days=21)
+
+        rets = prices[["A", "B"]].pct_change().dropna()
+        window = rets.tail(21)
+        hand_computed = float((window["A"] * 0.5 + window["B"] * 0.5).std() * np.sqrt(252))
+        assert result == pytest.approx(hand_computed)
+
+    def test_none_when_insufficient_history(self):
+        prices = self._two_ticker_prices(n=10)  # fewer than lookback_days + 1
+        weights = {"A": 0.5, "B": 0.5}
+        as_of = prices.index[-1]
+        result = _realized_weighted_portfolio_vol(weights, prices, as_of, lookback_days=21)
+        assert result is None
+
+    def test_none_when_no_weighted_tickers_priced(self):
+        prices = self._two_ticker_prices(n=40)
+        weights = {"C": 1.0}  # not a column in prices at all
+        as_of = prices.index[-1]
+        result = _realized_weighted_portfolio_vol(weights, prices, as_of, lookback_days=21)
+        assert result is None
+
+    def test_high_vol_weighting_produces_higher_realized_vol_than_low_vol_weighting(self):
+        prices = self._two_ticker_prices(n=60, vol_a=0.001, vol_b=0.05, seed=11)
+        as_of = prices.index[-1]
+        low_vol_result = _realized_weighted_portfolio_vol({"A": 1.0, "B": 0.0}, prices, as_of, lookback_days=21)
+        high_vol_result = _realized_weighted_portfolio_vol({"A": 0.0, "B": 1.0}, prices, as_of, lookback_days=21)
+        assert high_vol_result > low_vol_result
+
+
+class TestVolTargetingScaling:
+    """
+    Portfolio-level volatility targeting (target_portfolio_vol), wired into
+    compute_target_weights()'s gross_exposure the same way the backtest's
+    run_risk_managed_backtest() already composes regime_scalar * vol_scalar (Epic 1 of the
+    layered risk-management plan). Previously ONLY existed in the backtest; live trading had no
+    aggregate exposure throttling at all, this closes that gap.
+    """
+
+    def _synthetic_universe(self, n=60, vol_a=0.001, vol_b=0.001, seed=13):
+        rng = np.random.default_rng(seed)
+        dates = pd.bdate_range("2024-01-01", periods=n)
+        a = 100 * np.cumprod(1 + rng.normal(0.0005, vol_a, n))
+        b = 50 * np.cumprod(1 + rng.normal(0.0005, vol_b, n))
+        return pd.DataFrame({"A": a, "B": b}, index=dates)
+
+    def test_high_realized_vol_scales_gross_exposure_below_max(self, tmp_path):
+        prices = self._synthetic_universe(vol_a=0.08, vol_b=0.08)  # deliberately high vol
+        cfg = BacktestConfig(use_regime_filter=False, use_correlation_spike_regime=False,
+                              target_portfolio_vol=0.15, portfolio_vol_lookback=21,
+                              min_gross_exposure=0.20, max_gross_exposure=1.0)
+        alerts_path = str(tmp_path / "alerts_log.csv")
+        weights, gross_exposure = compute_target_weights(["A", "B"], prices, cfg,
+                                                           portfolio="p1", alerts_log_path=alerts_path)
+
+        # Hand-verify: same weights, independently recompute realized_vol and the scalar.
+        as_of = prices.index[-1]
+        realized_vol = _realized_weighted_portfolio_vol(weights, prices, as_of, cfg.portfolio_vol_lookback)
+        expected_scalar = compute_vol_scalar(realized_vol, cfg.target_portfolio_vol,
+                                              cfg.min_gross_exposure, cfg.max_gross_exposure)
+        assert gross_exposure == pytest.approx(expected_scalar)
+        assert gross_exposure < cfg.max_gross_exposure
+
+    def test_low_realized_vol_stays_at_max_gross_exposure(self, tmp_path):
+        prices = self._synthetic_universe(vol_a=0.0005, vol_b=0.0005)  # deliberately low vol
+        cfg = BacktestConfig(use_regime_filter=False, use_correlation_spike_regime=False,
+                              target_portfolio_vol=0.15, portfolio_vol_lookback=21,
+                              min_gross_exposure=0.20, max_gross_exposure=1.0)
+        alerts_path = str(tmp_path / "alerts_log.csv")
+        _, gross_exposure = compute_target_weights(["A", "B"], prices, cfg,
+                                                     portfolio="p1", alerts_log_path=alerts_path)
+        assert gross_exposure == pytest.approx(cfg.max_gross_exposure)
+
+    def test_regime_scalar_and_vol_scalar_compose(self, tmp_path):
+        # Both a bearish regime AND high realized vol active at once: gross_exposure must
+        # reflect BOTH scalars multiplied together, neither silently overriding the other.
+        prices = self._synthetic_universe(vol_a=0.08, vol_b=0.08)
+        # Make the regime benchmark itself bearish: below its own SMA.
+        bench = pd.Series(
+            np.linspace(120, 80, len(prices)), index=prices.index, name="SPY",
+        )
+        prices = prices.copy()
+        prices["SPY"] = bench
+        cfg = BacktestConfig(use_regime_filter=True, regime_benchmark="SPY", regime_sma_window=10,
+                              use_correlation_spike_regime=False,
+                              target_portfolio_vol=0.15, portfolio_vol_lookback=21,
+                              min_gross_exposure=0.20, max_gross_exposure=1.0)
+        alerts_path = str(tmp_path / "alerts_log.csv")
+        weights, gross_exposure = compute_target_weights(["A", "B"], prices, cfg,
+                                                           portfolio="p1", alerts_log_path=alerts_path)
+
+        as_of = prices.index[-1]
+        realized_vol = _realized_weighted_portfolio_vol(weights, prices, as_of, cfg.portfolio_vol_lookback)
+        vol_scalar = compute_vol_scalar(realized_vol, cfg.target_portfolio_vol,
+                                         cfg.min_gross_exposure, cfg.max_gross_exposure)
+        # Bearish regime -> regime_scalar == min_gross_exposure.
+        expected = min(cfg.max_gross_exposure, cfg.min_gross_exposure * vol_scalar)
+        assert gross_exposure == pytest.approx(expected)
+        # Confirm this composition actually differs from vol_scalar alone (proves both are active).
+        assert gross_exposure < vol_scalar
 
 
 class TestCorrelationSpikeScaling:

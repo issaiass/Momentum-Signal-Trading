@@ -652,6 +652,24 @@ def _realized_portfolio_vol(portfolio_history: list, lookback: int) -> Optional[
     return float(rets.std() * np.sqrt(252))
 
 
+def compute_vol_scalar(
+    realized_vol: Optional[float], target_portfolio_vol: float,
+    min_gross_exposure: float, max_gross_exposure: float,
+) -> float:
+    """
+    Shared by both the backtest engine and live trading (execution/live_signal.py) so
+    portfolio-level vol targeting can't silently diverge between the two paths, the same
+    "one shared function" principle resolve_target_weights() already establishes for sizing.
+
+    realized_vol is None (no history yet) or 0 (a degenerate flat series) both fall back to
+    max_gross_exposure, the same "not enough information to scale down" behavior
+    run_risk_managed_backtest()'s original inline logic used before this was extracted.
+    """
+    if not realized_vol:
+        return max_gross_exposure
+    return float(np.clip(target_portfolio_vol / realized_vol, min_gross_exposure, max_gross_exposure))
+
+
 def _slippage_bps(ticker_returns_window: pd.Series, cfg: BacktestConfig) -> float:
     """
     Base slippage scaled by trailing (vol_lookback_days) annualized vol. If
@@ -916,14 +934,10 @@ def run_risk_managed_backtest(
 
                     # --- volatility targeting: scale gross exposure to hit target vol ---
                     realized_vol = _realized_portfolio_vol(portfolio_history, config.portfolio_vol_lookback)
-                    if realized_vol and realized_vol > 0:
-                        vol_scalar = np.clip(
-                            config.target_portfolio_vol / realized_vol,
-                            config.min_gross_exposure,
-                            config.max_gross_exposure,
-                        )
-                    else:
-                        vol_scalar = config.max_gross_exposure
+                    vol_scalar = compute_vol_scalar(
+                        realized_vol, config.target_portfolio_vol,
+                        config.min_gross_exposure, config.max_gross_exposure,
+                    )
 
                     gross_exposure = min(config.max_gross_exposure, regime_scalar * vol_scalar)
 

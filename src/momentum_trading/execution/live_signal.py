@@ -1787,16 +1787,26 @@ def run(
     but NOT the DataFrame passed into resolve_momentum_scores()/ranking (still `tickers` only).
     None (default) preserves this function's exact pre-existing behavior.
     """
+    # Lazy import: core/strategy_signals.py imports resolve_momentum_scores()/assign_ranks()
+    # FROM this module (core/'s deliberate one-directional exception, see that module's own
+    # docstring), so a top-level import here would be circular. Importing inside the function
+    # body breaks the cycle, the same established pattern this file already uses for ibapi.
+    from ..core.strategy_signals import resolve_strategy_scores
+
     price_tickers = tickers if not extra_price_tickers else list(dict.fromkeys(list(tickers) + list(extra_price_tickers)))
     daily_prices = with_retry(fetch_live_prices, 3, 2.0, price_tickers, fmp_api_key=fmp_api_key, eodhd_api_key=eodhd_api_key)
     if daily_prices.empty:
         logger.error("No price data returned; aborting.")
         return {}
 
-    ranking_prices = daily_prices[list(tickers)] if extra_price_tickers else daily_prices
-    scores = resolve_momentum_scores(
-        ranking_prices, lookback_period, cfg.holding_period, cfg.skip_month_guardrail,
-    ).dropna(how="all")
+    # resolve_strategy_scores() (core/strategy_signals.py) scopes to `tickers` internally,
+    # NEVER the wider extra_price_tickers-fetched universe, getting priced must never make a
+    # ticker re-selectable as a new pick, same guarantee the old inline ranking_prices
+    # conditional enforced, now centralized in one place shared with the backtest-facing
+    # generate_strategy_monthly_picks(). Dispatches on cfg.strategy_type; "momentum" (the
+    # default) and every strategy_type that only affects sizing/exposure are byte-identical to
+    # calling resolve_momentum_scores() directly, per its own regression test.
+    scores = resolve_strategy_scores(daily_prices, tickers, cfg, lookback_period).dropna(how="all")
     ranks = assign_ranks(scores)
     picks = get_top_etfs(ranks, top_n=top_n)
     logger.info("Today's signal picks (top %d): %s", top_n, picks)

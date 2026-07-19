@@ -24,6 +24,7 @@ class TestPackageImportability:
         "momentum_trading",
         "momentum_trading.core.functions",
         "momentum_trading.core.functions_quant_extensions",
+        "momentum_trading.core.strategy_signals",
         "momentum_trading.core.paths",
         "momentum_trading.backtest.momentum_backtest",
         "momentum_trading.execution.live_signal",

@@ -107,6 +107,25 @@ class TestBacktestConfigValidation:
         with pytest.raises(ValueError, match="max_bid_ask_spread_pct"):
             BacktestConfig(max_bid_ask_spread_pct=1.5)
 
+    def test_strategy_type_defaults_to_momentum(self):
+        # Default preserves today's exact behavior, the base cross-sectional relative-momentum
+        # signal, must never change by accident from an old config.yaml.
+        assert BacktestConfig().strategy_type == "momentum"
+
+    def test_strategy_type_accepts_every_allowed_value(self):
+        allowed = [
+            "momentum", "relative_momentum", "dual_momentum", "volatility_scaled_momentum",
+            "residual_momentum", "absolute_momentum", "rank_sign_momentum",
+            "hybrid_multi_factor", "path_dependent_momentum", "correlation_weighted_momentum",
+            "multi_timeframe_composite",
+        ]
+        for value in allowed:
+            assert BacktestConfig(strategy_type=value).strategy_type == value
+
+    def test_invalid_strategy_type_raises(self):
+        with pytest.raises(ValueError, match="strategy_type"):
+            BacktestConfig(strategy_type="not_a_real_strategy")
+
     def test_persist_dry_run_state_defaults_false(self):
         # Default false preserves dry-run's existing behavior exactly: current_positions is {}
         # on every invocation, this must never flip on by accident from an old config.yaml.

@@ -344,6 +344,39 @@ def validate_config_schema(raw: dict, path: str) -> None:
         raise ValueError(f"Invalid {path}:\n  - " + "\n  - ".join(errors))
 
 
+# Preset field bundles per strategy_type (docs/MOMENTUM_STRATEGIES.md, "Selectable Momentum
+# Strategy Types" plan), only for the strategies that map onto EXISTING BacktestConfig fields.
+# "momentum"/"relative_momentum" (the base signal, aliases of each other) and every strategy
+# needing genuinely new ranking logic (multi_timeframe_composite, absolute_momentum,
+# residual_momentum, path_dependent_momentum, hybrid_multi_factor) have no bundle here, they're
+# dispatched directly by core/strategy_signals.py's resolve_strategy_scores() router instead.
+STRATEGY_TYPE_PRESETS = {
+    "dual_momentum": {"use_absolute_momentum": True, "use_regime_filter": True},
+    "volatility_scaled_momentum": {"sizing_method": "inverse_vol"},
+    "correlation_weighted_momentum": {"use_correlation_penalty": True},
+}
+
+
+def apply_strategy_type_preset(merged: dict) -> dict:
+    """
+    Expands merged["strategy_type"] (default_risk + risk_overrides already merged, BEFORE
+    BacktestConfig construction) into its preset field bundle, per STRATEGY_TYPE_PRESETS above.
+    An explicit field value already present in `merged` (the portfolio's own config set it
+    directly) always wins, the preset only fills in keys that are genuinely absent, this is
+    where "explicit user value always wins over the implied preset" is actually enforced, at the
+    dict level, before BacktestConfig ever sees it, no dataclass-level sentinel tracking needed.
+
+    Returns a NEW dict, does not mutate `merged`.
+    """
+    strategy_type = merged.get("strategy_type", "momentum")
+    preset = STRATEGY_TYPE_PRESETS.get(strategy_type, {})
+    result = dict(merged)
+    for key, value in preset.items():
+        if key not in result:
+            result[key] = value
+    return result
+
+
 def load_config(path: str = "config.yaml") -> dict:
     if not os.path.isfile(path):
         raise FileNotFoundError(
@@ -361,8 +394,9 @@ def load_config(path: str = "config.yaml") -> dict:
     portfolios = {}
     for name, spec in raw["portfolios"].items():
         cfg_overrides = spec.get("risk_overrides", {})
+        merged = apply_strategy_type_preset({**raw.get("default_risk", {}), **cfg_overrides})
         try:
-            cfg = BacktestConfig(**{**raw.get("default_risk", {}), **cfg_overrides})
+            cfg = BacktestConfig(**merged)
         except (ValueError, TypeError) as e:
             raise ValueError(f"portfolios.{name}: invalid risk config, {e}") from e
         portfolios[name] = {

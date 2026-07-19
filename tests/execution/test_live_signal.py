@@ -383,8 +383,14 @@ class TestResolveMomentumScores:
 
     def test_run_invokes_the_weekly_path_when_holding_period_is_sub_monthly(self, monkeypatch, tmp_path):
         # Integration confirmation, not just that resolve_momentum_scores() works in
-        # isolation, but that run() actually calls it with cfg.holding_period (not some
-        # other value), end to end, for a real weekly-cadence config.
+        # isolation, but that run() actually calls it (via core/strategy_signals.py's
+        # resolve_strategy_scores() router, the default "momentum" strategy_type's pass-through)
+        # with cfg.holding_period (not some other value), end to end, for a real weekly-cadence
+        # config. Patched at core.strategy_signals, the actual call site since Epic 1 of the
+        # selectable-momentum-strategy plan, run() no longer calls resolve_momentum_scores()
+        # directly, live_signal.resolve_momentum_scores itself is unaffected by this patch (a
+        # separate name binding), confirming the indirection is real, not just a re-export.
+        import momentum_trading.core.strategy_signals as strategy_signals
         dates = pd.bdate_range("2025-01-01", "2026-07-09")
         rng = np.random.default_rng(2)
         data = {t: np.cumprod(1 + rng.normal(0.0005, 0.01, len(dates))) * 100 for t in ["SPY", "QQQ"]}
@@ -393,13 +399,13 @@ class TestResolveMomentumScores:
         monkeypatch.chdir(tmp_path)
 
         calls = []
-        real_resolve = live_signal.resolve_momentum_scores
+        real_resolve = strategy_signals.resolve_momentum_scores
 
         def spy_resolve(daily_prices, lookback_period, holding_period, skip_month_guardrail=False):
             calls.append((lookback_period, holding_period))
             return real_resolve(daily_prices, lookback_period, holding_period, skip_month_guardrail)
 
-        monkeypatch.setattr(live_signal, "resolve_momentum_scores", spy_resolve)
+        monkeypatch.setattr(strategy_signals, "resolve_momentum_scores", spy_resolve)
 
         cfg = BacktestConfig(holding_period=0.25, use_regime_filter=False)
         live_signal.run(

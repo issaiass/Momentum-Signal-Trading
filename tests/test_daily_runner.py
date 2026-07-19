@@ -215,6 +215,7 @@ class TestLoadConfig:
                 f"{name}: expected top_n={expected_top_n}, got {resolved[name]['cfg'].top_n}"
             )
 
+
     def test_lookback_period_independent_per_portfolio(self, tmp_path):
         # Mirrors test_top_n_independent_per_portfolio, confirms lookback_period
         # (the trailing-months momentum ranking window) resolves per-portfolio via
@@ -235,6 +236,80 @@ class TestLoadConfig:
         resolved = load_config(str(path))["portfolios_resolved"]
         assert resolved["portfolio1"]["cfg"].lookback_period == 12
         assert resolved["portfolio2"]["cfg"].lookback_period == 6
+
+
+class TestApplyStrategyTypePreset:
+    """
+    apply_strategy_type_preset() (Epic 1 of the selectable-momentum-strategy plan): selecting a
+    strategy_type auto-configures the underlying fields it maps to, UNLESS the portfolio's own
+    config already set that specific field explicitly, which always wins. Tested both as a pure
+    function directly and end-to-end through load_config() (the actual call site).
+    """
+
+    def test_dual_momentum_implies_absolute_momentum_and_regime_filter(self):
+        from momentum_trading.daily_runner import apply_strategy_type_preset
+        result = apply_strategy_type_preset({"strategy_type": "dual_momentum"})
+        assert result["use_absolute_momentum"] is True
+        assert result["use_regime_filter"] is True
+
+    def test_explicit_field_value_overrides_the_preset(self):
+        from momentum_trading.daily_runner import apply_strategy_type_preset
+        result = apply_strategy_type_preset({
+            "strategy_type": "dual_momentum", "use_absolute_momentum": False,
+        })
+        assert result["use_absolute_momentum"] is False  # explicit value wins over the preset
+        assert result["use_regime_filter"] is True        # untouched field still gets the preset
+
+    def test_volatility_scaled_momentum_implies_inverse_vol_sizing(self):
+        from momentum_trading.daily_runner import apply_strategy_type_preset
+        result = apply_strategy_type_preset({"strategy_type": "volatility_scaled_momentum"})
+        assert result["sizing_method"] == "inverse_vol"
+
+    def test_correlation_weighted_momentum_implies_correlation_penalty(self):
+        from momentum_trading.daily_runner import apply_strategy_type_preset
+        result = apply_strategy_type_preset({"strategy_type": "correlation_weighted_momentum"})
+        assert result["use_correlation_penalty"] is True
+
+    def test_momentum_and_relative_momentum_and_unset_are_all_no_ops(self):
+        from momentum_trading.daily_runner import apply_strategy_type_preset
+        base = {"top_n": 7}
+        for merged in (
+            {**base, "strategy_type": "momentum"},
+            {**base, "strategy_type": "relative_momentum"},
+            dict(base),  # no strategy_type key at all
+        ):
+            result = apply_strategy_type_preset(merged)
+            assert result == merged  # byte-identical, no fields added
+
+    def test_load_config_wires_the_preset_end_to_end(self, tmp_path):
+        cfg = {
+            "portfolios": {
+                "p1": {"tickers": ["SPY", "QQQ"], "total_value": 1000.0,
+                       "risk_overrides": {"strategy_type": "dual_momentum"}},
+            },
+        }
+        path = tmp_path / "config.yaml"
+        with open(path, "w") as f:
+            yaml.safe_dump(cfg, f)
+
+        resolved = load_config(str(path))["portfolios_resolved"]
+        assert resolved["p1"]["cfg"].use_absolute_momentum is True
+        assert resolved["p1"]["cfg"].use_regime_filter is True
+
+    def test_load_config_respects_explicit_override_alongside_preset(self, tmp_path):
+        cfg = {
+            "portfolios": {
+                "p1": {"tickers": ["SPY", "QQQ"], "total_value": 1000.0,
+                       "risk_overrides": {"strategy_type": "dual_momentum",
+                                          "use_absolute_momentum": False}},
+            },
+        }
+        path = tmp_path / "config.yaml"
+        with open(path, "w") as f:
+            yaml.safe_dump(cfg, f)
+
+        resolved = load_config(str(path))["portfolios_resolved"]
+        assert resolved["p1"]["cfg"].use_absolute_momentum is False
 
 
 class TestIdempotency:

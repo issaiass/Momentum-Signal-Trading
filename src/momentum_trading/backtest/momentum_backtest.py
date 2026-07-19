@@ -52,6 +52,18 @@ logger.propagate = False
 # --------------------------------------------------------------------------- #
 # CONFIG
 # --------------------------------------------------------------------------- #
+# Every selectable strategy_type value (docs/MOMENTUM_STRATEGIES.md), module-level so both
+# BacktestConfig.__post_init__'s validation and daily_runner.py's apply_strategy_type_preset()
+# (and core/strategy_signals.py's router) share the exact same list, no risk of the two drifting
+# apart. "momentum" and "relative_momentum" are deliberate aliases, identical behavior, the base
+# cross-sectional signal every other value either presets fields on top of or replaces entirely.
+ALLOWED_STRATEGY_TYPES = (
+    "momentum", "relative_momentum", "dual_momentum", "volatility_scaled_momentum",
+    "residual_momentum", "absolute_momentum", "rank_sign_momentum", "hybrid_multi_factor",
+    "path_dependent_momentum", "correlation_weighted_momentum", "multi_timeframe_composite",
+)
+
+
 @dataclass
 class BacktestConfig:
     holding_period: float = 1.0             # months between forced rebalances, accepts
@@ -300,6 +312,20 @@ class BacktestConfig:
     # --- Alternative position-sizing method ---
     sizing_method: str = "inverse_vol"   # "inverse_vol" (default) or "score_proportional"
 
+    # --- Selectable momentum strategy type (docs/MOMENTUM_STRATEGIES.md), config-driven per
+    #     portfolio via default_risk/risk_overrides, same mechanism as every other field here.
+    #     "momentum"/"relative_momentum" (identical, the base cross-sectional signal) is the
+    #     default and changes NOTHING versus today. Every other value either (a) auto-configures
+    #     a bundle of existing fields (dual_momentum, volatility_scaled_momentum,
+    #     correlation_weighted_momentum, rank_sign_momentum, see daily_runner.py's
+    #     apply_strategy_type_preset(), an explicit field value you set yourself always wins over
+    #     the preset's implied one), or (b) dispatches to a genuinely new ranking/selection
+    #     function in core/strategy_signals.py's resolve_strategy_scores() router
+    #     (multi_timeframe_composite, absolute_momentum, residual_momentum,
+    #     path_dependent_momentum, hybrid_multi_factor, the last one LIVE-ONLY, see
+    #     docs/MOMENTUM_STRATEGIES.md for why). ---
+    strategy_type: str = "momentum"
+
     def __post_init__(self):
         """Fail fast on nonsensical config combinations instead of producing silently wrong sizing."""
         errors = []
@@ -365,6 +391,8 @@ class BacktestConfig:
             errors.append(f"max_holding_days ({self.max_holding_days}) must be > 0 or None")
         if self.sizing_method not in ("inverse_vol", "score_proportional"):
             errors.append(f"sizing_method ({self.sizing_method!r}) must be 'inverse_vol' or 'score_proportional'")
+        if self.strategy_type not in ALLOWED_STRATEGY_TYPES:
+            errors.append(f"strategy_type ({self.strategy_type!r}) must be one of {ALLOWED_STRATEGY_TYPES}")
 
         if errors:
             raise ValueError("Invalid BacktestConfig:\n  - " + "\n  - ".join(errors))

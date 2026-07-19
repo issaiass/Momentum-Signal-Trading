@@ -258,6 +258,24 @@ default_risk:
   sizing_method: inverse_vol          # "inverse_vol" (default, underweights noisier names) or
                                        # "score_proportional" (stronger momentum gets more capital)
 
+  # Selectable momentum strategy (docs/MOMENTUM_STRATEGIES.md), per-portfolio via risk_overrides,
+  # same mechanism as every other field here (portfolio A can run dual_momentum while portfolio B
+  # runs volatility_scaled_momentum on the same account). "momentum" (default) is the base
+  # cross-sectional relative-momentum signal, changes nothing versus not setting this field at
+  # all. Every other value either (a) auto-configures a bundle of existing fields below UNLESS you
+  # explicitly set that specific field yourself, which always wins (dual_momentum,
+  # volatility_scaled_momentum, correlation_weighted_momentum, rank_sign_momentum), or
+  # (b) dispatches to a genuinely new ranking function (multi_timeframe_composite,
+  # absolute_momentum, residual_momentum, path_dependent_momentum, hybrid_multi_factor, the last
+  # one LIVE-ONLY, no backtest support, see docs/MOMENTUM_STRATEGIES.md for why).
+  strategy_type: momentum             # "momentum" (default) / "relative_momentum" (explicit
+                                       # alias, identical) / "dual_momentum" /
+                                       # "volatility_scaled_momentum" / "residual_momentum" /
+                                       # "absolute_momentum" / "rank_sign_momentum" /
+                                       # "hybrid_multi_factor" / "path_dependent_momentum" /
+                                       # "correlation_weighted_momentum" /
+                                       # "multi_timeframe_composite"
+
   # Additional execution safety checks
   max_dollar_drawdown: null           # e.g. 500.0, independent $ breaker alongside the % one above
   max_slippage_tolerance_pct: null    # e.g. 0.02, alert (not un-fill) on excess fill deviation

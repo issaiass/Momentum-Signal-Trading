@@ -212,4 +212,29 @@ risk_overrides:
 
 Fully implemented, LIVE and BACKTEST (`generate_strategy_monthly_picks()`).
 
-<!-- Epics 6-7 each add their own section below as they land. -->
+## Path-Dependent Momentum [`path_dependent_momentum`]
+
+Rewards a smooth, consistent trend over a choppy/volatile one reaching the same endpoint, the
+literal "filters for consistent/smooth trends" reading. Per rebalance date and ticker,
+`core/strategy_signals.py`'s `resolve_path_dependent_momentum_scores()` fits a linear trend to
+log-price (`np.polyfit`, degree 1) over the same trailing lookback window
+`resolve_momentum_scores()` uses, computes that fit's R^2 (a standard "trend quality" measure,
+1.0 = perfectly smooth, lower = choppier), then:
+
+```
+path_adjusted_score = raw_period_return * trend_r_squared
+```
+
+Two tickers with an IDENTICAL raw return over the window but different paths (one climbed
+steadily, the other whipsawed to the same endpoint) get different scores here, the smoother one
+ranks higher. Purely price-based, no external benchmark needed (unlike `residual_momentum`
+above), so this only ever needs the portfolio's own configured tickers.
+
+```yaml
+risk_overrides:
+  strategy_type: path_dependent_momentum
+```
+
+Fully implemented, LIVE and BACKTEST (`generate_strategy_monthly_picks()`).
+
+<!-- Epic 7 adds its own section below as it lands. -->

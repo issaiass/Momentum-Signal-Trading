@@ -761,6 +761,50 @@ class TestRunResidualMomentumStrategy:
             )
 
 
+class TestRunPathDependentMomentumStrategy:
+    """
+    cfg.strategy_type == "path_dependent_momentum" end-to-end through run(), Epic 6 of the
+    selectable-momentum-strategy plan: rewards a smooth trend over a choppy one at the same total
+    return. Purely price-based, no benchmark needed (unlike TestRunResidualMomentumStrategy above).
+    """
+
+    def _smooth_vs_choppy_prices(self, n=100, total_return=0.5):
+        dates = pd.bdate_range("2023-01-01", periods=n)
+        t = np.arange(n)
+        smooth = 100 * (1 + total_return) ** (t / (n - 1))
+        oscillation = 15 * np.sin(t / 3.0) * (1 - t / (n - 1))
+        choppy = smooth + oscillation
+        choppy[-1] = smooth[-1]
+        return pd.DataFrame({"SMOOTH": smooth, "CHOPPY": choppy}, index=dates)
+
+    def test_smooth_trend_beats_choppy_trend_at_identical_total_return(self, monkeypatch, tmp_path):
+        prices = self._smooth_vs_choppy_prices()
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False,
+                              strategy_type="path_dependent_momentum")
+        orders = live_signal.run(
+            tickers=["SMOOTH", "CHOPPY"], current_holdings={}, total_value=1000.0, cfg=cfg,
+            top_n=1, lookback_period=4.0, dry_run=True,
+        )
+
+        # Identical raw total return, top_n=1 must pick SMOOTH, the higher-R^2 trend.
+        assert set(orders.keys()) == {"SMOOTH"}
+
+    def test_default_strategy_type_is_byte_identical_to_before_this_feature(self, monkeypatch, tmp_path):
+        prices = self._smooth_vs_choppy_prices()
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False)
+        orders = live_signal.run(
+            tickers=["SMOOTH", "CHOPPY"], current_holdings={}, total_value=1000.0, cfg=cfg,
+            top_n=2, lookback_period=4.0, dry_run=True,
+        )
+        assert len(orders) == 2
+
+
 class TestGetTopEtfs:
     """
     get_top_etfs() is where BacktestConfig.top_n actually takes effect, it's

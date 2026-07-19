@@ -18,7 +18,7 @@ from momentum_trading.backtest.momentum_backtest import BacktestConfig
 from momentum_trading.core.strategy_signals import (
     resolve_strategy_scores, generate_strategy_monthly_picks,
     select_absolute_momentum_picks, resolve_strategy_picks,
-    resolve_residual_momentum_scores,
+    resolve_residual_momentum_scores, resolve_path_dependent_momentum_scores,
 )
 from momentum_trading.execution.live_signal import resolve_momentum_scores
 from momentum_trading.core.functions_quant_extensions import blend_momentum_scores
@@ -151,6 +151,49 @@ class TestResolveResidualMomentumScores:
         with pytest.raises(ValueError, match="BENCH"):
             resolve_residual_momentum_scores(prices, ["A"], benchmark="BENCH",
                                               lookback_period=1, holding_period=1)
+
+
+class TestResolvePathDependentMomentumScores:
+    """
+    resolve_path_dependent_momentum_scores() (Epic 6): rewards a smooth, consistent trend over a
+    choppy one reaching the same endpoint. path_adjusted_score = raw_score * trend_r_squared,
+    where trend_r_squared is the R^2 of a linear fit to log-price over the lookback window.
+    """
+
+    def _smooth_vs_choppy_prices(self, n=100, total_return=0.5):
+        dates = pd.bdate_range("2023-01-01", periods=n)
+        t = np.arange(n)
+        smooth = 100 * (1 + total_return) ** (t / (n - 1))
+        # Same start/end price as `smooth`, but with a large oscillation superimposed that
+        # damps to zero exactly at the last point, so both series land on the IDENTICAL total
+        # return, only the PATH differs.
+        oscillation = 15 * np.sin(t / 3.0) * (1 - t / (n - 1))
+        choppy = smooth + oscillation
+        choppy[-1] = smooth[-1]
+        return pd.DataFrame({"SMOOTH": smooth, "CHOPPY": choppy}, index=dates)
+
+    def test_smooth_trend_ranks_above_choppy_trend_at_identical_total_return(self):
+        prices = self._smooth_vs_choppy_prices()
+        scores = resolve_path_dependent_momentum_scores(
+            prices, ["SMOOTH", "CHOPPY"], lookback_period=4, holding_period=1,
+        )
+        latest = scores.dropna(how="all").iloc[-1]
+
+        # Sanity check on the setup itself: identical RAW total return.
+        raw_smooth = prices["SMOOTH"].iloc[-1] / prices["SMOOTH"].iloc[0] - 1
+        raw_choppy = prices["CHOPPY"].iloc[-1] / prices["CHOPPY"].iloc[0] - 1
+        assert raw_smooth == pytest.approx(raw_choppy, abs=1e-9)
+
+        # But the smooth trend's higher R^2 gives it a higher path-adjusted score.
+        assert latest["SMOOTH"] > latest["CHOPPY"]
+
+    def test_scopes_to_the_given_tickers(self):
+        prices = self._smooth_vs_choppy_prices()
+        prices["EXTRA"] = prices["SMOOTH"] * 1.5
+        scores = resolve_path_dependent_momentum_scores(
+            prices, ["SMOOTH", "CHOPPY"], lookback_period=4, holding_period=1,
+        )
+        assert "EXTRA" not in scores.columns
 
 
 class TestSelectAbsoluteMomentumPicks:

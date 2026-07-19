@@ -87,6 +87,11 @@ def resolve_strategy_scores(
             daily_prices, tickers, cfg.regime_benchmark, lookback_period, cfg.holding_period,
         )
 
+    if strategy_type == "path_dependent_momentum":
+        return resolve_path_dependent_momentum_scores(
+            scoped_prices, tickers, lookback_period, cfg.holding_period,
+        )
+
     raise ValueError(
         f"resolve_strategy_scores(): unhandled strategy_type {strategy_type!r}, "
         f"this strategy's ranking function hasn't been wired in yet."
@@ -157,6 +162,60 @@ def resolve_residual_momentum_scores(
                 continue
             beta = np.polyfit(bench_window.loc[common], ticker_window.loc[common], 1)[0]
             scores.loc[date, ticker] = ticker_raw - beta * bench_raw
+
+    return scores
+
+
+def resolve_path_dependent_momentum_scores(
+    daily_prices: pd.DataFrame, tickers: list[str], lookback_period: float, holding_period: float,
+) -> pd.DataFrame:
+    """
+    strategy_type == "path_dependent_momentum" (Epic 6): rewards a smooth, consistent trend over
+    a choppy/volatile one reaching the same endpoint, the literal "filters for consistent/smooth
+    trends" reading. Per rebalance date and ticker, fits a linear trend to log-price
+    (np.polyfit, degree 1) over the trailing lookback window (the same window
+    resolve_momentum_scores() uses), computes that fit's R^2 ("trend quality"), then:
+
+        path_adjusted_score = raw_period_return * trend_r_squared
+
+    Two tickers with an IDENTICAL raw return over the window but different R^2 (one climbed
+    steadily, the other whipsawed to the same endpoint) get different scores here, the smoother
+    one ranks higher. Purely price-based, no external benchmark needed (unlike
+    resolve_residual_momentum_scores()), so this only ever needs `tickers`' own prices.
+    """
+    scoped_tickers = [t for t in tickers if t in daily_prices.columns]
+    prices = daily_prices[scoped_tickers]
+
+    if holding_period < 1:
+        resampled = prices.resample("W").last()
+        period = max(1, round(lookback_period * 4))
+    else:
+        resampled = prices.resample("ME").last()
+        period = max(1, round(lookback_period))
+
+    raw_returns = resampled.pct_change(periods=period)
+
+    scores = pd.DataFrame(index=raw_returns.index, columns=scoped_tickers, dtype=float)
+    for i, date in enumerate(resampled.index):
+        if i < period:
+            continue
+        window_start = resampled.index[i - period]
+        window_prices = prices.loc[window_start:date]
+        for ticker in scoped_tickers:
+            raw = raw_returns.loc[date, ticker]
+            if pd.isna(raw):
+                continue
+            series = window_prices[ticker].dropna()
+            if len(series) < 3 or (series <= 0).any():
+                continue
+            log_prices = np.log(series.values)
+            x = np.arange(len(log_prices))
+            slope, intercept = np.polyfit(x, log_prices, 1)
+            fitted = slope * x + intercept
+            ss_res = np.sum((log_prices - fitted) ** 2)
+            ss_tot = np.sum((log_prices - log_prices.mean()) ** 2)
+            r_squared = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
+            scores.loc[date, ticker] = raw * r_squared
 
     return scores
 

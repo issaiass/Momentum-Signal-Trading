@@ -279,6 +279,26 @@ class TestBacktestRuns:
         assert not df.empty
         assert "tearsheet" in df.attrs
 
+    def test_path_dependent_momentum_backtest_picks_feed_the_engine_cleanly(self, synthetic_daily_prices):
+        # Epic 6 of the selectable-momentum-strategy plan: generate_strategy_monthly_picks()
+        # gives path_dependent_momentum real historical backtest parity, purely price-based, no
+        # external benchmark needed.
+        from momentum_trading.core.strategy_signals import generate_strategy_monthly_picks
+        tickers = list(synthetic_daily_prices.columns)
+        cfg = BacktestConfig(holding_period=1, strategy_type="path_dependent_momentum",
+                              lookback_period=3)
+        picks = generate_strategy_monthly_picks(synthetic_daily_prices, tickers, cfg,
+                                                 lookback_period=cfg.lookback_period, top_n=2)
+        assert not picks.empty
+        for held in picks.values:
+            assert len(held) == 2
+            assert set(held).issubset(set(tickers))
+
+        df = run_custom_backtest(picks, synthetic_daily_prices, holding_period=1, commission=0,
+                                  initial_capital=1000.0)
+        assert not df.empty
+        assert "tearsheet" in df.attrs
+
     def test_correlation_penalty_run_succeeds(self, synthetic_monthly_picks, synthetic_daily_prices):
         df = run_custom_backtest(synthetic_monthly_picks, synthetic_daily_prices,
                                   initial_capital=1000.0, use_correlation_penalty=True)

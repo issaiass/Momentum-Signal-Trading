@@ -19,6 +19,7 @@ from momentum_trading.core.strategy_signals import (
     resolve_strategy_scores, generate_strategy_monthly_picks,
 )
 from momentum_trading.execution.live_signal import resolve_momentum_scores
+from momentum_trading.core.functions_quant_extensions import blend_momentum_scores
 
 
 def _synthetic_prices(n=400, seed=5):
@@ -66,6 +67,46 @@ class TestResolveStrategyScores:
         cfg = BacktestConfig(holding_period=1, lookback_period=3)
         result = resolve_strategy_scores(prices, ["A", "B", "C"], cfg, cfg.lookback_period)
         assert "EXTRA" not in result.columns
+
+
+class TestMultiTimeframeComposite:
+    """
+    strategy_type == "multi_timeframe_composite" (Epic 2): wires up
+    core/functions_quant_extensions.py's blend_momentum_scores(), previously fully coded but
+    dead code (zero production call sites). Resamples to monthly FIRST (matching that function's
+    own documented "resample to monthly first for the conventional N-month momentum meaning"
+    guidance, the same convention resolve_momentum_scores()'s monthly branch already uses), then
+    blends across cfg.multi_timeframe_lookbacks.
+    """
+
+    def test_matches_a_direct_blend_momentum_scores_call(self):
+        prices = _synthetic_prices()
+        cfg = BacktestConfig(holding_period=1, strategy_type="multi_timeframe_composite",
+                              multi_timeframe_lookbacks=[2, 4])
+        result = resolve_strategy_scores(prices, ["A", "B", "C"], cfg, cfg.lookback_period)
+
+        monthly_prices = prices[["A", "B", "C"]].resample("ME").last()
+        expected = blend_momentum_scores(monthly_prices, lookbacks=[2, 4], weights=None)
+        pd.testing.assert_frame_equal(result, expected)
+
+    def test_differs_from_default_momentum_on_the_same_universe(self):
+        prices = _synthetic_prices()
+        default_cfg = BacktestConfig(holding_period=1, lookback_period=6)
+        composite_cfg = BacktestConfig(holding_period=1, strategy_type="multi_timeframe_composite",
+                                        multi_timeframe_lookbacks=[1, 12])
+        default_scores = resolve_strategy_scores(prices, ["A", "B", "C"], default_cfg, default_cfg.lookback_period)
+        composite_scores = resolve_strategy_scores(prices, ["A", "B", "C"], composite_cfg, composite_cfg.lookback_period)
+        # Genuinely different signal construction, not expected to match the single-lookback score.
+        assert not default_scores.dropna(how="all").equals(composite_scores.dropna(how="all"))
+
+    def test_generate_strategy_monthly_picks_supports_it(self):
+        prices = _synthetic_prices()
+        cfg = BacktestConfig(holding_period=1, strategy_type="multi_timeframe_composite",
+                              multi_timeframe_lookbacks=[2, 4])
+        picks = generate_strategy_monthly_picks(prices, ["A", "B", "C"], cfg, cfg.lookback_period, top_n=2)
+        assert not picks.empty
+        for tickers in picks.values:
+            assert len(tickers) == 2
 
 
 class TestGenerateStrategyMonthlyPicks:

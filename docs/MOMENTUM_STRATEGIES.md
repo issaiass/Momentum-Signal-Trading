@@ -109,4 +109,26 @@ crash-detection overlay (see `docs/RISK_CONSTRAINTS.md`'s "Correlation Monitor")
 part of this preset and can be enabled independently. Fully implemented, live AND backtest, both
 via the shared `resolve_target_weights()`.
 
-<!-- Epics 2-7 each add their own section below as they land. -->
+## Multi-Timeframe Composite [`multi_timeframe_composite`]
+
+Aligns signals across multiple horizons: blends momentum scores across several lookback windows
+(default 3/6/12-month, `multi_timeframe_lookbacks`, equal-weighted unless
+`multi_timeframe_weights` is set) into ONE ranking signal, instead of relying on a single
+lookback. Rationale (from `blend_momentum_scores()`'s own docstring): shorter windows react
+faster to regime changes but are noisier, longer windows are the classic academic momentum
+window but react slowly to reversals, a blend is a reasonable middle ground, not a guaranteed
+improvement, validate with a real backtest comparison before trusting it over a single lookback.
+
+**This closes a real, previously-undiscovered gap**: `core/functions_quant_extensions.py`'s
+`blend_momentum_scores()` was already fully coded, explicitly documented as "drop-in compatible
+with `assign_ranks()`/`get_top_etfs()`", but had ZERO production call sites, only exercised by
+its own unit test, and the README/`docs/RUNNING.md`/its own docstring all falsely claimed a
+"Notebook 2 demo" existed for it (confirmed via repo-wide grep, no such demo ever existed). Now
+wired in via `core/strategy_signals.py`'s `resolve_strategy_scores()` router, resamples to
+monthly first (the conventional "N-month momentum" meaning `blend_momentum_scores()`'s own
+docstring recommends), then blends, feeding the exact same `assign_ranks()`/`get_top_etfs()`
+pipeline every other strategy uses. Fully implemented, LIVE and BACKTEST (via
+`generate_strategy_monthly_picks()`, the first strategy this plan gave real historical backtest
+parity to, not just a live-only preview).
+
+<!-- Epics 3-7 each add their own section below as they land. -->

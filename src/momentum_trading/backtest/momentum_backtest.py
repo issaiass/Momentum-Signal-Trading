@@ -326,6 +326,13 @@ class BacktestConfig:
     #     docs/MOMENTUM_STRATEGIES.md for why). ---
     strategy_type: str = "momentum"
 
+    # --- Only meaningful when strategy_type == "multi_timeframe_composite" (Epic 2,
+    #     docs/MOMENTUM_STRATEGIES.md): blends momentum scores across multiple lookback windows
+    #     instead of relying on a single one, via core/functions_quant_extensions.py's
+    #     blend_momentum_scores(). Defaults match that function's own defaults exactly. ---
+    multi_timeframe_lookbacks: list = field(default_factory=lambda: [3, 6, 12])
+    multi_timeframe_weights: list | None = None   # None (default) = equal weight per lookback
+
     def __post_init__(self):
         """Fail fast on nonsensical config combinations instead of producing silently wrong sizing."""
         errors = []

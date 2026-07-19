@@ -29,6 +29,7 @@ import pandas as pd
 
 from ..backtest.momentum_backtest import BacktestConfig
 from ..execution.live_signal import resolve_momentum_scores, assign_ranks
+from .functions_quant_extensions import blend_momentum_scores
 
 # strategy_type values that only affect SIZING/EXPOSURE (via daily_runner.py's
 # apply_strategy_type_preset() feeding the existing resolve_target_weights()/
@@ -60,6 +61,16 @@ def resolve_strategy_scores(
     if strategy_type in _SIZING_ONLY_STRATEGY_TYPES:
         return resolve_momentum_scores(
             scoped_prices, lookback_period, cfg.holding_period, cfg.skip_month_guardrail,
+        )
+
+    if strategy_type == "multi_timeframe_composite":
+        # Resample to monthly FIRST, matching blend_momentum_scores()'s own documented
+        # "resample to monthly first for the conventional N-month momentum meaning" guidance,
+        # the same convention resolve_momentum_scores()'s monthly branch already uses, so
+        # cfg.multi_timeframe_lookbacks means "months", not raw daily periods.
+        monthly_prices = scoped_prices.resample("ME").last()
+        return blend_momentum_scores(
+            monthly_prices, cfg.multi_timeframe_lookbacks, cfg.multi_timeframe_weights,
         )
 
     raise ValueError(

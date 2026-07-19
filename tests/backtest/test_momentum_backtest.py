@@ -126,6 +126,19 @@ class TestBacktestConfigValidation:
         with pytest.raises(ValueError, match="strategy_type"):
             BacktestConfig(strategy_type="not_a_real_strategy")
 
+    def test_multi_timeframe_lookbacks_defaults_match_blend_momentum_scores(self):
+        # Must match blend_momentum_scores()'s own defaults exactly, so selecting
+        # multi_timeframe_composite without customizing these fields still behaves consistently
+        # with calling that function directly with no arguments.
+        assert BacktestConfig().multi_timeframe_lookbacks == [3, 6, 12]
+        assert BacktestConfig().multi_timeframe_weights is None
+
+    def test_multi_timeframe_lookbacks_default_is_not_a_shared_mutable(self):
+        # dataclass mutable-default footgun: two instances must never share the same list object.
+        a, b = BacktestConfig(), BacktestConfig()
+        a.multi_timeframe_lookbacks.append(24)
+        assert b.multi_timeframe_lookbacks == [3, 6, 12]
+
     def test_persist_dry_run_state_defaults_false(self):
         # Default false preserves dry-run's existing behavior exactly: current_positions is {}
         # on every invocation, this must never flip on by accident from an old config.yaml.
@@ -199,6 +212,25 @@ class TestBacktestRuns:
     def test_default_run_produces_output(self, synthetic_monthly_picks, synthetic_daily_prices):
         df = run_custom_backtest(synthetic_monthly_picks, synthetic_daily_prices,
                                   holding_period=1, commission=0, initial_capital=1000.0)
+        assert not df.empty
+        assert "tearsheet" in df.attrs
+
+    def test_multi_timeframe_composite_backtest_picks_feed_the_engine_cleanly(self, synthetic_daily_prices):
+        # Epic 2 of the selectable-momentum-strategy plan: generate_strategy_monthly_picks()
+        # (core/strategy_signals.py) is the NEW backtest-facing helper, this confirms its output
+        # feeds UNCHANGED into the existing, untouched run_custom_backtest()/
+        # run_risk_managed_backtest(), real backtest parity for a strategy_type that previously
+        # had no backtest support at all (blend_momentum_scores() was dead code).
+        from momentum_trading.core.strategy_signals import generate_strategy_monthly_picks
+        tickers = list(synthetic_daily_prices.columns)
+        cfg = BacktestConfig(holding_period=1, strategy_type="multi_timeframe_composite",
+                              multi_timeframe_lookbacks=[1, 3])
+        picks = generate_strategy_monthly_picks(synthetic_daily_prices, tickers, cfg,
+                                                 lookback_period=cfg.lookback_period, top_n=2)
+        assert not picks.empty
+
+        df = run_custom_backtest(picks, synthetic_daily_prices, holding_period=1, commission=0,
+                                  initial_capital=1000.0)
         assert not df.empty
         assert "tearsheet" in df.attrs
 

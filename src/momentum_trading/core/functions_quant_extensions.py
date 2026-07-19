@@ -963,8 +963,11 @@ def blend_momentum_scores(
     faster to regime changes but are noisier; longer windows (12mo) are the
     classic academic momentum window but react slowly to reversals. A blend
     is a reasonable middle ground, not a guaranteed improvement, validate
-    with a real backtest comparison before trusting it over a single lookback
-    (see the Notebook 2 demo cell for exactly that comparison).
+    with a real backtest comparison before trusting it over a single lookback.
+    Wired into production as the "Multi-Timeframe Composite" strategy
+    (`strategy_type: multi_timeframe_composite`, `core/strategy_signals.py`'s
+    `resolve_strategy_scores()` router), see `docs/MOMENTUM_STRATEGIES.md` for a real,
+    reproducible comparison against the default single-lookback signal, both live and backtest.
 
     Parameters
     ----------

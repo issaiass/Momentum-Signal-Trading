@@ -270,6 +270,19 @@ class TestApplyStrategyTypePreset:
         result = apply_strategy_type_preset({"strategy_type": "correlation_weighted_momentum"})
         assert result["use_correlation_penalty"] is True
 
+    def test_rank_sign_momentum_implies_equal_weight_sizing(self):
+        # Epic 4 of the selectable-momentum-strategy plan.
+        from momentum_trading.daily_runner import apply_strategy_type_preset
+        result = apply_strategy_type_preset({"strategy_type": "rank_sign_momentum"})
+        assert result["sizing_method"] == "equal_weight"
+
+    def test_rank_sign_momentum_explicit_sizing_method_overrides_the_preset(self):
+        from momentum_trading.daily_runner import apply_strategy_type_preset
+        result = apply_strategy_type_preset({
+            "strategy_type": "rank_sign_momentum", "sizing_method": "inverse_vol",
+        })
+        assert result["sizing_method"] == "inverse_vol"
+
     def test_momentum_and_relative_momentum_and_unset_are_all_no_ops(self):
         from momentum_trading.daily_runner import apply_strategy_type_preset
         base = {"top_n": 7}
@@ -310,6 +323,20 @@ class TestApplyStrategyTypePreset:
 
         resolved = load_config(str(path))["portfolios_resolved"]
         assert resolved["p1"]["cfg"].use_absolute_momentum is False
+
+    def test_load_config_wires_rank_sign_momentum_end_to_end(self, tmp_path):
+        cfg = {
+            "portfolios": {
+                "p1": {"tickers": ["SPY", "QQQ"], "total_value": 1000.0,
+                       "risk_overrides": {"strategy_type": "rank_sign_momentum"}},
+            },
+        }
+        path = tmp_path / "config.yaml"
+        with open(path, "w") as f:
+            yaml.safe_dump(cfg, f)
+
+        resolved = load_config(str(path))["portfolios_resolved"]
+        assert resolved["p1"]["cfg"].sizing_method == "equal_weight"
 
 
 class TestIdempotency:

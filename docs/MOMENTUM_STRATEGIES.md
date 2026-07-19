@@ -109,6 +109,21 @@ crash-detection overlay (see `docs/RISK_CONSTRAINTS.md`'s "Correlation Monitor")
 part of this preset and can be enabled independently. Fully implemented, live AND backtest, both
 via the shared `resolve_target_weights()`.
 
+## Rank & Sign Momentum [`rank_sign_momentum`]
+
+Non-parametric sizing: every held pick gets an identical `1/N` weight, ignoring both raw
+momentum score MAGNITUDE (unlike the default `inverse_vol` and `score_proportional`
+`sizing_method`s) and trailing volatility. The literal "rank/sign-only" reading, a pick that
+barely cleared the ranking cutoff gets the same capital as the strongest-momentum pick, reducing
+the influence of any single outlier score. Preset sets `sizing_method: equal_weight`, a new
+third `sizing_method` value (`backtest/momentum_backtest.py`'s `_equal_weight_weights()`),
+independently usable without selecting this whole `strategy_type` too. Ranking/selection itself
+is completely unchanged from the base `momentum` strategy, only sizing differs, so this reuses
+`resolve_momentum_scores()` for scoring like every other sizing-only `strategy_type`. Position
+caps and the correlation penalty (if enabled) still apply afterward, same as the other two
+`sizing_method` values. Fully implemented, live AND backtest (sizing is already the one shared
+function both engines call via `resolve_target_weights()`).
+
 ## Multi-Timeframe Composite [`multi_timeframe_composite`]
 
 Aligns signals across multiple horizons: blends momentum scores across several lookback windows

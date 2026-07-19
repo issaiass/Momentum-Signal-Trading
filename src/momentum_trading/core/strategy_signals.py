@@ -36,11 +36,13 @@ from .functions_quant_extensions import blend_momentum_scores
 # daily_runner.py's apply_strategy_type_preset() feeding the existing resolve_target_weights()/
 # compute_target_weights() machinery), never RANKING; "absolute_momentum" (Epic 3) is the one
 # exception, its SCORE is the same base per-ticker score, only SELECTION differs (no
-# cross-sectional top_n cutoff, see resolve_strategy_picks() below). Every other strategy_type
-# dispatches to a genuinely new ranking function below, added incrementally, one per epic.
+# cross-sectional top_n cutoff, see resolve_strategy_picks() below). "rank_sign_momentum" (Epic
+# 4) only changes SIZING (equal_weight preset), ranking/selection are identical to the base
+# strategy. Every other strategy_type dispatches to a genuinely new ranking function below, added
+# incrementally, one per epic.
 _BASE_SCORE_STRATEGY_TYPES = (
     "momentum", "relative_momentum", "dual_momentum", "volatility_scaled_momentum",
-    "correlation_weighted_momentum", "absolute_momentum",
+    "correlation_weighted_momentum", "absolute_momentum", "rank_sign_momentum",
 )
 
 

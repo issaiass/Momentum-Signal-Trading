@@ -354,6 +354,7 @@ STRATEGY_TYPE_PRESETS = {
     "dual_momentum": {"use_absolute_momentum": True, "use_regime_filter": True},
     "volatility_scaled_momentum": {"sizing_method": "inverse_vol"},
     "correlation_weighted_momentum": {"use_correlation_penalty": True},
+    "rank_sign_momentum": {"sizing_method": "equal_weight"},
 }
 
 

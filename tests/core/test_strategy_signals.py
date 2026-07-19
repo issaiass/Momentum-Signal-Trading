@@ -50,7 +50,7 @@ class TestResolveStrategyScores:
 
     @pytest.mark.parametrize("strategy_type", [
         "momentum", "relative_momentum", "dual_momentum", "volatility_scaled_momentum",
-        "correlation_weighted_momentum",
+        "correlation_weighted_momentum", "rank_sign_momentum",
     ])
     def test_sizing_only_strategy_types_all_match_the_default(self, strategy_type):
         prices = _synthetic_prices()

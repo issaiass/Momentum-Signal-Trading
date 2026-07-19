@@ -310,7 +310,9 @@ class BacktestConfig:
                                              # into a real-time bid-ask spread wider than 1%.
 
     # --- Alternative position-sizing method ---
-    sizing_method: str = "inverse_vol"   # "inverse_vol" (default) or "score_proportional"
+    sizing_method: str = "inverse_vol"   # "inverse_vol" (default), "score_proportional", or
+                                          # "equal_weight" (non-parametric, ignores both score
+                                          # magnitude and trailing vol, every pick gets 1/N)
 
     # --- Selectable momentum strategy type (docs/MOMENTUM_STRATEGIES.md), config-driven per
     #     portfolio via default_risk/risk_overrides, same mechanism as every other field here.
@@ -396,8 +398,11 @@ class BacktestConfig:
             errors.append(f"max_price_staleness_minutes ({self.max_price_staleness_minutes}) must be > 0 or None")
         if self.max_holding_days is not None and self.max_holding_days <= 0:
             errors.append(f"max_holding_days ({self.max_holding_days}) must be > 0 or None")
-        if self.sizing_method not in ("inverse_vol", "score_proportional"):
-            errors.append(f"sizing_method ({self.sizing_method!r}) must be 'inverse_vol' or 'score_proportional'")
+        if self.sizing_method not in ("inverse_vol", "score_proportional", "equal_weight"):
+            errors.append(
+                f"sizing_method ({self.sizing_method!r}) must be 'inverse_vol', "
+                f"'score_proportional', or 'equal_weight'"
+            )
         if self.strategy_type not in ALLOWED_STRATEGY_TYPES:
             errors.append(f"strategy_type ({self.strategy_type!r}) must be one of {ALLOWED_STRATEGY_TYPES}")
 
@@ -553,6 +558,17 @@ def _score_proportional_weights(picks: list[str], momentum_scores: pd.Series | N
     return weights
 
 
+def _equal_weight_weights(picks: list[str]) -> dict:
+    """
+    Non-parametric sizing: every pick gets an identical 1/N weight, ignoring both raw score
+    magnitude (unlike score_proportional) and trailing volatility (unlike inverse_vol). Backs
+    strategy_type "rank_sign_momentum" (docs/MOMENTUM_STRATEGIES.md), the literal "sign-only,
+    reduces outlier impact" reading, a large momentum reading and a barely-positive one get the
+    same capital.
+    """
+    return {t: 1.0 / len(picks) for t in picks}
+
+
 def resolve_target_weights(
     picks: list[str], daily_prices: pd.DataFrame, as_of: pd.Timestamp, cfg: "BacktestConfig",
     custom_weights: dict | None = None, momentum_scores: pd.Series | None = None,
@@ -567,10 +583,12 @@ def resolve_target_weights(
     correlation penalty are skipped entirely. Position caps still apply.
 
     If custom_weights is NOT provided, cfg.sizing_method selects between
-    "inverse_vol" (default, weight inversely to trailing volatility) and
+    "inverse_vol" (default, weight inversely to trailing volatility),
     "score_proportional" (weight proportional to each
     pick's momentum score, requires momentum_scores to be passed in; falls
-    back to equal-weight if scores aren't available).
+    back to equal-weight if scores aren't available), and "equal_weight"
+    (non-parametric, every pick gets an identical 1/N weight, see
+    _equal_weight_weights()).
     """
     if custom_weights is not None:
         provided = {t: w for t, w in custom_weights.items() if t in picks and w > 0}
@@ -582,6 +600,12 @@ def resolve_target_weights(
         weights = {t: w / total for t, w in provided.items()}
     elif cfg.sizing_method == "score_proportional":
         weights = _score_proportional_weights(picks, momentum_scores)
+        if cfg.use_correlation_penalty:
+            weights = _correlation_penalty_weights(
+                weights, daily_prices, as_of, cfg.correlation_lookback_days, cfg.correlation_penalty_strength
+            )
+    elif cfg.sizing_method == "equal_weight":
+        weights = _equal_weight_weights(picks)
         if cfg.use_correlation_penalty:
             weights = _correlation_penalty_weights(
                 weights, daily_prices, as_of, cfg.correlation_lookback_days, cfg.correlation_penalty_strength

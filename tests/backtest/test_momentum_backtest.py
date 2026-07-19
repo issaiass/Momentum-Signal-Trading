@@ -372,6 +372,29 @@ class TestResolveTargetWeights:
         with pytest.raises(ValueError, match="sizing_method"):
             BacktestConfig(sizing_method="bogus")
 
+    def test_equal_weight_sizing_ignores_score_magnitude_and_rank(self, synthetic_daily_prices):
+        # Epic 4 of the selectable-momentum-strategy plan: "equal_weight" is the
+        # non-parametric sizing this project's rank_sign_momentum strategy_type maps to, every
+        # pick gets an identical 1/N weight, regardless of momentum score magnitude (unlike
+        # score_proportional) or trailing volatility (unlike inverse_vol).
+        cfg = BacktestConfig(sizing_method="equal_weight", max_position_weight=0.9)
+        as_of = synthetic_daily_prices.index[-1]
+        scores = pd.Series({"SPY": 0.01, "QQQ": 0.50, "XLK": 0.20})
+        weights = resolve_target_weights(["SPY", "QQQ", "XLK"], synthetic_daily_prices, as_of, cfg,
+                                          momentum_scores=scores)
+        assert weights["SPY"] == pytest.approx(1 / 3, abs=1e-6)
+        assert weights["QQQ"] == pytest.approx(1 / 3, abs=1e-6)
+        assert weights["XLK"] == pytest.approx(1 / 3, abs=1e-6)
+
+    def test_equal_weight_sizing_still_subject_to_position_caps(self, synthetic_daily_prices):
+        # Confirms _equal_weight_weights() output still flows through the shared
+        # _apply_position_caps() step afterward, same as inverse_vol/score_proportional.
+        cfg = BacktestConfig(sizing_method="equal_weight", max_position_weight=0.35)
+        as_of = synthetic_daily_prices.index[-1]
+        weights = resolve_target_weights(["SPY", "QQQ"], synthetic_daily_prices, as_of, cfg)
+        assert weights["SPY"] <= 0.5 + 1e-6
+        assert weights["QQQ"] <= 0.5 + 1e-6
+
     def test_volatility_budget_caps_high_vol_position_more_than_low_vol(self):
         # The "Volatility-Adjustment" (Scaling) constraint: two tickers start at an equal
         # custom_weights split, position_vol_budget should cap the high-vol ticker well

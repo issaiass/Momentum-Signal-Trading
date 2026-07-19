@@ -93,7 +93,7 @@ README says so on purpose.
   monthly report, 1-day/1/2/3-week for the daily report)
 - Dockerized, self-scheduling deployment (`docker compose up -d`, internal cron, no manual
   triggering needed for normal operation)
-- 449-test pytest suite covering code mechanics, order sizing, config validation, audit-log
+- 504-test pytest suite covering code mechanics, order sizing, config validation, audit-log
   integrity, multi-portfolio capital math, entirely on synthetic/mocked data, no live broker
   required to run it
 
@@ -222,7 +222,7 @@ momentum-trading/
 │       └── email_diagnostics.py     backs `daily-runner --test-email`, live SMTP+IMAP
 │                                     check independent of config.yaml
 │
-└── tests/                         pytest suite (455 tests), mirrors src/ layout where a
+└── tests/                         pytest suite (504 tests), mirrors src/ layout where a
     ├── conftest.py                  test's primary subject is a single sub-package;
     ├── test_architecture.py         cross-cutting/integration tests stay at tests/ root
     ├── test_daily_runner.py

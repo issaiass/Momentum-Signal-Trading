@@ -45,7 +45,7 @@ That's a deliberate scope boundary; see "What this suite does NOT tell you" belo
 | `core/test_fundamentals.py` | FMP-first/EODHD-fallback fetch of P/E, PEG, ROE, Debt-to-Equity, Current Ratio: vendor fallback behavior (FMP fails -> EODHD tried; both fail -> `{}`, never an exception), no-API-key short-circuit, and the file cache's hit/miss/expiry/corrupt-file/per-ticker-independence behavior |
 | `core/test_macro_data.py` | FRED-sourced Fed Funds Rate/CPI: `FRED_API_KEY` unset short-circuits before any network attempt, one series failing doesn't block the other, FRED's "." missing-value marker is handled without raising, and the same file-cache hit/miss/expiry/corrupt-file behavior as fundamentals |
 
-Current count: **449 tests**, all passing. Every test file and class has a docstring explaining
+Current count: **504 tests**, all passing. Every test file and class has a docstring explaining
 *why* that group of tests exists, not just what it checks, read those docstrings first if a
 test's purpose isn't obvious from its name.
 
@@ -101,7 +101,7 @@ unintentionally (fix the code).
 
 ## What this suite does NOT tell you
 
-Worth repeating because it's easy to forget once a suite is green: **449 passing tests confirm
+Worth repeating because it's easy to forget once a suite is green: **504 passing tests confirm
 the code does what it's supposed to do, mechanically. They do not confirm the momentum
 strategy itself is profitable or safe in a real crash**, that's a separate question from
 execution mechanics, which have now been confirmed against a real (paper) broker connection.

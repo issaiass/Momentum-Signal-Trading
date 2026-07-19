@@ -133,6 +133,23 @@ that tests enforce, don't casually violate these when editing:
   an explicit ask), `position_vol_budget` (default `None`, the per-ticker vol-budget cap applied
   in `resolve_target_weights()` via `_apply_volatility_budget_caps()`, AFTER the flat
   `max_position_weight` cap, complementary not redundant with it).
+  `compute_vol_scalar(realized_vol, target_portfolio_vol, min_gross_exposure,
+  max_gross_exposure)` is the "Volatility Scaling" (Mandatory tier) portfolio-level formula,
+  extracted from `run_risk_managed_backtest()`'s previously-inline logic specifically so
+  `execution/live_signal.py`'s `compute_target_weights()` can share the identical formula
+  (`_realized_weighted_portfolio_vol()` there is the live substitute for this file's
+  `_realized_portfolio_vol()`, which needs a simulated `portfolio_history` equity curve that
+  doesn't exist live). Before this, portfolio-level vol targeting existed ONLY in the backtest,
+  live trading had no aggregate exposure throttling at all. `use_absolute_momentum` (default
+  `False`, opt-in, same "changes the actual signal when enabled" caution as
+  `skip_month_guardrail`) + `defensive_ticker` (default `"BIL"`) back the "Absolute Momentum
+  (Macro)" constraint (Mandatory tier): `core/functions_quant_extensions.py`'s
+  `absolute_momentum_overlay()` existed, fully coded, since before this was wired in, but was
+  called NOWHERE until `execution/live_signal.py`'s `apply_absolute_momentum_filter()` (a thin
+  wrapper reusing it directly) was added; don't reimplement its swap rule a second time.
+  `max_bid_ask_spread_pct` (default `None`) backs the "Liquidity/Slippage Monitor" (Nice-to-Have
+  tier), threaded through to `execution/live_signal.py`'s `place_orders_ibkr()`, LIVE-ONLY,
+  requires a real-time IBKR market-data subscription, see that file's bullet below.
 - **`execution/live_signal.py`**, live signal/order generation, IBKR integration (`ibapi`
   `EClient`/`EWrapper`, not a third-party wrapper), multi-portfolio orchestration, FIFO P&L,
   hash-chained audit log. `fetch_ohlcv_for_tickers()` is distinct from `fetch_live_prices()`,
@@ -199,6 +216,34 @@ that tests enforce, don't casually violate these when editing:
   `{ticker: {'shares', 'avg_entry_price'}}` shape `get_ibkr_positions()` returns. Backs
   `daily_runner.py`'s opt-in `persist_dry_run_state` (default `False`), never called in `--live`
   mode.
+  `_realized_weighted_portfolio_vol(weights, daily_prices, as_of, lookback_days)` is the live
+  substitute for `momentum_backtest.py`'s `_realized_portfolio_vol()`: estimates realized vol
+  directly from trailing `daily_prices` at the JUST-resolved target weights (no simulated
+  equity curve exists live), the same "trailing data, not a simulated ledger" pattern
+  `_inverse_vol_weights()` already uses for position sizing. `compute_target_weights()`'s
+  `gross_exposure` now composes `regime_scalar * vol_scalar` (via
+  `momentum_backtest.compute_vol_scalar()`), matching the backtest's exact composition order,
+  don't compute one scalar without the other, they're independent and multiplicative.
+  `apply_absolute_momentum_filter(picks, latest_scores, defensive_ticker)` wraps
+  `core/functions_quant_extensions.py`'s `absolute_momentum_overlay()` (wraps the single live
+  `picks` list in a length-1 `pd.Series`, calls the shared function, unwraps the result), wired
+  into `run()` right after `picks = get_top_etfs(...)`, BEFORE `signal_context`/
+  `compute_target_weights()` are built, so a substituted defensive ticker flows through sizing/
+  vol-scaling/regime-filtering like any other pick. `defensive_ticker` needs its own live price,
+  add it to that portfolio's own `tickers:` list in `config.yaml`, there's no automatic
+  `extra_price_tickers`-style widening for it.
+  `fetch_bid_ask_spread(ticker, port, client_id, host, timeout)` opens its own real-time
+  `reqMktData()` subscription (a separate minimal `EWrapper`/`EClient` app, mirrors
+  `PositionsApp`/`AccountApp`/`IBApp`'s existing pattern), requires a live TWS/Gateway
+  connection AND, per IBKR's own rules, typically a PAID real-time market-data subscription
+  (confirmed against IBKR's docs, not assumed), a `None` return (timeout/no usable quote) is
+  treated as "couldn't check," never as "spread is fine." `compute_spread_pct(bid, ask)` is the
+  pure math half, factored out so it's unit-testable without a connection, same precedent as
+  `check_slippage_tolerance()`. `place_orders_ibkr()`'s new `max_bid_ask_spread_pct` param
+  (`None` default, zero new IBKR calls) gates each ticker right before submission, a too-wide
+  spread drops into the EXISTING `dropped_orders` mechanism (`DROPPED_WIDE_SPREAD`, same merge
+  pattern as `DROPPED_FRACTIONAL`/`DROPPED_INSUFFICIENT_CASH`), don't just `continue` without
+  recording it there.
 - **`risk/circuit_breaker.py`**, extracted from `daily_runner.py` with alerting
   dependency-injected (`alert_fn` param) specifically so `risk/` has zero import dependency on
   `interfaces/`, enforced by an AST-based test

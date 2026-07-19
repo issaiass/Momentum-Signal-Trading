@@ -274,6 +274,38 @@ cycle, can still trigger it, that's intentional (a genuinely diversifying-in-nam
 is worth flagging even before you hold the correlated names), but distinct from a literal
 "only my open positions" reading of the tier description.
 
+## Liquidity/Slippage Monitor [Nice-to-Have tier]
+
+`max_bid_ask_spread_pct` (default `None`, disabled): a PRE-trade real-time bid-ask spread
+check, distinct from two pre-existing execution-safety checks this project already had,
+neither of which uses a real-time quote:
+- `check_slippage_tolerance()` (POST-trade): compares the actual IBKR fill price against the
+  last daily close, after the order already executed, an alert-only check, it can never un-fill.
+- `check_capacity()` (`core/functions_quant_extensions.py`, pre-trade): flags an order size
+  exceeding `max_pct_of_adv` of a ticker's HISTORICAL average daily dollar volume, a
+  market-impact proxy, not a live spread.
+
+`fetch_bid_ask_spread()` (`execution/live_signal.py`) opens a real-time IBKR `reqMktData()`
+subscription for BID(1)/ASK(2) tick types, timeout-bounded (default `5.0`s). `compute_spread_pct()`
+is the pure math half (`(ask - bid) / midpoint`), factored out so it's unit-testable without a
+real connection, the same "pure math separated from I/O" precedent `check_slippage_tolerance()`
+already established. Wired into `place_orders_ibkr()`: when `max_bid_ask_spread_pct` is set,
+called once per ticker right before submission; a spread wider than the threshold drops the
+order (`DROPPED_WIDE_SPREAD`, the same `dropped_orders` merge pattern as `DROPPED_FRACTIONAL`/
+`DROPPED_INSUFFICIENT_CASH`, so it still shows up in the rebalance summary email's "What
+Actually Happened" column) instead of submitting it.
+
+**Real operational dependency, stated plainly, the same honesty this project applies to the
+fractional-share IBKR limitation**: real-time NBBO for US stocks/ETFs is NOT included on IBKR's
+free/delayed-data tier, confirmed against IBKR's own documentation. Without a live, paid
+real-time market-data subscription for the relevant exchange, `fetch_bid_ask_spread()` will
+time out or receive stale/frozen ticks and return `None`. A `None` quote is deliberately treated
+as "couldn't check," NOT as "spread is wide," so the order still proceeds rather than being
+silently blocked by an unrelated data-feed gap, see `docs/DEPLOYMENT.md`'s IBKR troubleshooting
+section. `None` (the default) makes ZERO new IBKR calls, byte-identical to before this feature
+existed. LIVE-ONLY, dry-run never opens an IBKR connection at all, consistent with every other
+IBKR-dependent check in this codebase.
+
 ## Recommended Config Presets
 
 These are two starting-point `default_risk` presets, one long-term (monthly), one short-term

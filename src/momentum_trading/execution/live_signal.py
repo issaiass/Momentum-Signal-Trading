@@ -1307,6 +1307,105 @@ def check_slippage_tolerance(expected_price: float, actual_price: float, toleran
     return {"exceeded": deviation > tolerance_pct, "deviation_pct": deviation}
 
 
+def compute_spread_pct(bid: float, ask: float) -> float | None:
+    """
+    Pure bid-ask spread math, factored out of fetch_bid_ask_spread() below so it's
+    unit-testable without a real (or mocked) IBKR connection, the same "pure math separated
+    from I/O" precedent check_slippage_tolerance() above already established.
+
+    Returns None for an invalid or crossed market (bid/ask <= 0, or ask <= bid), a genuine
+    real-time quote should never look like that, treat it as "no usable quote" rather than a
+    nonsensical zero/negative spread.
+    """
+    if bid <= 0 or ask <= 0 or ask <= bid:
+        return None
+    midpoint = (bid + ask) / 2
+    return (ask - bid) / midpoint
+
+
+def fetch_bid_ask_spread(ticker: str, port: int, client_id: int = 10,
+                          host: str = IBKR_HOST, timeout: float = 5.0) -> dict | None:
+    """
+    Real-time NBBO bid/ask via IBKR's reqMktData(), the PRE-trade counterpart to
+    check_slippage_tolerance()'s POST-trade fill-deviation check and
+    core/functions_quant_extensions.py's check_capacity() (a historical-ADV-based pre-trade
+    sizing check, neither of which uses a real-time quote).
+
+    Requires a live TWS/IB Gateway connection AND, per IBKR's own documented data-subscription
+    requirements, typically a paid real-time market-data subscription for the ticker's
+    exchange, real-time NBBO for US stocks/ETFs is NOT included on IBKR's free/delayed tier.
+    Confirmed against IBKR's own documentation, not assumed, same "state the real operational
+    dependency plainly" discipline this project applies to the fractional-share limitation
+    elsewhere in this file. On a free/delayed-data account this will time out (or return
+    delayed, frozen ticks that never populate both BID and ASK before the timeout); treat a
+    None return as "couldn't get a usable real-time quote," never as "the spread is fine."
+
+    Returns {'bid', 'ask', 'spread_pct'} once both BID and ASK ticks have arrived, or None on
+    timeout / no usable quote (see compute_spread_pct()).
+    """
+    try:
+        from ibapi.client import EClient
+        from ibapi.wrapper import EWrapper
+        from ibapi.contract import Contract
+    except ImportError:
+        logger.error("ibapi not installed. Run: pip install ibapi --break-system-packages")
+        return None
+
+    class QuoteApp(EWrapper, EClient):
+        def __init__(self):
+            EClient.__init__(self, self)
+            self.bid = None
+            self.ask = None
+
+        def tickPrice(self, reqId, tickType, price, attrib):
+            if price is None or price <= 0:
+                return
+            if tickType == 1:      # BID
+                self.bid = float(price)
+            elif tickType == 2:    # ASK
+                self.ask = float(price)
+
+        def error(self, reqId, errorCode, errorString, advancedOrderRejectJson=""):
+            _log_ibkr_message(reqId, errorCode, errorString)
+
+    import threading, time
+    contract = Contract()
+    contract.symbol = ticker
+    contract.secType = "STK"
+    contract.exchange = "SMART"
+    contract.currency = "USD"
+
+    app = QuoteApp()
+    app.connect(host, port, clientId=client_id)
+    thread = threading.Thread(target=app.run, daemon=True)
+    thread.start()
+    time.sleep(1.0)
+    app.reqMktData(1, contract, "", False, False, [])
+
+    waited = 0.0
+    while (app.bid is None or app.ask is None) and waited < timeout:
+        time.sleep(0.2)
+        waited += 0.2
+
+    try:
+        app.cancelMktData(1)
+    except Exception:
+        pass
+    app.disconnect()
+
+    if app.bid is None or app.ask is None:
+        logger.warning(
+            "%s: no real-time bid/ask received within %.1fs (requires a live TWS/Gateway "
+            "connection and typically a paid real-time market-data subscription), skipping "
+            "the spread check for this order.", ticker, timeout)
+        return None
+
+    spread_pct = compute_spread_pct(app.bid, app.ask)
+    if spread_pct is None:
+        return None
+    return {"bid": app.bid, "ask": app.ask, "spread_pct": spread_pct}
+
+
 def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
                        expected_prices: dict | None = None,
                        max_slippage_tolerance_pct: float | None = None,
@@ -1314,7 +1413,8 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
                        available_cash_fn=None, portfolio: str = "",
                        alerts_log_path: str = ALERTS_LOG_PATH,
                        host: str = IBKR_HOST, fill_poll_timeout: float = 60.0,
-                       allow_extended_hours: bool = False) -> dict:
+                       allow_extended_hours: bool = False,
+                       max_bid_ask_spread_pct: float | None = None) -> dict:
     """
     Requires `ibapi` (pip install ibapi --break-system-packages) and a running
     TWS or IB Gateway instance listening on `port`. Only called when --live
@@ -1352,6 +1452,15 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
         every order in this call to LMT (limit price = expected_prices[ticker] +/- a small
         buffer favoring fill likelihood) with outsideRth=True; a ticker with no entry in
         expected_prices falls back to a regular MKT order (RTH-only) instead of failing.
+    max_bid_ask_spread_pct : float, optional
+        The "Liquidity/Slippage Monitor" pre-trade gate (Nice-to-Have tier,
+        docs/RISK_CONSTRAINTS.md). None (default) makes zero new IBKR calls, byte-identical to
+        before this feature existed. When set, fetch_bid_ask_spread() is called for each ticker
+        right before it would be submitted; a spread wider than this drops the order into
+        dropped_orders (status DROPPED_WIDE_SPREAD, same merge pattern as DROPPED_FRACTIONAL/
+        DROPPED_INSUFFICIENT_CASH) instead of submitting it. A None quote (timeout / no usable
+        real-time data, see fetch_bid_ask_spread()'s own docstring) does NOT block the order,
+        "couldn't check" is treated as "proceed," not as "spread is wide."
     """
     try:
         from ibapi.client import EClient
@@ -1437,6 +1546,24 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
         order_id_to_ticker = {}
         oid = start_order_id
         for ticker, order in order_subset.items():
+            if max_bid_ask_spread_pct is not None:
+                quote = fetch_bid_ask_spread(ticker, port, host=host)
+                if quote is not None and quote["spread_pct"] > max_bid_ask_spread_pct:
+                    logger.warning(
+                        "%s: dropping %s order, bid-ask spread %.2f%% exceeds "
+                        "max_bid_ask_spread_pct %.2f%%.",
+                        ticker, order["action"], quote["spread_pct"] * 100, max_bid_ask_spread_pct * 100)
+                    dropped_orders[ticker] = {
+                        "status": "DROPPED_WIDE_SPREAD",
+                        "filled": 0.0,
+                        "avg_fill_price": 0.0,
+                    }
+                    log_alert(portfolio, "WIDE_BID_ASK_SPREAD", "WARNING",
+                              f"{ticker}: spread {quote['spread_pct']:.2%} exceeds "
+                              f"max_bid_ask_spread_pct {max_bid_ask_spread_pct:.2%}, order dropped.",
+                              log_path=alerts_log_path)
+                    continue
+
             contract = Contract()
             contract.symbol = ticker
             contract.secType = "STK"
@@ -1763,7 +1890,8 @@ def run(
                                           max_slippage_tolerance_pct=cfg.max_slippage_tolerance_pct,
                                           auto_reduce_on_insufficient_cash=cfg.auto_reduce_buys_on_insufficient_cash,
                                           portfolio=portfolio, alerts_log_path=alerts_log_path,
-                                          allow_extended_hours=cfg.allow_extended_hours)
+                                          allow_extended_hours=cfg.allow_extended_hours,
+                                          max_bid_ask_spread_pct=cfg.max_bid_ask_spread_pct)
         for ticker, fill in fill_results.items():
             if ticker in orders:
                 orders[ticker]["fill_status"] = fill["status"]

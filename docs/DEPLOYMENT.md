@@ -552,6 +552,21 @@ is back up, which plain cron does not do automatically.
   hours, expect a real chance of no fill, a partial fill, or a materially worse price than the
   same order would get during RTH; this is a genuine economic trade-off, not a technical
   toggle. See `RUNNING.md` section 4.14 and `config.example.yaml`.
+- **`max_bid_ask_spread_pct` is set but every order still submits, or the run logs "no
+  real-time bid/ask received within Ns" for every ticker.** Not a bug, this is the documented,
+  expected behavior on an account without a real-time market-data subscription for that
+  ticker's exchange. `fetch_bid_ask_spread()` (`execution/live_signal.py`) requires a REAL
+  TWS/Gateway connection AND, per IBKR's own account/subscription rules, typically a PAID
+  real-time market-data subscription, real-time NBBO for US stocks/ETFs is not included on
+  IBKR's free/delayed tier, confirmed against IBKR's own documentation, not assumed. On a
+  free/delayed-data account, `tickPrice()` either never fires for tick types BID(1)/ASK(2)
+  within the timeout, or fires with stale/frozen values that never populate both sides in time,
+  either way `fetch_bid_ask_spread()` returns `None`, and a `None` quote is deliberately treated
+  as "couldn't check" rather than "spread is wide," so the order proceeds rather than being
+  silently blocked by an unrelated data-feed gap. If you need this constraint to actually gate
+  orders, confirm you have a live, paid real-time market-data subscription active for the
+  relevant exchange in your IBKR account settings, a paper account (port 7497) can still have
+  real-time data if the subscription is attached to the underlying account.
 
 ## Going live for real (not dry-run)
 

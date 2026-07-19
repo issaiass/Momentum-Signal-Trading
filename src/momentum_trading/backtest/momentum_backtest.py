@@ -287,6 +287,15 @@ class BacktestConfig:
     max_slippage_tolerance_pct: float | None = None  # e.g. 0.02, alert (not un-fill) if actual fill deviates from expected price by more than this
     max_price_staleness_minutes: int | None = None   # e.g. 30, abort the run rather than trade on a price feed older than this
     max_holding_days: int | None = None              # e.g. 90, force-exit a position after N days regardless of price (time-based stop)
+    max_bid_ask_spread_pct: float | None = None       # the "Liquidity/Slippage Monitor" constraint
+                                             # (Nice-to-Have tier, docs/RISK_CONSTRAINTS.md).
+                                             # None (default) = disabled, LIVE-ONLY, requires a
+                                             # real TWS/Gateway connection with a real-time
+                                             # market-data subscription (see
+                                             # execution/live_signal.py's
+                                             # fetch_bid_ask_spread()). e.g. 0.01 = drop an
+                                             # order (DROPPED_WIDE_SPREAD) rather than submit it
+                                             # into a real-time bid-ask spread wider than 1%.
 
     # --- Alternative position-sizing method ---
     sizing_method: str = "inverse_vol"   # "inverse_vol" (default) or "score_proportional"
@@ -348,6 +357,8 @@ class BacktestConfig:
             errors.append(f"max_dollar_drawdown ({self.max_dollar_drawdown}) must be > 0 or None")
         if self.max_slippage_tolerance_pct is not None and not (0 < self.max_slippage_tolerance_pct <= 1.0):
             errors.append(f"max_slippage_tolerance_pct ({self.max_slippage_tolerance_pct}) should be in (0, 1.0] or None")
+        if self.max_bid_ask_spread_pct is not None and not (0 < self.max_bid_ask_spread_pct <= 1.0):
+            errors.append(f"max_bid_ask_spread_pct ({self.max_bid_ask_spread_pct}) should be in (0, 1.0] or None")
         if self.max_price_staleness_minutes is not None and self.max_price_staleness_minutes <= 0:
             errors.append(f"max_price_staleness_minutes ({self.max_price_staleness_minutes}) must be > 0 or None")
         if self.max_holding_days is not None and self.max_holding_days <= 0:

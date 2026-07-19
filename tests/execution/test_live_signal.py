@@ -1346,6 +1346,77 @@ class TestFractionalOrderFlooring:
         assert submission_log == [("BUY", "BUY1", 5)]
 
 
+class TestBidAskSpreadGate:
+    """
+    max_bid_ask_spread_pct's pre-trade gate in place_orders_ibkr() (Epic 6 of the layered
+    risk-management plan, "Liquidity/Slippage Monitor", Nice-to-Have tier). Mocks
+    fetch_bid_ask_spread() directly (its own real IBKR reqMktData() call can't be exercised in
+    this test suite, same disclosed limitation as place_orders_ibkr() itself, only the pure
+    compute_spread_pct() half is unit-tested independently), matching this file's existing
+    "mock the I/O boundary, test the wiring" pattern.
+    """
+
+    def test_wide_spread_ticker_is_dropped_and_excluded_from_submission(self, monkeypatch, tmp_path):
+        import momentum_trading.execution.live_signal as ls
+        submission_log = []
+        _install_fake_ibkr(monkeypatch, submission_log)
+        monkeypatch.setattr(ls, "fetch_bid_ask_spread",
+                             lambda ticker, port, **k: {"bid": 99.0, "ask": 101.0, "spread_pct": 0.02})
+
+        orders = {"WIDE1": {"action": "BUY", "shares": 5}}
+        result = ls.place_orders_ibkr(orders, port=9999, max_bid_ask_spread_pct=0.01,
+                                       alerts_log_path=str(tmp_path / "alerts_log.csv"))
+
+        assert submission_log == []  # never reached real order submission
+        assert result == {"WIDE1": {"status": "DROPPED_WIDE_SPREAD", "filled": 0.0, "avg_fill_price": 0.0}}
+
+    def test_normal_spread_ticker_submits_as_before(self, monkeypatch, tmp_path):
+        import momentum_trading.execution.live_signal as ls
+        submission_log = []
+        _install_fake_ibkr(monkeypatch, submission_log)
+        monkeypatch.setattr(ls, "fetch_bid_ask_spread",
+                             lambda ticker, port, **k: {"bid": 99.95, "ask": 100.05, "spread_pct": 0.001})
+
+        orders = {"TIGHT1": {"action": "BUY", "shares": 5}}
+        result = ls.place_orders_ibkr(orders, port=9999, max_bid_ask_spread_pct=0.01,
+                                       alerts_log_path=str(tmp_path / "alerts_log.csv"))
+
+        assert submission_log == [("BUY", "TIGHT1", 5)]
+        assert result["TIGHT1"]["status"] == "Filled"
+
+    def test_default_none_never_calls_the_spread_fetch_at_all(self, monkeypatch, tmp_path):
+        # Regression: max_bid_ask_spread_pct=None (the default) must be byte-identical to
+        # before this feature existed, zero new IBKR calls, every pre-existing call site
+        # (no max_bid_ask_spread_pct passed) is unaffected.
+        import momentum_trading.execution.live_signal as ls
+        submission_log = []
+        _install_fake_ibkr(monkeypatch, submission_log)
+        calls = []
+        monkeypatch.setattr(ls, "fetch_bid_ask_spread", lambda ticker, port, **k: calls.append(ticker))
+
+        orders = {"BUY1": {"action": "BUY", "shares": 5}}
+        ls.place_orders_ibkr(orders, port=9999, alerts_log_path=str(tmp_path / "alerts_log.csv"))
+
+        assert calls == []
+        assert submission_log == [("BUY", "BUY1", 5)]
+
+    def test_none_quote_result_does_not_block_the_order(self, monkeypatch, tmp_path):
+        # fetch_bid_ask_spread() returns None on a timeout/no-usable-quote (e.g. no real-time
+        # market-data subscription), treated as "couldn't check," not as "spread is wide,"
+        # the order still submits rather than being blocked by an unrelated data-feed gap.
+        import momentum_trading.execution.live_signal as ls
+        submission_log = []
+        _install_fake_ibkr(monkeypatch, submission_log)
+        monkeypatch.setattr(ls, "fetch_bid_ask_spread", lambda ticker, port, **k: None)
+
+        orders = {"BUY1": {"action": "BUY", "shares": 5}}
+        result = ls.place_orders_ibkr(orders, port=9999, max_bid_ask_spread_pct=0.01,
+                                       alerts_log_path=str(tmp_path / "alerts_log.csv"))
+
+        assert submission_log == [("BUY", "BUY1", 5)]
+        assert result["BUY1"]["status"] == "Filled"
+
+
 class TestExtendedHoursOrders:
     """
     IBKR/exchanges reject plain MKT orders outside regular trading hours (error 201, "Exchange

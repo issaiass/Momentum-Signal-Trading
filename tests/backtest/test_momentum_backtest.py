@@ -98,6 +98,15 @@ class TestBacktestConfigValidation:
         with pytest.raises(ValueError, match="defensive_ticker"):
             BacktestConfig(defensive_ticker="   ")
 
+    def test_max_bid_ask_spread_pct_defaults_none(self):
+        assert BacktestConfig().max_bid_ask_spread_pct is None
+
+    def test_max_bid_ask_spread_pct_out_of_range_raises(self):
+        with pytest.raises(ValueError, match="max_bid_ask_spread_pct"):
+            BacktestConfig(max_bid_ask_spread_pct=0.0)
+        with pytest.raises(ValueError, match="max_bid_ask_spread_pct"):
+            BacktestConfig(max_bid_ask_spread_pct=1.5)
+
     def test_persist_dry_run_state_defaults_false(self):
         # Default false preserves dry-run's existing behavior exactly: current_positions is {}
         # on every invocation, this must never flip on by accident from an old config.yaml.

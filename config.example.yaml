@@ -266,6 +266,18 @@ default_risk:
                                        # of price. Applies to both backtest and --live
                                        # (live derives "days held" from the trade log); respects
                                        # auto_execute_stop_loss (flag-only vs. auto-exit) in live.
+  max_bid_ask_spread_pct: null        # the "Liquidity/Slippage Monitor" constraint (Nice-to-Have
+                                       # tier, docs/RISK_CONSTRAINTS.md). null (default) =
+                                       # disabled. LIVE-ONLY, requires a real TWS/Gateway
+                                       # connection AND, per IBKR's own rules, typically a paid
+                                       # real-time market-data subscription for the ticker's
+                                       # exchange, real-time NBBO is not included on IBKR's free/
+                                       # delayed tier. e.g. 0.01 = drop an order (logged as
+                                       # DROPPED_WIDE_SPREAD) rather than submit it into a
+                                       # real-time bid-ask spread wider than 1%. A timeout / no
+                                       # usable quote does NOT block the order, only a
+                                       # confirmed-wide spread does. See docs/DEPLOYMENT.md's
+                                       # IBKR troubleshooting section.
 
 # Account-wide Drawdown Circuit Breaker (Recommended tier, docs/RISK_CONSTRAINTS.md),
 # deliberately a TOP-LEVEL field, not inside default_risk/risk_overrides: it's account-scoped,

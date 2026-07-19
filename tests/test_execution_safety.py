@@ -14,7 +14,9 @@ import pandas as pd
 import pytest
 
 from momentum_trading.backtest.momentum_backtest import BacktestConfig, run_custom_backtest
-from momentum_trading.execution.live_signal import check_slippage_tolerance, check_price_staleness
+from momentum_trading.execution.live_signal import (
+    check_slippage_tolerance, check_price_staleness, compute_spread_pct,
+)
 
 
 class TestDollarDrawdownBreaker:
@@ -85,6 +87,33 @@ class TestSlippageToleranceCheck:
     def test_config_validates_out_of_range(self):
         with pytest.raises(ValueError, match="max_slippage_tolerance_pct"):
             BacktestConfig(max_slippage_tolerance_pct=1.5)
+
+
+class TestComputeSpreadPct:
+    """
+    compute_spread_pct(), the pure bid-ask spread math factored out of
+    fetch_bid_ask_spread() (Epic 6 of the layered risk-management plan, "Liquidity/Slippage
+    Monitor", Nice-to-Have tier), the same "pure math separated from I/O" precedent
+    check_slippage_tolerance() above already established, this half IS unit-testable without a
+    real (or mocked) IBKR connection, unlike fetch_bid_ask_spread() itself.
+    """
+
+    def test_hand_computed_spread(self):
+        # spread = (ask - bid) / midpoint = (100.10 - 100.00) / 100.05
+        result = compute_spread_pct(bid=100.00, ask=100.10)
+        assert result == pytest.approx(0.10 / 100.05)
+
+    def test_zero_bid_returns_none(self):
+        assert compute_spread_pct(bid=0.0, ask=100.0) is None
+
+    def test_zero_ask_returns_none(self):
+        assert compute_spread_pct(bid=100.0, ask=0.0) is None
+
+    def test_crossed_market_returns_none(self):
+        # ask <= bid should never happen for a genuine real-time quote, treat it as "no usable
+        # quote" rather than a nonsensical negative spread.
+        assert compute_spread_pct(bid=100.0, ask=99.0) is None
+        assert compute_spread_pct(bid=100.0, ask=100.0) is None
 
 
 class TestStalePriceFeedProtection:

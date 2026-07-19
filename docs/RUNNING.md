@@ -54,7 +54,9 @@ portfolios:
   portfolio1:
     tickers: [SPY, QQQ, XLK, XLF, XLE, XLY, XLP, XLU, GLD, TLT, BIL]
     custom_weights: null
-    total_value: null        # gets the REMAINDER of the account after portfolio2's $2,500
+    total_value: null        # gets a share of the REMAINDER of the account after
+                              # portfolio2's $2,500 (split equally if other portfolios
+                              # are also null, see worked example below)
 
   portfolio2:
     tickers: [XLF, XLE, GLD, TLT]
@@ -65,14 +67,24 @@ portfolios:
                                # independent of default_risk.top_n or any other portfolio
 ```
 
-- `total_value: null` → **not** "pull the full account value", it's the real account's
-  NetLiquidation *minus every other portfolio's fixed `total_value`* (only meaningful with
-  `--live`; dry-run uses a flat $1000 placeholder instead, unaffected by other portfolios,
-  since dry-run tests signal/order logic, not real capital math). At most **one** portfolio in
-  the whole file may be `null`, `daily-runner` refuses to start otherwise (the "remainder" is
-  ambiguous with more than one candidate). If the other portfolios' fixed allocations already
-  consume the whole account, the run aborts with an alert email rather than proceeding with
-  zero/negative capital.
+- `total_value: null` → **not** "pull the full account value", it's a share of the real
+  account's NetLiquidation *minus every fixed (non-null) portfolio's `total_value`* (only
+  meaningful with `--live`; dry-run gives each null portfolio its own flat $1000 placeholder
+  instead, unaffected by other portfolios, since dry-run tests signal/order logic, not real
+  capital math). **Any number** of portfolios in the whole file may be `null` (zero, one, or
+  several), fixed portfolios' capital is always reserved first regardless of how many null
+  portfolios exist. If two or more portfolios are `null`, the remainder is split **equally**
+  among them, e.g. a $10,000 account with portfolio2's $2,500 fixed and two null portfolios
+  (portfolio1 and a hypothetical portfolio3) gives each null portfolio `($10,000 - $2,500) / 2
+  = $3,750`; three null portfolios and no fixed ones on a $9,000 account gives each $3,000. This
+  guarantees the sum of every portfolio's resolved capital never exceeds the real account value,
+  by construction. If the fixed portfolios already consume the whole account (remainder `<= 0`),
+  the run aborts with a `CAPITAL_ALLOCATION_ERROR` alert email naming every null portfolio that
+  would have shared it, rather than proceeding with zero/negative capital. Each portfolio's
+  resolved capital is logged once at startup (`Portfolio '<name>' resolved total_value:
+  $<amount>`), that's the authoritative number to use for `risk_monitor.py`'s
+  `--initial-capital` on a null portfolio, see `docs/DEPLOYMENT.md`'s "Independent risk
+  oversight" section, `risk_monitor.py` cannot compute this split itself.
 - `total_value: <number>` → uses that fixed dollar amount every run, useful for allocating a
   specific slice of a larger account to one strategy variant, or for sub-account-style testing.
   If every portfolio uses a fixed number and they sum to more than the real account value,

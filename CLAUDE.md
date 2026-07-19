@@ -307,8 +307,30 @@ that tests enforce, don't casually violate these when editing:
 
 **Config flow**: `config.yaml` (gitignored; copy from `config.example.yaml`) →
 `daily_runner.load_config()` builds one `BacktestConfig` per portfolio from
-`default_risk` + that portfolio's `risk_overrides`. `total_value: null` means pull real
-`NetLiquidation` from IBKR (`--live` only); a number means a fixed capital baseline.
+`default_risk` + that portfolio's `risk_overrides`. A `total_value: <number>` means a fixed
+capital baseline, used as-is every run, never auto-refreshed against real account P&L
+(intentional, an explicit allocation ceiling, not auto-compounding, see the `total_value` drift
+warning above). `total_value: null` does NOT mean "pull the full account value", it means "a
+share of the real IBKR account's NetLiquidation, after every fixed (non-null) portfolio's
+`total_value` is reserved first." `resolve_total_values()` (`daily_runner.py`, called once
+before the per-portfolio loop, independent of any portfolio's momentum regime) computes this:
+`validate_config_schema()` no longer restricts how many portfolios may be `null` (zero, one, or
+several), and if MORE than one portfolio is null, the remainder is split EQUALLY across all of
+them, e.g. a $10,000 account with one $2,500 fixed portfolio and two null portfolios gives each
+null portfolio $3,750, not $7,500 each (which would double-count the same real capital). This
+guarantees `sum(resolved.values()) <= account_value` by construction (fixed portfolios' sum plus
+equal shares of a bounded remainder can never exceed it), and `resolve_total_values()` hard-fails
+(`raise ValueError`, naming every affected null portfolio) if the fixed portfolios already
+consume the whole account before any null portfolio gets a share. In dry-run mode, EACH null
+portfolio independently gets a flat $1000 placeholder (not divided among them, not reduced by
+other portfolios' `total_value`), dry-run tests signal/order-generation LOGIC, not real capital
+math, don't route dry-run through the real-remainder calculation. Each portfolio's resolved
+capital is logged once at startup (`Portfolio '<name>' resolved total_value: $<amount>`), this
+equal-split math is DELIBERATELY invisible to `risk_monitor.py` (same independence principle as
+the six risk constraints below), so a null portfolio's `risk_monitor.py` cron entry needs its
+resolved share passed explicitly via `--initial-capital`, read off that startup log line, not
+hand-computed from `config.yaml` alone, see `docs/DEPLOYMENT.md`'s "Independent risk oversight"
+section.
 
 **Safety defaults that are load-bearing, not incidental**, never change these without an
 explicit user ask: dry-run is the *unflagged default* (`--live` is opt-in, and there is no

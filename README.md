@@ -48,7 +48,10 @@ README says so on purpose.
   `docs/DEPLOYMENT.md`), optional extended-hours (pre-market/after-hours) trading via
   `allow_extended_hours` (switches to LMT + `outsideRth`, since MKT never works outside RTH)
 - Multi-portfolio orchestration on one shared IBKR account, with capital-allocation and
-  ticker-overlap safety checks
+  ticker-overlap safety checks. Any number of portfolios may use `total_value: null` ("give me
+  capital"); fixed (non-null) portfolios reserve their capital first, and if multiple portfolios
+  are null, they split the remaining account value equally, the resolved sum across every
+  portfolio can never exceed the real account value, see `docs/RUNNING.md`
 - Portfolio-level circuit breaker (% and $ drawdown), idempotent daily scheduling, config-approval
   gate before `--live` will run. Monthly (default) or weekly rebalancing, both targeting the
   first real NYSE trading day of the period via `pandas_market_calendars`, automatically rolling
@@ -209,7 +212,7 @@ momentum-trading/
 │       └── email_diagnostics.py     backs `daily-runner --test-email`, live SMTP+IMAP
 │                                     check independent of config.yaml
 │
-└── tests/                         pytest suite (449 tests), mirrors src/ layout where a
+└── tests/                         pytest suite (455 tests), mirrors src/ layout where a
     ├── conftest.py                  test's primary subject is a single sub-package;
     ├── test_architecture.py         cross-cutting/integration tests stay at tests/ root
     ├── test_daily_runner.py

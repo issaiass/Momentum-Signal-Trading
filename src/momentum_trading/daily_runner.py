@@ -288,23 +288,13 @@ def validate_config_schema(raw: dict, path: str) -> None:
     if default_risk and not isinstance(default_risk, dict):
         errors.append(f"top-level default_risk: must be a mapping, got {type(default_risk).__name__}")
 
-    # --- At most one portfolio may use total_value: null.
-    #     null means "the rest of the account after other portfolios' fixed allocations",
-    #     with 2+ null portfolios that's ambiguous (which one gets the
-    #     remainder?), and the OLD behavior (each independently pulling the FULL account
-    #     value) silently double/triple-counts the same real capital. Fail fast here
-    #     rather than let that reach a --live run. ---
-    null_portfolios = [
-        name for name, spec in raw.get("portfolios", {}).items()
-        if isinstance(spec, dict) and spec.get("total_value") is None
-    ]
-    if len(null_portfolios) > 1:
-        errors.append(
-            f"portfolios with total_value: null: {sorted(null_portfolios)}, at most ONE "
-            f"portfolio may use null (it means \"account value minus every other portfolio's "
-            f"total_value\", which is ambiguous with more than one). Assign an explicit "
-            f"total_value to all but one of these."
-        )
+    # --- total_value: null is valid for ANY number of portfolios (zero, one, or several).
+    #     null means "an equal share of the account remainder after every fixed portfolio's
+    #     allocation", resolve_total_values() splits the remainder equally across every null
+    #     portfolio (its own hard remainder<=0 check still fires if fixed portfolios already
+    #     consume the whole account, regardless of how many null portfolios would share it).
+    #     No schema-level restriction needed here anymore, see resolve_total_values() for the
+    #     split logic itself. ---
 
     # --- notifications.send_warning must be a real bool if present.
     #     This field controls whether the capital-safety warnings (over-allocation,
@@ -663,21 +653,22 @@ def check_and_apply_email_commands(portfolio_names: list[str], ibkr_port: int, d
 # --------------------------------------------------------------------------- #
 def resolve_total_values(portfolios: dict, dry_run: bool, account_value_fn=None) -> dict:
     """
-    total_value: null means "the rest of the account after every OTHER portfolio's
-    fixed total_value", not "the full account", which would silently double-count
-    real capital across portfolios sharing one IBKR account. validate_config_schema()
-    guarantees at most one portfolio has total_value: null, so this never has to
-    choose between multiple candidates.
+    total_value: null means "an equal share of the account remainder after every fixed
+    portfolio's total_value is reserved", not "the full account", which would silently
+    double-count real capital across portfolios sharing one IBKR account. Zero, one, or
+    several portfolios may be null (validate_config_schema() no longer restricts this),
+    the remainder is split equally across every null portfolio.
 
     account_value_fn : callable() -> float, injected (not called directly) so this
-    is unit-testable without a real IBKR connection. Only invoked in --live mode for
-    a portfolio that actually needs it (has total_value: null).
+    is unit-testable without a real IBKR connection. Only invoked in --live mode when
+    at least one portfolio needs it (has total_value: null).
 
     Returns {name: resolved_total_value}. In --live mode, raises ValueError if the
-    null portfolio's remainder would be <= 0 (the other portfolios' fixed allocations
-    already consume the whole account), proceeding with zero/negative real capital
-    is never safe. In dry-run, the null portfolio always gets a flat $1000 placeholder
-    (NOT reduced by other portfolios' total_value), dry-run exists to test signal/
+    shared remainder would be <= 0 (the other portfolios' fixed allocations already
+    consume the whole account), proceeding with zero/negative real capital is never
+    safe; the error names every null portfolio that would have shared it. In dry-run,
+    EACH null portfolio independently gets a flat $1000 placeholder (NOT divided among
+    them, NOT reduced by other portfolios' total_value), dry-run exists to test signal/
     order-generation LOGIC, not to validate real capital math, and there is no real
     account to compute an actual remainder against; forcing dry-run to also enforce
     the remainder check would break dry-run-testing of configs that work fine live
@@ -689,20 +680,22 @@ def resolve_total_values(portfolios: dict, dry_run: bool, account_value_fn=None)
 
     resolved = dict(fixed)
     if null_names:
-        null_name = null_names[0]
         if dry_run:
-            resolved[null_name] = 1000.0
+            for null_name in null_names:
+                resolved[null_name] = 1000.0
         else:
             account_value = account_value_fn()
             remainder = account_value - sum_of_fixed
             if remainder <= 0:
                 raise ValueError(
-                    f"portfolio '{null_name}' (total_value: null) would receive "
+                    f"portfolios {sorted(null_names)} (total_value: null) would share "
                     f"${remainder:,.2f} (account value ${account_value:,.2f} minus other "
                     f"portfolios' fixed total_value ${sum_of_fixed:,.2f}), those portfolios "
                     f"already consume the whole account."
                 )
-            resolved[null_name] = remainder
+            per_null_share = remainder / len(null_names)
+            for null_name in null_names:
+                resolved[null_name] = per_null_share
 
     return resolved
 
@@ -860,6 +853,16 @@ def main():
                   log_path=ALERTS_LOG_PATH)
         send_alert_email("daily_runner: capital allocation error", str(e))
         sys.exit(1)
+
+    # --- Log each portfolio's resolved capital, this is the authoritative number a human
+    #     should read off when setting risk_monitor.py's --initial-capital for a
+    #     total_value: null portfolio, risk_monitor.py cannot compute an equal-split share
+    #     itself (it never imports this module's allocation logic), see
+    #     docs/DEPLOYMENT.md's "Independent risk oversight" section. ---
+    for name, value in resolved_total_values.items():
+        is_null = portfolios[name]["total_value"] is None
+        logger.info("Portfolio '%s' resolved total_value: $%.2f%s", name, value,
+                    " (split from total_value: null)" if is_null else "")
 
     if args.live and len(portfolios) > 1 and all(s["total_value"] is not None for s in portfolios.values()):
         # No null portfolio, resolve_total_values() had no reason to fetch the real

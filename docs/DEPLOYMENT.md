@@ -374,6 +374,23 @@ entries are controlled separately, by `RISK_MONITOR_PORTFOLIOS` (space-separated
 add their names to `RISK_MONITOR_PORTFOLIOS` too, or they'll silently get no automated risk
 oversight even though they're trading normally.
 
+**`total_value: null` portfolios need an explicit `--initial-capital` here.** `config.yaml`
+allows any number of portfolios to use `total_value: null` at once, `daily_runner.py`'s
+`resolve_total_values()` splits the account remainder (after every fixed portfolio's own
+`total_value` is reserved) equally across all of them, this equal-split math lives entirely
+in `daily_runner.py` and is deliberately invisible to `risk_monitor.py` (same independence
+principle as the six advisory risk constraints in `docs/RISK_CONSTRAINTS.md`, a bug in the
+allocation logic must not also blind the thing watching for it). `risk_monitor.py`'s own
+`load_initial_capital()` fallback reads `config.yaml`'s `total_value` directly and gets `None`
+for any null portfolio, `main()` then `raise SystemExit`s without an explicit
+`--initial-capital`. `docker-entrypoint.sh`'s auto-generated `RISK_MONITOR_PORTFOLIOS` cron
+lines never pass `--initial-capital`, so **every null portfolio's cron entry must be edited by
+hand** to add its computed equal-split share. Read the authoritative, current number off
+`daily_runner.py`'s own startup log line (`Portfolio '<name>' resolved total_value: $<amount>
+(split from total_value: null)`, logged once per run before the rebalance loop starts), don't
+hand-compute it from `config.yaml` alone, it changes if the set of fixed/null portfolios or the
+real account value changes. Recompute and re-edit the cron line any time either changes.
+
 Manual/one-off invocation:
 
 ```bash

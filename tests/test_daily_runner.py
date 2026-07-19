@@ -69,16 +69,15 @@ class TestConfigSchemaValidation:
         with pytest.raises(ValueError, match="total_value"):
             validate_config_schema(bad, "test.yaml")
 
-    def test_two_null_total_values_raises(self):
-        # total_value: null means "account remainder", which is
-        # ambiguous with more than one candidate, must fail at load time, not
-        # silently double-count real capital across portfolios sharing an account.
-        bad = {"portfolios": {
+    def test_multiple_null_total_values_is_now_valid(self):
+        # total_value: null means "an equal share of the account remainder", multiple null
+        # portfolios split that remainder equally (resolve_total_values()), no longer an
+        # ambiguous/rejected configuration, this must pass schema validation cleanly.
+        ok = {"portfolios": {
             "p1": {"tickers": ["SPY"], "total_value": None},
             "p2": {"tickers": ["QQQ"], "total_value": None},
         }}
-        with pytest.raises(ValueError, match="p1.*p2|p2.*p1"):
-            validate_config_schema(bad, "test.yaml")
+        validate_config_schema(ok, "test.yaml")  # should not raise
 
     def test_single_null_total_value_is_valid(self):
         ok = {"portfolios": {
@@ -1108,6 +1107,62 @@ class TestResolveTotalValues:
         portfolios = {"p1": {"total_value": None, "tickers": ["SPY"]}}
         resolved = resolve_total_values(portfolios, dry_run=True, account_value_fn=boom)
         assert resolved == {"p1": 1000.0}
+
+    def test_two_null_portfolios_split_the_remainder_equally(self):
+        # $10,000 account, portfolio3 fixed at $2,500 -> remainder $7,500, split equally
+        # between the two null portfolios -> $3,750 each, not $7,500 each (which would
+        # double-count the same real capital) and not a KeyError for the second one.
+        portfolios = {
+            "portfolio1": {"total_value": None, "tickers": ["SPY"]},
+            "portfolio2": {"total_value": None, "tickers": ["QQQ"]},
+            "portfolio3": {"total_value": 2500.0, "tickers": ["XLF"]},
+        }
+        resolved = resolve_total_values(portfolios, dry_run=False, account_value_fn=lambda: 10000.0)
+        assert resolved == {
+            "portfolio3": 2500.0, "portfolio1": 3750.0, "portfolio2": 3750.0,
+        }
+
+    def test_three_null_portfolios_no_fixed_split_the_whole_account(self):
+        # No fixed portfolios at all, the full account value IS the remainder, split three ways.
+        portfolios = {
+            "p1": {"total_value": None, "tickers": ["SPY"]},
+            "p2": {"total_value": None, "tickers": ["QQQ"]},
+            "p3": {"total_value": None, "tickers": ["XLF"]},
+        }
+        resolved = resolve_total_values(portfolios, dry_run=False, account_value_fn=lambda: 9000.0)
+        assert resolved == {"p1": 3000.0, "p2": 3000.0, "p3": 3000.0}
+
+    def test_resolved_capital_sums_to_exactly_the_account_value(self):
+        # Explicit "sum <= real account value" guarantee (in fact ==, when any null
+        # portfolio exists, the remainder is fully consumed, never left over or exceeded).
+        portfolios = {
+            "p1": {"total_value": None, "tickers": ["SPY"]},
+            "p2": {"total_value": None, "tickers": ["QQQ"]},
+            "p3": {"total_value": 1234.56, "tickers": ["XLF"]},
+        }
+        resolved = resolve_total_values(portfolios, dry_run=False, account_value_fn=lambda: 50000.0)
+        assert sum(resolved.values()) == pytest.approx(50000.0)
+
+    def test_remainder_at_or_below_zero_with_multiple_nulls_raises_and_names_them(self):
+        portfolios = {
+            "portfolio1": {"total_value": None, "tickers": ["SPY"]},
+            "portfolio2": {"total_value": None, "tickers": ["QQQ"]},
+            "portfolio3": {"total_value": 10000.0, "tickers": ["XLF"]},
+        }
+        with pytest.raises(ValueError, match="portfolio1.*portfolio2|portfolio2.*portfolio1"):
+            resolve_total_values(portfolios, dry_run=False, account_value_fn=lambda: 10000.0)
+
+    def test_dry_run_multiple_null_portfolios_each_get_the_full_flat_placeholder(self):
+        # Consistent with the existing single-null precedent: dry-run tests signal/order-
+        # generation LOGIC, not real capital math, each null portfolio independently gets
+        # $1000, NOT divided among them (dry-run deliberately doesn't model portfolios
+        # competing for the same real capital).
+        portfolios = {
+            "p1": {"total_value": None, "tickers": ["SPY"]},
+            "p2": {"total_value": None, "tickers": ["QQQ"]},
+        }
+        resolved = resolve_total_values(portfolios, dry_run=True)
+        assert resolved == {"p1": 1000.0, "p2": 1000.0}
 
 
 class TestCheckTickerOverlap:

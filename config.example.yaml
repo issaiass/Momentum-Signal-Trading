@@ -230,12 +230,23 @@ portfolios:
   portfolio1:
     tickers: [SPY, QQQ, XLK, XLF, XLE, XLY, XLP, XLU, GLD, TLT, BIL]
     custom_weights: null          # null = algorithmic inverse-vol sizing
-    total_value: null             # null = this portfolio gets the REMAINDER of the real IBKR
-                                   # account value after every OTHER portfolio's fixed
-                                   # total_value is subtracted (--live only; dry-run uses a flat
-                                   # $1000 placeholder instead). At most ONE portfolio across
-                                   # this whole file may be null, validated at load time,
-                                   # since "remainder" is ambiguous with more than one.
+    total_value: null             # null = this portfolio gets a share of the REMAINDER of the
+                                   # real IBKR account value after every OTHER portfolio's fixed
+                                   # total_value is subtracted first (--live only; dry-run gives
+                                   # each null portfolio its own flat $1000 placeholder instead,
+                                   # never divided). ANY number of portfolios across this whole
+                                   # file may be null (zero, one, or several); if more than one
+                                   # is null, the remainder is split EQUALLY among them, e.g. a
+                                   # $10,000 account with one $2,500 fixed portfolio and two null
+                                   # portfolios gives each null portfolio $3,750. Refuses to run
+                                   # (ValueError) if the fixed portfolios already consume the
+                                   # whole account, naming every null portfolio that would have
+                                   # shared a zero/negative remainder. A total_value: null
+                                   # portfolio's resolved capital is NOT visible to
+                                   # risk_monitor.py (deliberately independent, see
+                                   # docs/DEPLOYMENT.md's "Independent risk oversight" section),
+                                   # read it off daily_runner's own startup log line and pass it
+                                   # explicitly via risk_monitor.py's --initial-capital.
     # risk_overrides:              # optional: override ANY default_risk field for THIS
     #   stop_loss_pct: 0.10         # portfolio only, e.g. a tighter stop, a different top_n
     #   top_n: 5                    # than the default (see portfolio2 below), a shorter/longer

@@ -4,9 +4,32 @@
 > risk constraints specifically: what each one checks, why, whether it's a non-blocking WARNING
 > or an opt-in config toggle, and its exact default.
 
-All six constraints below live entirely in the `daily_runner.py`/`execution/live_signal.py` live
-path. None of them are visible to `risk/risk_monitor.py`, that's deliberate, not an oversight,
-see "Independence from `risk_monitor.py`" at the bottom of this file.
+## The full risk-strategy tier map
+
+The table below is the complete picture: the seven risk-strategy tiers institutions/hedge funds
+commonly layer on a momentum book, cross-referenced against what this project actually
+implements. Everything marked Implemented composes as a SEQUENTIAL PIPELINE (signal generation
+-> Absolute Momentum pick-list filter -> position sizing -> Position Size Hard-Cap -> Volatility
+Scaling exposure throttle -> regime filter/Correlation Monitor further de-risking -> order
+generation -> Liquidity/Slippage pre-trade gate -> order submission), plus the circuit breakers
+sitting outside that pipeline entirely as an independent backstop, NOT a menu of mutually
+exclusive choices, matching both real systematic-fund practice and this codebase's own
+pre-existing shared-sizing-pipeline architecture (`resolve_target_weights()`).
+
+| Tier | Strategy | Status |
+|---|---|---|
+| Mandatory | Volatility Scaling | **Implemented**, position-level (pre-existing) + portfolio-level (live-wired here for the first time), see "Volatility Scaling (Portfolio-Level)" below |
+| Mandatory | Absolute Momentum (Macro) | **Implemented**, a benchmark trend filter (pre-existing) + a per-ticker dual-momentum overlay (wired in here for the first time), see "Absolute Momentum (Macro)" below |
+| Mandatory | Position Size Hard-Cap | **Implemented** (pre-existing, shared live+backtest), see "Position Size Hard-Cap" below |
+| Recommended | Drawdown Circuit Breaker | **Implemented**, per-portfolio (pre-existing) + account-wide (new here), see "Drawdown Circuit Breaker" below |
+| Recommended | Correlation Monitor | **Implemented** (pre-existing, live-wired), see "Correlation Monitor" below |
+| Nice to Have | Liquidity/Slippage Monitor | **Implemented**, a pre-trade real-time bid-ask spread gate (new here), see "Liquidity/Slippage Monitor" below |
+| Nice to Have | Hard-to-Borrow (HTB) Sentinel | **Not Applicable**, this system is strictly long-only, no short legs exist to protect, see "Hard-to-Borrow (HTB) Sentinel" below |
+
+Everything in this table lives entirely in the `daily_runner.py`/`execution/live_signal.py`/
+`backtest/momentum_backtest.py` live+backtest path. None of it is visible to
+`risk/risk_monitor.py`, that's deliberate, not an oversight, see "Independence from
+`risk_monitor.py`" at the bottom of this file.
 
 ## Advisory constraints (non-blocking WARNING, logged and emailed)
 

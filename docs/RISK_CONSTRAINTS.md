@@ -244,6 +244,36 @@ capital-preservation kill-switch property, not a bug. Delete
 fresh account-wide peak baseline despite an unrecovered loss, only as a deliberate, reviewed
 decision.
 
+## Correlation Monitor [Recommended tier]
+
+Already fully implemented and live-wired before this plan, this section just gives it the
+explicit, named documentation entry it hadn't had (`use_correlation_spike_regime`, default
+`false`, previously only described in a `config.example.yaml` comment).
+
+`detect_correlation_spike()` (`backtest/momentum_backtest.py`) compares a SHORT recent window's
+average pairwise correlation across the priced ticker universe against a longer baseline
+window (`correlation_spike_short_window`/`correlation_spike_baseline_window`, defaults `7`/`63`
+trading days), the classic "in a real crash, normally-uncorrelated assets suddenly move
+together" signature, built to react faster than a single long rolling-average window would.
+Returns `True` when the short-window average exceeds the baseline by more than
+`correlation_spike_threshold` (default `0.3`, a 30-percentage-point jump).
+
+When triggered: logs a WARNING, writes a `CORRELATION_SPIKE_DETECTED` alert, and automatically
+clamps gross exposure down to `min_gross_exposure`, the SAME defensive de-risking action
+`use_regime_filter`'s bearish-trend case takes, composing with it via `min()` (whichever signal
+is more defensive wins). Implemented identically in the backtest (`run_risk_managed_backtest()`)
+and live (`execution/live_signal.py`'s `compute_target_weights()`), reusing the exact same
+`detect_correlation_spike()` function, live and backtest can't diverge on the detection logic.
+
+**Honest scope, worth understanding before relying on it**: this fires only on an actual
+scheduled rebalance (once per cycle, via `compute_target_weights()`), not continuously between
+rebalances, and it's scoped to the portfolio's whole CONFIGURED ticker universe (whatever
+`daily_prices` covers that rebalance), not narrowly to just currently-held positions. A spike
+among tickers you're not currently holding, but are still ranked/priced for the next pick
+cycle, can still trigger it, that's intentional (a genuinely diversifying-in-name-only universe
+is worth flagging even before you hold the correlated names), but distinct from a literal
+"only my open positions" reading of the tier description.
+
 ## Recommended Config Presets
 
 These are two starting-point `default_risk` presets, one long-term (monthly), one short-term

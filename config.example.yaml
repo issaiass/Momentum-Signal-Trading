@@ -104,6 +104,17 @@ default_risk:
                                    # lookback_period actually picks each rebalance, a real
                                    # signal-construction change, not just a new warning. See
                                    # docs/RISK_CONSTRAINTS.md.
+  persist_dry_run_state: false    # DRY-RUN-ONLY, no effect in --live (the broker is always
+                                   # the source of truth there). Default false preserves
+                                   # dry-run's existing behavior exactly: current_positions is
+                                   # {} on every invocation, a stateless signal/sizing preview.
+                                   # Set true to instead reconstruct a simulated portfolio from
+                                   # the trade log's own dry_run=True rows, so dry-run behaves
+                                   # like a persistent, no-IBKR-required paper ledger across
+                                   # separate invocations. For an ACTUALLY broker-verified
+                                   # persistent paper portfolio, prefer --live --port 7497
+                                   # against a real IBKR paper account instead, see
+                                   # docs/RUNNING.md's "Restart and Resume Behavior" section.
   commission: 0.0                 # flat $ commission charged per trade, BACKTEST-ONLY,
                                    # has no effect on --live (real commission is already
                                    # reflected in your broker's real account balance)
@@ -117,6 +128,19 @@ default_risk:
                                    # 0.20 = flag for review if more than 20% of this rebalance's
                                    # tickers got a real BUY/SELL. High turnover is almost always
                                    # a sign of an over-sensitive signal.
+  total_value_drift_warning_pct: 0.10  # LIVE-ONLY advisory (non-blocking WARNING), only for a
+                                   # FIXED (non-null) total_value below. total_value never
+                                   # auto-refreshes from real account P&L (a deliberate choice,
+                                   # an allocation ceiling, not auto-compounding), this warns
+                                   # when this portfolio's own real position value (its
+                                   # configured tickers only, explicitly scoped, never a
+                                   # sibling portfolio's shared-account positions) exceeds the
+                                   # configured total_value by more than this fraction, a sign
+                                   # the static number has gone stale. e.g. 0.10 = warn once
+                                   # real positions are worth 10% more than the configured
+                                   # ceiling. Has no effect on a total_value: null portfolio
+                                   # (already tracks real account value by definition) or in
+                                   # dry-run (no real positions to compare).
   use_regime_filter: true         # true = skip new entries when regime_benchmark is below its SMA
   regime_benchmark: SPY           # benchmark ticker the regime filter checks against
   regime_sma_window: 150          # trading days in the regime filter's moving average

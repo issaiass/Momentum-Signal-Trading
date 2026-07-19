@@ -301,6 +301,185 @@ class TestHasRunOnOrAfter:
         assert has_run_on_or_after("rebalance_p1", dt.date(2026, 7, 1)) is False
 
 
+class TestRebalanceInProgressMarker:
+    """
+    Written immediately before run() is called for a rebalance, deleted immediately after
+    (success or a handled exception). A marker still present on a LATER run means a previous
+    process crashed mid-rebalance, purely a visibility signal (see the WARNING wiring), it does
+    not block or change the current run, the diff-based order generation already makes a retry
+    safe on its own. Written atomically (temp file + os.replace()), not the plain write_text()
+    this project's other flag files use, since this one specifically exists to be readable
+    reliably even by a concurrently-running process (risk_monitor.py's independent hourly cron
+    can overlap daily_runner.py's run in the default Docker setup, confirmed by reading
+    docker-entrypoint.sh, though risk_monitor.py itself never actually reads this file, it stays
+    independent).
+    """
+
+    def _isolate(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        import momentum_trading.daily_runner as daily_runner
+        import momentum_trading.risk.circuit_breaker as circuit_breaker
+        monkeypatch.setattr(circuit_breaker, "LOCK_DIR", tmp_path / "data")
+        monkeypatch.setattr(daily_runner, "LOCK_DIR", tmp_path / "data")
+        return daily_runner
+
+    def test_write_then_clear_lifecycle(self, tmp_path, monkeypatch):
+        daily_runner = self._isolate(tmp_path, monkeypatch)
+        path = daily_runner._rebalance_in_progress_marker_path("p1")
+        assert not path.exists()
+
+        daily_runner._write_rebalance_in_progress_marker("p1")
+        assert path.exists()
+        assert path.read_text().strip()  # a real timestamp, not empty
+
+        daily_runner._clear_rebalance_in_progress_marker("p1")
+        assert not path.exists()
+
+    def test_clear_is_safe_when_no_marker_exists(self, tmp_path, monkeypatch):
+        # No marker was ever written (e.g. a crash happened before the write itself), clearing
+        # must not raise.
+        daily_runner = self._isolate(tmp_path, monkeypatch)
+        daily_runner._clear_rebalance_in_progress_marker("p1")  # should not raise
+
+    def test_write_leaves_no_stray_temp_file(self, tmp_path, monkeypatch):
+        # Atomic write via temp-file + os.replace(): the intermediate .tmp file must not survive.
+        daily_runner = self._isolate(tmp_path, monkeypatch)
+        daily_runner._write_rebalance_in_progress_marker("p1")
+        marker = daily_runner._rebalance_in_progress_marker_path("p1")
+        tmp = marker.with_suffix(marker.suffix + ".tmp")
+        assert not tmp.exists()
+
+    def test_different_portfolios_get_independent_markers(self, tmp_path, monkeypatch):
+        daily_runner = self._isolate(tmp_path, monkeypatch)
+        daily_runner._write_rebalance_in_progress_marker("p1")
+        assert daily_runner._rebalance_in_progress_marker_path("p1").exists()
+        assert not daily_runner._rebalance_in_progress_marker_path("p2").exists()
+
+
+class TestClassifyOrphanedTickers:
+    """
+    A ticker currently held but NOT in this portfolio's configured tickers: list is either
+    (a) confirmed_orphaned: THIS portfolio's own trade log shows an open BUY history for it
+    (removed from config after being legitimately held here), safe to price/reconcile, or
+    (b) unrecognized: not confirmed, could belong to a SIBLING portfolio sharing the same real
+    IBKR account (the documented multi-portfolio ticker-leakage scenario), must NOT be
+    auto-priced or auto-traded. Reuses derive_entry_date() (already used by
+    check_and_handle_time_stops()), does not invent a new distinguishing mechanism.
+    """
+
+    def _write_log(self, tmp_path, rows):
+        path = tmp_path / "log.csv"
+        with open(path, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["timestamp", "ticker", "action", "shares"])
+            w.writerows(rows)
+        return str(path)
+
+    def test_ticker_in_configured_universe_is_excluded_entirely(self, tmp_path):
+        log_path = self._write_log(tmp_path, [])
+        confirmed, unrecognized = daily_runner._classify_orphaned_tickers(
+            {"SPY": 10.0}, ["SPY", "QQQ"], log_path,
+        )
+        assert confirmed == [] and unrecognized == []
+
+    def test_held_ticker_with_open_history_is_confirmed_orphaned(self, tmp_path):
+        log_path = self._write_log(tmp_path, [["2026-01-05T09:35:00", "OLD", "BUY", 5]])
+        confirmed, unrecognized = daily_runner._classify_orphaned_tickers(
+            {"OLD": 5.0}, ["SPY", "QQQ"], log_path,
+        )
+        assert confirmed == ["OLD"]
+        assert unrecognized == []
+
+    def test_held_ticker_with_no_history_is_unrecognized(self, tmp_path):
+        log_path = self._write_log(tmp_path, [])  # empty log, no history at all
+        confirmed, unrecognized = daily_runner._classify_orphaned_tickers(
+            {"BIL": 20.0}, ["SPY", "QQQ"], log_path,
+        )
+        assert confirmed == []
+        assert unrecognized == ["BIL"]
+
+    def test_held_ticker_that_is_currently_flat_in_the_log_is_unrecognized(self, tmp_path):
+        # A fully-closed position (per THIS portfolio's own log) but somehow still shows real
+        # shares held (e.g. a manual TWS trade re-opened it): fails in the SAFE direction,
+        # not confirmed, left untouched, per derive_entry_date()'s own documented semantics.
+        log_path = self._write_log(tmp_path, [
+            ["2026-01-05T09:35:00", "OLD", "BUY", 5],
+            ["2026-02-02T09:35:00", "OLD", "SELL", 5],
+        ])
+        confirmed, unrecognized = daily_runner._classify_orphaned_tickers(
+            {"OLD": 3.0}, ["SPY", "QQQ"], log_path,
+        )
+        assert confirmed == []
+        assert unrecognized == ["OLD"]
+
+    def test_no_orphaned_tickers_when_all_holdings_are_configured(self, tmp_path):
+        log_path = self._write_log(tmp_path, [])
+        confirmed, unrecognized = daily_runner._classify_orphaned_tickers(
+            {"SPY": 10.0, "QQQ": 5.0}, ["SPY", "QQQ"], log_path,
+        )
+        assert confirmed == [] and unrecognized == []
+
+    def test_mix_of_confirmed_and_unrecognized(self, tmp_path):
+        log_path = self._write_log(tmp_path, [["2026-01-05T09:35:00", "OLD", "BUY", 5]])
+        confirmed, unrecognized = daily_runner._classify_orphaned_tickers(
+            {"SPY": 10.0, "OLD": 5.0, "BIL": 20.0}, ["SPY"], log_path,
+        )
+        assert confirmed == ["OLD"]
+        assert unrecognized == ["BIL"]
+
+
+class TestComputeScopedPositionsValue:
+    """
+    Backs the total_value drift warning. Deliberately an EXPLICIT set intersection against
+    this portfolio's own tickers (+ confirmed_orphaned), not the pre-existing positions_value/
+    write_portfolio_snapshot() computation's implicit (price-availability-only) scoping, which
+    was found to double-count a ticker legitimately shared between two portfolios under the
+    documented TICKER OVERLAP scenario. This must NOT reproduce that bug.
+    """
+
+    def test_sums_only_configured_and_confirmed_orphaned_tickers(self):
+        current_positions = {
+            "SPY": {"shares": 2.0}, "OLD": {"shares": 5.0}, "FOREIGN": {"shares": 100.0},
+        }
+        latest_prices = {"SPY": 500.0, "OLD": 20.0, "FOREIGN": 10.0}
+        value = daily_runner._compute_scoped_positions_value(
+            current_positions, latest_prices, ["SPY"], ["OLD"],
+        )
+        # SPY (2*500) + OLD (5*20) = 1100, FOREIGN excluded (not configured, not confirmed orphaned)
+        assert value == pytest.approx(1100.0)
+
+    def test_missing_price_is_excluded_not_a_crash(self):
+        current_positions = {"SPY": {"shares": 2.0}, "OLD": {"shares": 5.0}}
+        latest_prices = {"SPY": 500.0}  # OLD has no price this run
+        value = daily_runner._compute_scoped_positions_value(
+            current_positions, latest_prices, ["SPY"], ["OLD"],
+        )
+        assert value == pytest.approx(1000.0)
+
+    def test_no_double_counting_a_ticker_shared_between_two_portfolios(self):
+        # The exact scenario the pre-existing positions_value computation gets wrong: a ticker
+        # legitimately configured in BOTH portfolio1 and portfolio2 (TICKER OVERLAP). Each
+        # portfolio's OWN scoped computation must independently see the SAME full share count
+        # (this function doesn't attempt to split ownership, that's a separate, harder problem),
+        # but a portfolio that does NOT configure the shared ticker must get ZERO for it,
+        # unlike the pre-existing computation's implicit scoping.
+        current_positions = {"XLF": {"shares": 10.0}}
+        latest_prices = {"XLF": 50.0}
+        # portfolio1 configures XLF:
+        value_p1 = daily_runner._compute_scoped_positions_value(
+            current_positions, latest_prices, ["XLF"], [],
+        )
+        # portfolio2 does NOT configure XLF, and it's not confirmed-orphaned for portfolio2 either:
+        value_p2 = daily_runner._compute_scoped_positions_value(
+            current_positions, latest_prices, ["QQQ"], [],
+        )
+        assert value_p1 == pytest.approx(500.0)
+        assert value_p2 == pytest.approx(0.0)
+
+    def test_empty_positions_returns_zero(self):
+        assert daily_runner._compute_scoped_positions_value({}, {}, ["SPY"], []) == 0.0
+
+
 class TestAlertFallback:
     """
     If SMTP isn't configured, an alert must still be VISIBLE (as an ERROR log

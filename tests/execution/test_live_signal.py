@@ -409,6 +409,89 @@ class TestResolveMomentumScores:
         assert calls == [(0.5, 0.25)]
 
 
+class TestRunExtraPriceTickers:
+    """
+    extra_price_tickers (backs the orphaned-ticker reconciliation feature) widens the internal
+    fetch_live_prices() call so generate_orders() can price/exit a currently-held-but-no-longer-
+    configured ticker, but must NOT widen the momentum ranking/selection universe, an orphaned
+    ticker becoming priced must never make it re-selectable as a new pick, it was deliberately
+    removed from the configured tickers list.
+    """
+
+    def _fake_prices(self, tickers, seed=3):
+        dates = pd.bdate_range("2025-01-01", "2026-07-09")
+        rng = np.random.default_rng(seed)
+        data = {t: np.cumprod(1 + rng.normal(0.0005, 0.01, len(dates))) * 100 for t in tickers}
+        return pd.DataFrame(data, index=dates)
+
+    def test_extra_price_tickers_widen_the_fetch_not_the_ranking(self, monkeypatch, tmp_path):
+        fake_prices = self._fake_prices(["SPY", "QQQ", "OLD"])
+        fetched = []
+
+        def fake_fetch(tickers, **kwargs):
+            fetched.append(list(tickers))
+            return fake_prices[list(tickers)]
+
+        monkeypatch.setattr(live_signal, "fetch_live_prices", fake_fetch)
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False)
+        orders = live_signal.run(
+            tickers=["SPY", "QQQ"], current_holdings={"OLD": 10.0}, total_value=1000.0,
+            cfg=cfg, top_n=2, lookback_period=1.0, dry_run=True,
+            extra_price_tickers=["OLD"],
+        )
+
+        # fetch_live_prices was asked for the UNION of the ranking universe and the extra ticker.
+        assert set(fetched[0]) == {"SPY", "QQQ", "OLD"}
+        # OLD got priced and evaluated for exit (currently held, no longer targeted -> SELL),
+        # not stuck as "HOLD, no live price available".
+        assert "OLD" in orders
+        assert orders["OLD"]["action"] == "SELL"
+
+    def test_default_omits_extra_price_tickers_byte_identical_to_before(self, monkeypatch, tmp_path):
+        # Regression: no extra_price_tickers argument (every pre-existing call site) must
+        # fetch exactly the configured tickers, nothing more, unchanged from before this
+        # parameter existed.
+        fake_prices = self._fake_prices(["SPY", "QQQ"])
+        fetched = []
+
+        def fake_fetch(tickers, **kwargs):
+            fetched.append(list(tickers))
+            return fake_prices[list(tickers)]
+
+        monkeypatch.setattr(live_signal, "fetch_live_prices", fake_fetch)
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False)
+        live_signal.run(
+            tickers=["SPY", "QQQ"], current_holdings={}, total_value=1000.0, cfg=cfg,
+            top_n=2, lookback_period=1.0, dry_run=True,
+        )
+
+        assert fetched[0] == ["SPY", "QQQ"]
+
+    def test_extra_price_ticker_never_appears_as_a_new_buy_pick(self, monkeypatch, tmp_path):
+        # Even if OLD's price history would rank it favorably, it must never be selected as a
+        # NEW pick, only priced for exit purposes, it was deliberately removed from the
+        # configured universe.
+        fake_prices = self._fake_prices(["SPY", "QQQ", "OLD"], seed=7)
+        monkeypatch.setattr(live_signal, "fetch_live_prices",
+                             lambda tickers, **k: fake_prices[list(tickers)])
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False)
+        orders = live_signal.run(
+            tickers=["SPY", "QQQ"], current_holdings={}, total_value=1000.0, cfg=cfg,
+            top_n=2, lookback_period=1.0, dry_run=True, extra_price_tickers=["OLD"],
+        )
+
+        # OLD was never held and never in the ranking universe, so it must not appear at all
+        # (not even as a HOLD), generate_orders() only ever considers current_holdings union
+        # target picks, and OLD is in neither here.
+        assert "OLD" not in orders
+
+
 class TestGetTopEtfs:
     """
     get_top_etfs() is where BacktestConfig.top_n actually takes effect, it's
@@ -561,6 +644,53 @@ class TestMeasureLivePerformance:
         dry_run_only = measure_live_performance("2026-01-01", "2026-03-01", log_path=str(log_path), dry_run=True)
         assert dry_run_only["trade_count"] == 1
         assert dry_run_only["open_positions"]["XLK"] == pytest.approx(5.0)
+
+
+class TestReconstructDryRunPositions:
+    """
+    Backs the opt-in dry-run persistence feature (daily_runner.py's persist_dry_run_state
+    flag, default off): reconstructs a current_positions-shaped dict
+    ({ticker: {'shares', 'avg_entry_price'}}, the same shape get_ibkr_positions() returns)
+    from the trade log's dry_run=True rows only, via measure_live_performance()'s EXISTING
+    FIFO open_positions/open_position_avg_cost computation, not a new, separately-maintained
+    FIFO implementation.
+    """
+
+    def test_missing_log_returns_empty_dict(self, tmp_path):
+        assert live_signal.reconstruct_dry_run_positions(str(tmp_path / "no_such_log.csv")) == {}
+
+    def test_reconstructs_shares_and_avg_cost_from_dry_run_rows_only(self, tmp_path):
+        log_path = tmp_path / "log.csv"
+        with open(log_path, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["timestamp", "ticker", "action", "shares", "price", "reason", "dry_run"])
+            w.writerow(["2026-01-05T09:35:00", "XLK", "BUY", 5, 200.0, "entry", True])    # dry-run
+            w.writerow(["2026-01-06T09:35:00", "XLK", "BUY", 2, 210.0, "entry", False])   # live, excluded
+
+        positions = live_signal.reconstruct_dry_run_positions(str(log_path))
+        assert positions == {"XLK": {"shares": pytest.approx(5.0), "avg_entry_price": pytest.approx(200.0)}}
+
+    def test_fully_closed_dry_run_position_is_absent(self, tmp_path):
+        log_path = tmp_path / "log.csv"
+        with open(log_path, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["timestamp", "ticker", "action", "shares", "price", "reason", "dry_run"])
+            w.writerow(["2026-01-05T09:35:00", "XLK", "BUY", 5, 200.0, "entry", True])
+            w.writerow(["2026-02-02T09:35:00", "XLK", "SELL", 5, 220.0, "exit", True])
+
+        assert live_signal.reconstruct_dry_run_positions(str(log_path)) == {}
+
+    def test_weighted_average_cost_across_two_buys(self, tmp_path):
+        log_path = tmp_path / "log.csv"
+        with open(log_path, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["timestamp", "ticker", "action", "shares", "price", "reason", "dry_run"])
+            w.writerow(["2026-01-05T09:35:00", "XLK", "BUY", 4, 100.0, "entry", True])
+            w.writerow(["2026-02-02T09:35:00", "XLK", "BUY", 4, 200.0, "add", True])
+        # (4*100 + 4*200) / 8 = 150.0
+        positions = live_signal.reconstruct_dry_run_positions(str(log_path))
+        assert positions["XLK"]["shares"] == pytest.approx(8.0)
+        assert positions["XLK"]["avg_entry_price"] == pytest.approx(150.0)
 
 
 class TestRunMultiPortfolio:

@@ -34,7 +34,7 @@ from .execution.live_signal import (
     get_ibkr_positions, get_ibkr_account_value, with_retry,
     place_orders_ibkr, log_orders, write_portfolio_snapshot, get_latest_snapshot,
     derive_entry_date, measure_live_performance, fetch_ohlcv_for_tickers,
-    build_position_performance,
+    build_position_performance, reconstruct_dry_run_positions,
 )
 from .core.smtp_auth import authenticate as authenticate_smtp, smtp_ready
 from .core.audit_log import log_alert, read_recent_alerts, ALERTS_LOG_PATH
@@ -150,6 +150,92 @@ def mark_ran_today(tag: str = "rebalance") -> None:
     LOCK_DIR.mkdir(exist_ok=True)
     lock_file = LOCK_DIR / f"last_run_{tag}_{datetime.today().strftime('%Y%m%d')}.lock"
     lock_file.write_text(datetime.now().isoformat())
+
+
+def _rebalance_in_progress_marker_path(name: str) -> Path:
+    return LOCK_DIR / f"rebalance_in_progress_{name}.marker"
+
+
+def _write_rebalance_in_progress_marker(name: str) -> None:
+    """
+    Written immediately BEFORE run() is called for a rebalance, cleared immediately after
+    (success or a handled exception, see the try/finally at the call site). A marker still
+    present on a LATER run means a previous process crashed mid-rebalance, purely a visibility
+    signal (the stale-marker WARNING near the top of the per-portfolio loop), the diff-based
+    order generation this project already uses makes a retry safe against duplicating completed
+    actions on its own, this doesn't change that.
+
+    Written atomically (temp file + os.replace()) rather than the plain write_text() this
+    project's other flag files use, since this one specifically exists to be read reliably even
+    by a concurrently-running process: risk_monitor.py's independent hourly cron CAN overlap
+    daily_runner.py's run under the default Docker schedule (confirmed by reading
+    docker-entrypoint.sh's cron expressions), though risk_monitor.py itself never actually reads
+    this particular file, it stays fully independent, same principle as the six other risk
+    constraints it's deliberately blind to.
+    """
+    LOCK_DIR.mkdir(exist_ok=True)
+    path = _rebalance_in_progress_marker_path(name)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(datetime.now().isoformat())
+    os.replace(tmp_path, path)
+
+
+def _clear_rebalance_in_progress_marker(name: str) -> None:
+    _rebalance_in_progress_marker_path(name).unlink(missing_ok=True)
+
+
+def _classify_orphaned_tickers(current_holdings: dict, tickers: list[str],
+                                trade_log_path: str) -> tuple[list[str], list[str]]:
+    """
+    Partitions tickers in current_holdings (the REAL, unfiltered whole-account positions from
+    IBKR) that are NOT in this portfolio's configured tickers: list into two groups:
+
+    confirmed_orphaned : this portfolio's OWN trade log (derive_entry_date(), the same
+    function check_and_handle_time_stops() already relies on) shows an open BUY history for
+    the ticker, it was legitimately held here before being removed from config, safe to price
+    and let the normal diff-based rotation logic reconcile (sell if not re-selected).
+
+    unrecognized : not confirmed by this portfolio's own log. Could belong to a SIBLING
+    portfolio sharing the same real IBKR account (config.yaml supports multiple portfolios on
+    one account, get_ibkr_positions() returns the WHOLE account unfiltered to every one of
+    them, this is the documented multi-portfolio ticker-leakage scenario in README.md's Known
+    Gaps). MUST NOT be auto-priced or auto-traded, stays exactly as conservative as today
+    (HOLD, no live price available). Known, acceptable failure direction: if this portfolio's
+    own trade log was ever archived/reset, or the position shows currently flat in the log
+    despite real shares being held, a legitimately-owned ticker could also land here, that's
+    the SAFE direction to fail (more conservative, not less).
+    """
+    configured = set(tickers)
+    confirmed_orphaned = []
+    unrecognized = []
+    for t in current_holdings:
+        if t in configured:
+            continue
+        if derive_entry_date(t, trade_log_path) is not None:
+            confirmed_orphaned.append(t)
+        else:
+            unrecognized.append(t)
+    return confirmed_orphaned, unrecognized
+
+
+def _compute_scoped_positions_value(current_positions: dict, latest_prices: dict,
+                                     tickers: list[str], confirmed_orphaned: list[str]) -> float:
+    """
+    Real market value of just THIS portfolio's own positions (its configured tickers plus any
+    confirmed_orphaned ones, see _classify_orphaned_tickers()), an EXPLICIT set intersection,
+    not the pre-existing positions_value/write_portfolio_snapshot() computation's implicit
+    (price-availability-only) scoping, which double-counts a ticker legitimately shared
+    between two portfolios under the documented TICKER OVERLAP scenario
+    (check_ticker_overlap()). Used only for the total_value drift warning, deliberately not
+    reused for the pre-existing positions_value/snapshot computation, that's a separate,
+    out-of-scope fix.
+    """
+    scoped = set(tickers) | set(confirmed_orphaned)
+    return sum(
+        p["shares"] * latest_prices[t]
+        for t, p in current_positions.items()
+        if t in scoped and t in latest_prices
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -823,6 +909,49 @@ def main():
             tickers = spec["tickers"]
             trade_log_path = str(logs_dir() / f"live_trades_log_{name}.csv")
 
+            # --- Stale rebalance-in-progress marker (non-blocking WARNING): a marker written
+            #     immediately before a PREVIOUS run()'s rebalance, still present now, means that
+            #     earlier process crashed mid-rebalance (killed, container stopped, order
+            #     submission or fill-polling never completed cleanly). Purely a visibility
+            #     signal, this project's diff-based order generation already makes a retry safe
+            #     against duplicating completed actions on its own (see docs/RUNNING.md's
+            #     "Restart and Resume Behavior"), this does NOT block the current run, it just
+            #     flags that actual IBKR state is worth a manual glance before trusting
+            #     automated reconciliation this cycle. Consumed (deleted) after firing once,
+            #     same "one-time, not persistent" pattern as the skip-next-rebalance flag below,
+            #     a human has been notified, no need to nag every subsequent run forever. ---
+            stale_marker = _rebalance_in_progress_marker_path(name)
+            if stale_marker.exists():
+                marker_ts = stale_marker.read_text().strip()
+                logger.warning(
+                    "[%s] Found a stale rebalance-in-progress marker (written %s), a previous "
+                    "run may have crashed mid-rebalance. Verify actual IBKR state before "
+                    "trusting automated reconciliation this cycle.", name, marker_ts,
+                )
+                log_alert(
+                    name, "STALE_REBALANCE_MARKER", "WARNING",
+                    f"Rebalance-in-progress marker from {marker_ts} was still present at the "
+                    f"start of this run, a previous process may have crashed mid-rebalance.",
+                    log_path=ALERTS_LOG_PATH,
+                )
+                marker_text = (
+                    f"Portfolio '{name}' has a stale rebalance-in-progress marker written at "
+                    f"{marker_ts}.\n\n"
+                    f"This usually means a previous daily-runner process crashed or was killed "
+                    f"mid-rebalance (order submission or fill confirmation never completed). "
+                    f"The diff-based order generation this project uses makes a retry safe "
+                    f"against duplicating already-completed actions in the common case, but "
+                    f"verify actual IBKR positions/orders manually before trusting automated "
+                    f"reconciliation this cycle. See docs/RUNNING.md's \"Restart and Resume "
+                    f"Behavior\" section."
+                )
+                send_action_email(
+                    NotificationCategory.WARNING, f"Stale rebalance marker: {name}",
+                    f"<pre>{marker_text}</pre>", notification_cfg,
+                    plain_text_fallback=marker_text,
+                )
+                stale_marker.unlink(missing_ok=True)  # consumed, one-time, not persistent
+
             # --- Holding-period-too-frequent warning (non-blocking), holding_period below
             #     0.25 (faster than weekly) is a real, well-defined schedule, just an
             #     economically inadvisable one: the momentum signal is computed over a
@@ -1005,15 +1134,90 @@ def main():
             #     from resolved_total_values, resolved once above the loop. ---
             if args.live:
                 current_positions = with_retry(get_ibkr_positions, 3, 2.0, args.port)
+            elif cfg.persist_dry_run_state:
+                # Opt-in (default False, see BacktestConfig.persist_dry_run_state), reconstructs
+                # a simulated portfolio from the trade log's own dry_run=True rows, so dry-run
+                # OPTIONALLY behaves like a persistent, no-IBKR-required paper ledger across
+                # separate invocations, instead of always starting flat. Never affects --live.
+                current_positions = reconstruct_dry_run_positions(trade_log_path)
             else:
-                current_positions = {}   # dry-run: no real broker state to reconcile against
+                current_positions = {}   # dry-run default: no real broker state to reconcile against
             total_value = resolved_total_values[name]
 
             current_holdings = {t: p["shares"] for t, p in current_positions.items()}
 
-            # --- ALWAYS runs: fetch latest prices once, used by stop-loss check + snapshot ---
+            # --- Orphaned/unrecognized ticker classification and alerts, see
+            #     _classify_orphaned_tickers()'s own docstring for the full multi-portfolio
+            #     safety rationale (a held-but-unconfigured ticker could belong to a SIBLING
+            #     portfolio sharing this real IBKR account, not just be a stale drop-out from
+            #     THIS portfolio's own history, these must be told apart before touching
+            #     either one). confirmed_orphaned gets priced below (widened fetch) and passed
+            #     into run() as extra_price_tickers so the normal diff-based rotation logic can
+            #     reconcile it; unrecognized stays completely untouched, exactly as
+            #     conservative as before this feature existed. ---
+            confirmed_orphaned, unrecognized = _classify_orphaned_tickers(
+                current_holdings, tickers, trade_log_path,
+            )
+            for t in confirmed_orphaned:
+                logger.warning(
+                    "[%s] %s is held but no longer in the configured tickers list, this "
+                    "portfolio's own trade log confirms it was previously held here, pricing "
+                    "it for reconciliation this run.", name, t,
+                )
+                log_alert(
+                    name, "ORPHANED_POSITION", "WARNING",
+                    f"{t} is held but not in the configured tickers list, confirmed via this "
+                    f"portfolio's own trade log, being priced/reconciled this run.",
+                    log_path=ALERTS_LOG_PATH,
+                )
+                orphaned_text = (
+                    f"Portfolio '{name}' is holding {t}, which is no longer in its configured "
+                    f"tickers list, but this portfolio's own trade log confirms {t} was "
+                    f"legitimately held here before.\n\n"
+                    f"It will be priced and made eligible for exit this run (sold if not "
+                    f"re-selected), same as any other rotation drop-out. See "
+                    f"docs/RUNNING.md's \"Restart and Resume Behavior\" section."
+                )
+                send_action_email(
+                    NotificationCategory.WARNING, f"Orphaned position: {t} ({name})",
+                    f"<pre>{orphaned_text}</pre>", notification_cfg,
+                    plain_text_fallback=orphaned_text,
+                )
+            for t in unrecognized:
+                logger.warning(
+                    "[%s] %s is held but not in the configured tickers list, and this "
+                    "portfolio's own trade log has no record of it, NOT auto-priced or "
+                    "auto-traded, may belong to a different portfolio sharing this account, "
+                    "investigate manually.", name, t,
+                )
+                log_alert(
+                    name, "UNRECOGNIZED_POSITION", "WARNING",
+                    f"{t} is held but not in the configured tickers list, and not confirmed "
+                    f"by this portfolio's own trade log, left untouched.",
+                    log_path=ALERTS_LOG_PATH,
+                )
+                unrecognized_text = (
+                    f"Portfolio '{name}' account shows a position in {t}, which is not in "
+                    f"this portfolio's configured tickers list, and this portfolio's own "
+                    f"trade log has no record of ever holding it.\n\n"
+                    f"It is being left untouched (not priced, not traded), since it may "
+                    f"belong to a different portfolio sharing this real IBKR account. "
+                    f"Investigate manually. See docs/RUNNING.md's \"Restart and Resume "
+                    f"Behavior\" section."
+                )
+                send_action_email(
+                    NotificationCategory.WARNING, f"Unrecognized position: {t} ({name})",
+                    f"<pre>{unrecognized_text}</pre>", notification_cfg,
+                    plain_text_fallback=unrecognized_text,
+                )
+
+            # --- ALWAYS runs: fetch latest prices once, used by stop-loss check + snapshot.
+            #     Widened by confirmed_orphaned so those positions also regain stop-loss/
+            #     time-stop protection (both already skip any ticker missing from
+            #     latest_prices), not just order-generation reconciliation. ---
             from .execution.live_signal import fetch_live_prices, check_price_staleness
-            daily_prices = with_retry(fetch_live_prices, 3, 2.0, tickers)
+            price_fetch_tickers = tickers + confirmed_orphaned if confirmed_orphaned else tickers
+            daily_prices = with_retry(fetch_live_prices, 3, 2.0, price_fetch_tickers)
             latest_prices = daily_prices.iloc[-1].to_dict() if not daily_prices.empty else {}
 
             # --- Abort THIS portfolio's run (not the whole process)
@@ -1036,6 +1240,53 @@ def main():
                         f"This portfolio's run was skipped to avoid trading on frozen data.",
                     )
                     continue
+
+            # --- total_value drift warning (non-blocking, --live only, fixed total_value
+            #     portfolios only): total_value: null already tracks real account value by
+            #     definition (resolve_total_values()), nothing to compare. A fixed total_value
+            #     never auto-refreshes from real account P&L (a deliberate, documented choice,
+            #     an allocation ceiling, not auto-compounding), this only makes that silent
+            #     drift VISIBLE. Real per-portfolio cash can't be isolated on a shared IBKR
+            #     account without deeper accounting than this project attempts, so only the
+            #     POSITION side is compared (explicitly scoped, see
+            #     _compute_scoped_positions_value()'s own docstring for why this must NOT reuse
+            #     the pre-existing positions_value computation's implicit scoping), not a full
+            #     "total value" reconstruction. Only warns on the anomalous high side: real
+            #     positions alone exceeding the entire configured capital base is a clear,
+            #     honest signal, not a guess. ---
+            if args.live and spec["total_value"] is not None and total_value > 0:
+                scoped_value = _compute_scoped_positions_value(
+                    current_positions, latest_prices, tickers, confirmed_orphaned,
+                )
+                if scoped_value > total_value * (1 + cfg.total_value_drift_warning_pct):
+                    drift_pct = (scoped_value / total_value) - 1
+                    logger.warning(
+                        "[%s] Real position value $%.2f exceeds configured total_value $%.2f "
+                        "by %.1f%%, the configured capital base may be stale.",
+                        name, scoped_value, total_value, drift_pct * 100,
+                    )
+                    log_alert(
+                        name, "TOTAL_VALUE_DRIFT", "WARNING",
+                        f"Real position value ${scoped_value:,.2f} exceeds configured "
+                        f"total_value ${total_value:,.2f} by {drift_pct:.1%}.",
+                        log_path=ALERTS_LOG_PATH,
+                    )
+                    drift_text = (
+                        f"Portfolio '{name}' has a fixed total_value=${total_value:,.2f} in "
+                        f"config.yaml, but its real position value (this portfolio's own "
+                        f"tickers only) is now ${scoped_value:,.2f}, {drift_pct:.1%} higher.\n\n"
+                        f"total_value never auto-refreshes from real account P&L (a "
+                        f"deliberate, documented choice, an allocation ceiling, not "
+                        f"auto-compounding), but this divergence is large enough to review: "
+                        f"either update total_value in config.yaml to reflect real growth, or "
+                        f"investigate why positions exceed the configured ceiling. See "
+                        f"docs/RUNNING.md's \"Restart and Resume Behavior\" section."
+                    )
+                    send_action_email(
+                        NotificationCategory.WARNING, f"total_value drift: {name}",
+                        f"<pre>{drift_text}</pre>", notification_cfg,
+                        plain_text_fallback=drift_text,
+                    )
 
             # --- ALWAYS runs: daily stop-loss check ---
             if current_positions:
@@ -1130,20 +1381,25 @@ def main():
                     continue
 
                 logger.info("[%s] Rebalance day, running full signal + order generation.", name)
-                orders_result = run(
-                    tickers=tickers,
-                    current_holdings=current_holdings,
-                    total_value=total_value,
-                    cfg=cfg,
-                    top_n=min(cfg.top_n, len(tickers)),
-                    lookback_period=cfg.lookback_period,
-                    dry_run=not args.live,
-                    ibkr_port=args.port,
-                    log_path=trade_log_path,
-                    custom_weights=spec["custom_weights"],
-                    portfolio=name,
-                    alerts_log_path=ALERTS_LOG_PATH,
-                )
+                _write_rebalance_in_progress_marker(name)
+                try:
+                    orders_result = run(
+                        tickers=tickers,
+                        current_holdings=current_holdings,
+                        total_value=total_value,
+                        cfg=cfg,
+                        top_n=min(cfg.top_n, len(tickers)),
+                        lookback_period=cfg.lookback_period,
+                        dry_run=not args.live,
+                        ibkr_port=args.port,
+                        log_path=trade_log_path,
+                        custom_weights=spec["custom_weights"],
+                        portfolio=name,
+                        alerts_log_path=ALERTS_LOG_PATH,
+                        extra_price_tickers=confirmed_orphaned,
+                    )
+                finally:
+                    _clear_rebalance_in_progress_marker(name)
                 mark_ran_today(f"rebalance_{name}")
 
                 # --- Turnover Limit constraint (non-blocking): Total_Positions_Changed /

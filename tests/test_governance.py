@@ -169,6 +169,72 @@ class TestRiskMonitor:
     def test_load_initial_capital_returns_none_for_missing_file(self, tmp_path):
         assert load_initial_capital("portfolio1", str(tmp_path / "does_not_exist.yaml")) is None
 
+    def test_main_default_log_dir_finds_the_real_trade_log(self, tmp_path, monkeypatch):
+        # Regression test for a real bug found in this checkout: --log-dir's default used to
+        # be data_dir(), but daily_runner.py/live_signal.py actually write the trade log to
+        # logs_dir(), a DIFFERENT directory (core/paths.py). Under that old default,
+        # risk_monitor.py could never find any trades via its own default invocation (exactly
+        # how docker-entrypoint.sh's cron job calls it, no --log-dir override), silently
+        # computed 0 realized P&L forever, and could never actually halt. This test exercises
+        # main()'s REAL default, not an explicitly-passed log_path, so it would have caught
+        # that bug.
+        import momentum_trading.risk.risk_monitor as risk_monitor
+        logs = tmp_path / "logs"
+        logs.mkdir()
+        data = tmp_path / "data"
+        monkeypatch.setattr(risk_monitor, "logs_dir", lambda: logs)
+        monkeypatch.setattr(risk_monitor, "LOCK_DIR", data)
+        monkeypatch.chdir(tmp_path)
+
+        log_path = logs / "live_trades_log_portfolio1.csv"
+        with open(log_path, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["timestamp", "ticker", "action", "shares", "price", "reason", "dry_run"])
+            w.writerow(["2026-01-05T09:35:00", "XLK", "BUY", 5, 200.0, "entry", True])
+            w.writerow(["2026-02-02T09:35:00", "XLK", "SELL", 5, 100.0, "exit", True])
+        # $500 realized loss on $1000 capital = 50%, comfortably over a 25% max_loss_pct,
+        # should halt IF (and only if) main() actually found and read this log.
+
+        monkeypatch.setattr(
+            "sys.argv",
+            ["risk_monitor", "--portfolio", "portfolio1", "--initial-capital", "1000",
+             "--max-loss-pct", "0.25"],
+        )
+        risk_monitor.main()
+
+        assert (data / "circuit_breaker_halted_portfolio1.flag").exists()
+
+    def test_main_default_log_dir_is_logs_dir_not_data_dir(self, tmp_path, monkeypatch):
+        # Narrower, direct assertion on the fix itself: main()'s own --log-dir default must
+        # resolve to logs_dir(), not data_dir(), confirmed by placing the SAME trade log
+        # under data/ instead (the old, wrong location) and confirming main() does NOT halt
+        # despite an identical large loss, since it correctly can't find the file there.
+        import momentum_trading.risk.risk_monitor as risk_monitor
+        logs = tmp_path / "logs"
+        logs.mkdir()
+        data = tmp_path / "data"
+        data.mkdir()
+        monkeypatch.setattr(risk_monitor, "logs_dir", lambda: logs)
+        monkeypatch.setattr(risk_monitor, "LOCK_DIR", data)
+        monkeypatch.chdir(tmp_path)
+
+        # Trade log written to data/ (the OLD, wrong default location), not logs/.
+        log_path = data / "live_trades_log_portfolio1.csv"
+        with open(log_path, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["timestamp", "ticker", "action", "shares", "price", "reason", "dry_run"])
+            w.writerow(["2026-01-05T09:35:00", "XLK", "BUY", 5, 200.0, "entry", True])
+            w.writerow(["2026-02-02T09:35:00", "XLK", "SELL", 5, 100.0, "exit", True])
+
+        monkeypatch.setattr(
+            "sys.argv",
+            ["risk_monitor", "--portfolio", "portfolio1", "--initial-capital", "1000",
+             "--max-loss-pct", "0.25"],
+        )
+        risk_monitor.main()
+
+        assert not (data / "circuit_breaker_halted_portfolio1.flag").exists()
+
 
 class TestConfigApprovalGate:
     """

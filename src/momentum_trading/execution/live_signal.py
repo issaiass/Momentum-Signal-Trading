@@ -910,6 +910,31 @@ def measure_live_performance(
     return result
 
 
+def reconstruct_dry_run_positions(log_path: str = TRADE_LOG_PATH) -> dict:
+    """
+    Reconstructs a current_positions-shaped dict ({ticker: {'shares', 'avg_entry_price'}}, the
+    SAME shape get_ibkr_positions() returns) from the trade log's dry_run=True rows only, via
+    measure_live_performance()'s EXISTING FIFO open_positions/open_position_avg_cost
+    computation, not a new, separately-maintained FIFO implementation.
+
+    Backs an OPT-IN dry-run persistence feature (daily_runner.py's
+    persist_dry_run_state config flag, default off): lets dry-run mode OPTIONALLY behave like
+    a persistent, no-IBKR-required paper-trading ledger across separate invocations, instead
+    of always starting from {} (dry-run's default, and this function's own return value when
+    the log doesn't exist yet or has no open dry-run positions, matching that default exactly).
+    """
+    if not os.path.isfile(log_path):
+        return {}
+    result = measure_live_performance(
+        "1970-01-01", pd.Timestamp.today().strftime("%Y-%m-%d"),
+        log_path=log_path, dry_run=True,
+    )
+    return {
+        t: {"shares": shares, "avg_entry_price": result["open_position_avg_cost"].get(t, 0.0)}
+        for t, shares in result["open_positions"].items()
+    }
+
+
 def derive_entry_date(ticker: str, trade_log_path: str = TRADE_LOG_PATH) -> pd.Timestamp | None:
     """
     Live-side equivalent of the backtest's entry_dates tracking
@@ -1545,14 +1570,27 @@ def run(
     custom_weights: dict | None = None,
     portfolio: str = "",
     alerts_log_path: str = ALERTS_LOG_PATH,
+    extra_price_tickers: list[str] | None = None,
 ) -> dict:
-    daily_prices = with_retry(fetch_live_prices, 3, 2.0, tickers, fmp_api_key=fmp_api_key, eodhd_api_key=eodhd_api_key)
+    """
+    extra_price_tickers : additional tickers to fetch a price for (so generate_orders() can
+    evaluate them for exit) WITHOUT adding them to the momentum ranking/selection universe.
+    Backs the orphaned-ticker reconciliation in daily_runner.py, a ticker currently held but no
+    longer in the portfolio's configured `tickers:` list, confirmed (via that portfolio's own
+    trade log) to have been legitimately held there before. Getting priced must never make a
+    ticker re-selectable as a NEW pick, that's why this widens `daily_prices` (used for pricing)
+    but NOT the DataFrame passed into resolve_momentum_scores()/ranking (still `tickers` only).
+    None (default) preserves this function's exact pre-existing behavior.
+    """
+    price_tickers = tickers if not extra_price_tickers else list(dict.fromkeys(list(tickers) + list(extra_price_tickers)))
+    daily_prices = with_retry(fetch_live_prices, 3, 2.0, price_tickers, fmp_api_key=fmp_api_key, eodhd_api_key=eodhd_api_key)
     if daily_prices.empty:
         logger.error("No price data returned; aborting.")
         return {}
 
+    ranking_prices = daily_prices[list(tickers)] if extra_price_tickers else daily_prices
     scores = resolve_momentum_scores(
-        daily_prices, lookback_period, cfg.holding_period, cfg.skip_month_guardrail,
+        ranking_prices, lookback_period, cfg.holding_period, cfg.skip_month_guardrail,
     ).dropna(how="all")
     ranks = assign_ranks(scores)
     picks = get_top_etfs(ranks, top_n=top_n)

@@ -33,7 +33,7 @@ from pathlib import Path
 import pandas as pd
 import yaml
 
-from momentum_trading.core.paths import data_dir
+from momentum_trading.core.paths import data_dir, logs_dir
 
 logger = logging.getLogger("risk_monitor")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -146,7 +146,12 @@ def main():
                          help="Defaults to portfolios.<name>.total_value in --config if omitted.")
     parser.add_argument("--max-loss-pct", type=float, default=0.25,
                          help="Halt if realized loss exceeds this fraction of initial capital.")
-    parser.add_argument("--log-dir", default=str(data_dir()))
+    parser.add_argument("--log-dir", default=str(logs_dir()),
+                         help="Directory containing live_trades_log_<portfolio>.csv, matches "
+                              "where daily_runner.py/live_signal.py actually write it "
+                              "(logs_dir(), not data_dir(), the trade log and the "
+                              "halt-flag/lock-file state below are in two different "
+                              "directories, don't conflate them).")
     parser.add_argument("--config", default="config.yaml",
                          help="Path to config.yaml, used only to look up total_value when "
                               "--initial-capital is omitted.")

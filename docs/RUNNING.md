@@ -434,16 +434,60 @@ actual scheduling/state code, not assumed:
   these compose bind mounts; only deleting the host `./data`/`./logs` folders directly would
   lose this state).
 
-**Dry-run mode (no `--live`) does NOT persist a simulated portfolio across restarts.**
-`current_positions` is always `{}` at the start of every dry-run invocation, by design, dry-run
-previews signal/sizing/order-generation logic, it was never meant to be a stateful paper-trading
-engine, see `README.md`'s "Project Maturity & Safety" section for the broader `--force-rebalance`
-scope caveat. Each dry-run run always starts from a hypothetical flat/no-holdings state. If you
-want an actual persistent paper portfolio without real money at risk, use `--live --port 7497`
-against a real IBKR paper account, that path already resumes correctly for the reasons above,
-since the broker (paper or real) is genuinely the source of truth either way. The trade log's
-`dry_run=True` rows remain the durable record of "what a dry-run would have done," across every
-run, they're just not read back to reconstruct a simulated position.
+**Dry-run mode (no `--live`) does NOT persist a simulated portfolio across restarts by
+default.** `current_positions` is `{}` at the start of every dry-run invocation, by design,
+dry-run previews signal/sizing/order-generation logic, it was never meant to be a stateful
+paper-trading engine, see `README.md`'s "Project Maturity & Safety" section for the broader
+`--force-rebalance` scope caveat. If you want an actual, broker-verified persistent paper
+portfolio without real money at risk, use `--live --port 7497` against a real IBKR paper
+account, that path already resumes correctly for the reasons above, since the broker (paper or
+real) is genuinely the source of truth either way. If you specifically want a persistent paper
+ledger WITHOUT an IBKR connection at all, set `persist_dry_run_state: true` (default `false`,
+`config.example.yaml`), which reconstructs `current_positions` from the trade log's own
+`dry_run=True` rows (FIFO, `execution/live_signal.py`'s `reconstruct_dry_run_positions()`,
+reuses the same FIFO math `measure_live_performance()` already uses for P&L, not a second
+implementation) instead of always starting flat. Has no effect in `--live` mode.
+
+**"Does restarting cause duplicate/redone rebalance actions?" No, by construction, not by
+luck**: `mark_ran_today()` is only called AFTER a rebalance's `run(...)` call fully returns, a
+crash mid-rebalance means the lock is never written, so a later retry that day correctly
+re-attempts. Order generation is DIFF-based, not action-based, it compares fresh target weights
+against CURRENT real holdings every time, so a retry after a partial rebalance only computes
+orders for the REMAINING drift, it never "redoes" completed BUY/SELL/HOLD decisions. One
+narrow, inherent gap remains: a crash precisely DURING an in-flight order submission (sent to
+IBKR, not yet reflected in the next `reqPositions()` call) could theoretically cause a retry to
+resubmit that same order, no exchange-side idempotency key exists to close this completely. For
+visibility (not a fix, this can't be fully closed from the app side): a
+`rebalance_in_progress_{name}.marker` file is written immediately before `run(...)` and cleared
+immediately after; if a LATER run finds it still present, a non-blocking `STALE_REBALANCE_MARKER`
+WARNING fires once (then the marker is consumed), telling you to verify actual IBKR state before
+trusting automated reconciliation that cycle.
+
+**Orphaned and unrecognized positions**: a ticker currently held but no longer in a portfolio's
+configured `tickers:` list (e.g. you edited the list while a position was open) is now
+automatically classified and handled, safely, even with multiple portfolios sharing one real
+IBKR account:
+- `ORPHANED_POSITION` (non-blocking WARNING): this portfolio's OWN trade log confirms the
+  ticker was legitimately held here before, it's priced and made eligible for exit this run
+  (sold if not re-selected), the same as any other rotation drop-out, and also regains
+  stop-loss/time-stop protection.
+- `UNRECOGNIZED_POSITION` (non-blocking WARNING): NOT confirmed by this portfolio's own trade
+  log, left completely untouched (not priced, not traded). This is the safe direction to fail,
+  since `get_ibkr_positions()` returns the WHOLE shared IBKR account, a ticker in this bucket
+  could genuinely belong to a SIBLING portfolio (the "TICKER OVERLAP"/leakage scenario below),
+  not just be a stale drop-out from this portfolio's own history. Investigate manually.
+
+**`total_value` drift visibility** (`--live` only, fixed/non-null `total_value` portfolios
+only): a fixed `total_value` never auto-refreshes from real account P&L, a deliberate,
+documented choice (an allocation ceiling, not auto-compounding), but that drift used to be
+completely silent. A non-blocking `TOTAL_VALUE_DRIFT` WARNING now fires when this portfolio's
+own real position value (explicitly scoped to its configured tickers, never a sibling
+portfolio's shared-account positions) exceeds the configured `total_value` by more than
+`total_value_drift_warning_pct` (default `0.10`, `config.example.yaml`). Real per-portfolio
+cash can't be isolated on a shared IBKR account without deeper accounting than this project
+attempts, so only the POSITION side is compared, not a full "total value" reconstruction, and
+only the anomalous high side is checked (positions alone exceeding the whole configured capital
+base is a clear, honest signal, not a guess).
 
 **One real gap, closed by this project**: if the process/container was off through an ENTIRE
 scheduled rebalance day, there is no automatic catch-up, that day's rebalance never happens.

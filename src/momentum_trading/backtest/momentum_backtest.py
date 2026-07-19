@@ -102,6 +102,23 @@ class BacktestConfig:
                                              # picks each rebalance, a real signal-construction
                                              # change, not just a new warning. See
                                              # execution/live_signal.py's resolve_momentum_scores().
+    persist_dry_run_state: bool = False     # DRY-RUN-ONLY, no effect in --live (the broker is
+                                             # always the source of truth there). Default False
+                                             # preserves dry-run's existing behavior exactly:
+                                             # current_positions = {} on every invocation, a
+                                             # stateless signal/sizing preview. Set True to
+                                             # instead reconstruct a simulated portfolio from
+                                             # the trade log's own dry_run=True rows
+                                             # (execution/live_signal.py's
+                                             # reconstruct_dry_run_positions()), so dry-run mode
+                                             # behaves like a persistent, no-IBKR-required paper
+                                             # ledger across separate invocations. For an
+                                             # ACTUALLY broker-verified persistent paper
+                                             # portfolio, prefer --live --port 7497 against a
+                                             # real IBKR paper account instead, that path
+                                             # already resumes correctly for the reasons
+                                             # documented in docs/RUNNING.md's "Restart and
+                                             # Resume Behavior" section.
     initial_capital: float = 100_000.0
     commission: float = 0.0                 # flat $ per trade, BACKTEST-ONLY: only
                                              # run_risk_managed_backtest()'s simulated cash
@@ -157,6 +174,23 @@ class BacktestConfig:
                                              # drift_threshold/min_trade_size above, which are
                                              # dollar-value filters. High turnover is a sign the
                                              # momentum ranking is over-sensitive to noise.
+    total_value_drift_warning_pct: float = 0.10  # LIVE-ONLY advisory (non-blocking WARNING),
+                                             # only for a FIXED (non-null) total_value
+                                             # portfolio, total_value never auto-refreshes from
+                                             # real account P&L (a deliberate, documented
+                                             # choice, an allocation ceiling, not
+                                             # auto-compounding), so this warns when this
+                                             # portfolio's own real position value (explicitly
+                                             # scoped to its configured tickers, not the whole
+                                             # shared-account positions_value computation,
+                                             # which double-counts a ticker legitimately shared
+                                             # between two portfolios under TICKER OVERLAP)
+                                             # exceeds the configured total_value by more than
+                                             # this fraction, a sign the static number has gone
+                                             # stale. Real per-portfolio cash can't be isolated
+                                             # on a shared IBKR account, so only the POSITION
+                                             # side is compared, not a full "total value"
+                                             # reconstruction.
 
     # --- cash flow simulation ---
     monthly_contribution: float = 0.0       # $ added to cash at each rebalance date (0 = off)
@@ -252,6 +286,10 @@ class BacktestConfig:
             errors.append(f"min_trade_size ({self.min_trade_size}) must be >= 0")
         if not (0 < self.max_turnover_pct <= 1.0):
             errors.append(f"max_turnover_pct ({self.max_turnover_pct}) should be in (0, 1.0]")
+        if self.total_value_drift_warning_pct <= 0:
+            errors.append(
+                f"total_value_drift_warning_pct ({self.total_value_drift_warning_pct}) must be > 0"
+            )
         if self.aggregate_drift_threshold < 0:
             errors.append(f"aggregate_drift_threshold ({self.aggregate_drift_threshold}) must be >= 0")
         if not (0 <= self.max_portfolio_drawdown_pct < 1.0):

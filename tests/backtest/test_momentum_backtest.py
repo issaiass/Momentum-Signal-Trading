@@ -84,6 +84,23 @@ class TestBacktestConfigValidation:
         with pytest.raises(ValueError, match="max_turnover_pct"):
             BacktestConfig(max_turnover_pct=1.5)
 
+    def test_persist_dry_run_state_defaults_false(self):
+        # Default false preserves dry-run's existing behavior exactly: current_positions is {}
+        # on every invocation, this must never flip on by accident from an old config.yaml.
+        assert BacktestConfig().persist_dry_run_state is False
+
+    def test_persist_dry_run_state_is_settable(self):
+        assert BacktestConfig(persist_dry_run_state=True).persist_dry_run_state is True
+
+    def test_total_value_drift_warning_pct_default(self):
+        assert BacktestConfig().total_value_drift_warning_pct == 0.10
+
+    def test_total_value_drift_warning_pct_non_positive_raises(self):
+        with pytest.raises(ValueError, match="total_value_drift_warning_pct"):
+            BacktestConfig(total_value_drift_warning_pct=0.0)
+        with pytest.raises(ValueError, match="total_value_drift_warning_pct"):
+            BacktestConfig(total_value_drift_warning_pct=-0.05)
+
     def test_zero_or_negative_holding_period_raises(self):
         # holding_period must be > 0, 0 or negative months between rebalances is
         # meaningless. This is the ONLY hard validation on holding_period: fractional

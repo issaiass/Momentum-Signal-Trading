@@ -61,7 +61,11 @@ README says so on purpose.
   `docs/RISK_CONSTRAINTS.md`. Restart-safe by construction in `--live` mode (broker-sourced
   holdings, calendar-derived scheduling, persisted local/bind-mounted state, both native Python
   and Docker), plus a non-blocking `MISSED_REBALANCE_DAY` warning if a scheduled rebalance was
-  missed entirely while the app was off, see `docs/RUNNING.md`'s "Restart and Resume Behavior"
+  missed entirely while the app was off, automatic safe reconciliation of a ticker orphaned from
+  its own portfolio's history (`ORPHANED_POSITION`) versus one that may belong to a sibling
+  portfolio sharing the account (`UNRECOGNIZED_POSITION`, left untouched), a `total_value` drift
+  warning for fixed-capital portfolios, and an opt-in `persist_dry_run_state` flag for a
+  no-IBKR-required persistent paper ledger, see `docs/RUNNING.md`'s "Restart and Resume Behavior"
 - Hash-chained, tamper-evident audit logs for trades, email commands, and alerts, three
   separate logs, kept deliberately apart
 - Categorized email notifications (CRITICAL/STANDARD/PERIODIC/DAILY/WARNING) and pydantic-
@@ -82,7 +86,7 @@ README says so on purpose.
   monthly report, 1-day/1/2/3-week for the daily report)
 - Dockerized, self-scheduling deployment (`docker compose up -d`, internal cron, no manual
   triggering needed for normal operation)
-- 423-test pytest suite covering code mechanics, order sizing, config validation, audit-log
+- 449-test pytest suite covering code mechanics, order sizing, config validation, audit-log
   integrity, multi-portfolio capital math, entirely on synthetic/mocked data, no live broker
   required to run it
 
@@ -205,7 +209,7 @@ momentum-trading/
 │       └── email_diagnostics.py     backs `daily-runner --test-email`, live SMTP+IMAP
 │                                     check independent of config.yaml
 │
-└── tests/                         pytest suite (423 tests), mirrors src/ layout where a
+└── tests/                         pytest suite (449 tests), mirrors src/ layout where a
     ├── conftest.py                  test's primary subject is a single sub-package;
     ├── test_architecture.py         cross-cutting/integration tests stay at tests/ root
     ├── test_daily_runner.py
@@ -315,11 +319,17 @@ answer whether the strategy actually works.
 - **Multi-portfolio ticker leakage on a shared account is not just theoretical**, observed
   directly: portfolio2 (tickers `XLF`/`XLE`/`GLD`/`TLT`) inherited a stray `BIL` position from
   portfolio1 via `reqPositions()` (which returns every position on the shared IBKR account, not
-  filtered per portfolio), and correctly refused to trade it blind (`HOLD, no live price
-  available`, since portfolio2 never fetches prices outside its own ticker universe), but this
-  also means it can never reconcile or exit that position on its own. This is the real-world
-  shape of the `TICKER OVERLAP` warning every run already prints when portfolios share tickers;
-  worth understanding before running multiple portfolios against one real account.
+  filtered per portfolio). The single-portfolio version of this (a ticker held from a past
+  broader `tickers:` list, then removed from config while still open) is now automatically
+  reconciled, priced and made eligible for exit again, with a non-blocking `ORPHANED_POSITION`
+  WARNING, see `docs/RUNNING.md`'s "Restart and Resume Behavior" section. The genuinely
+  cross-portfolio case (a position not confirmed by THIS portfolio's own trade log, likely
+  belonging to a sibling portfolio) still correctly refuses to trade it blind, that's the safe,
+  intended behavior, not an unhandled gap, now surfaced explicitly as a non-blocking
+  `UNRECOGNIZED_POSITION` WARNING instead of a bare, unexplained `HOLD, no live price
+  available`. This is the real-world shape of the `TICKER OVERLAP` warning every run already
+  prints when portfolios share tickers; worth understanding before running multiple portfolios
+  against one real account.
 
 ### Who should allocate capital here
 

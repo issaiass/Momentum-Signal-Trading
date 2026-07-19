@@ -186,6 +186,19 @@ that tests enforce, don't casually violate these when editing:
   or the two config-toggle constraints in `backtest/momentum_backtest.py`, are visible to
   `risk/risk_monitor.py`, that independence is deliberate, see `docs/RISK_CONSTRAINTS.md`'s
   closing section before wiring any of this into the monitor.
+  `run()` gained an optional `extra_price_tickers` param (backs `daily_runner.py`'s orphaned-
+  ticker reconciliation): widens the internal `fetch_live_prices()` call so `generate_orders()`
+  can price/exit a currently-held-but-no-longer-configured ticker, WITHOUT widening the
+  momentum ranking/selection universe, `resolve_momentum_scores()` still only ever sees
+  `daily_prices[tickers]`, never the extra ones, getting priced must never make a ticker
+  re-selectable as a NEW pick. `None` (default) is byte-identical to this function's behavior
+  before this param existed.
+  `reconstruct_dry_run_positions(log_path)` reuses `measure_live_performance()`'s EXISTING FIFO
+  `open_positions`/`open_position_avg_cost` computation (filtered to `dry_run=True` rows), not a
+  second, separately-maintained FIFO implementation, reshaped into the same
+  `{ticker: {'shares', 'avg_entry_price'}}` shape `get_ibkr_positions()` returns. Backs
+  `daily_runner.py`'s opt-in `persist_dry_run_state` (default `False`), never called in `--live`
+  mode.
 - **`risk/circuit_breaker.py`**, extracted from `daily_runner.py` with alerting
   dependency-injected (`alert_fn` param) specifically so `risk/` has zero import dependency on
   `interfaces/`, enforced by an AST-based test
@@ -195,6 +208,15 @@ that tests enforce, don't casually violate these when editing:
   with `execution/live_signal.py`, the whole point is that a bug in the trading logic can't
   also blind the thing watching for it. It has its own minimal FIFO P&L re-derivation and its
   own YAML read for `total_value`. Preserve this segregation in any future edit here.
+  `--log-dir`'s default is `logs_dir()`, matching where `daily_runner.py`/`live_signal.py`
+  actually write `live_trades_log_<portfolio>.csv`, confirmed (not assumed) by finding it
+  previously defaulted to `data_dir()`, a genuinely DIFFERENT directory, meaning this process's
+  default Docker cron invocation (`docker-entrypoint.sh`, no `--log-dir` override) could never
+  find any trades and silently reported "within risk limits" forever, its hourly halt check was
+  never actually reachable. If editing this default again, add a test exercising `main()`'s own
+  default (not just `compute_realized_and_open_pnl()` with an explicit `log_path`, which alone
+  would not have caught this), see `tests/test_governance.py::TestRiskMonitor`'s two regression
+  tests for the pattern.
 - **`interfaces/`**, email notifications (categorized CRITICAL/STANDARD/PERIODIC/DAILY/WARNING,
   CRITICAL can never be filtered, DAILY uniquely defaults to OFF when unconfigured, every other
   filterable category defaults to ON) and pydantic-validated email-commanded remote actions.
@@ -247,8 +269,41 @@ that tests enforce, don't casually violate these when editing:
   "portfolio has run at least once before" guard (skips a brand-new portfolio's very first
   run, nothing to have missed yet). See `docs/RUNNING.md`'s "4.11c. Restart and Resume
   Behavior" for the full user-facing explanation, including dry-run mode's deliberate lack of
-  persisted simulated-portfolio state (unrelated to this gap, a separate, intentional design
-  choice).
+  persisted simulated-portfolio state by default (unrelated to this gap, a separate, intentional
+  design choice, though `BacktestConfig.persist_dry_run_state`, default `False`, opts a
+  portfolio into `execution/live_signal.py`'s `reconstruct_dry_run_positions()` instead, see
+  below).
+  A "rebalance in progress" marker (`LOCK_DIR / f"rebalance_in_progress_{name}.marker"`,
+  `_write_rebalance_in_progress_marker()`/`_clear_rebalance_in_progress_marker()`, written
+  atomically via temp-file + `os.replace()`) brackets the `run(...)` call, a stale one found on
+  a LATER run fires a one-time `STALE_REBALANCE_MARKER` WARNING (consumed after firing, not
+  persistent) flagging that a previous process crashed mid-rebalance, this is visibility only
+  for the one narrow gap the diff-based retry mechanism above can't fully close (a crash exactly
+  during in-flight order submission), it does NOT block the current run. `risk_monitor.py` is
+  deliberately never made aware of this marker, same independence principle as the six existing
+  risk constraints.
+  `_classify_orphaned_tickers(current_holdings, tickers, trade_log_path)` partitions a
+  held-but-not-configured ticker into `confirmed_orphaned` (this portfolio's OWN trade log,
+  via `derive_entry_date()`, confirms it was legitimately held here) or `unrecognized` (not
+  confirmed, could belong to a SIBLING portfolio sharing the same real IBKR account, the
+  documented multi-portfolio ticker-leakage scenario, `get_ibkr_positions()` returns the WHOLE
+  account unfiltered to every portfolio). Only `confirmed_orphaned` gets priced (via `run()`'s
+  new `extra_price_tickers` param, see below) and fires `ORPHANED_POSITION`; `unrecognized`
+  stays exactly as untouched as before this feature existed and fires `UNRECOGNIZED_POSITION`
+  instead. Don't ever widen pricing/trading to `unrecognized` tickers, that reintroduces the
+  cross-portfolio-sell risk this classification exists to prevent.
+  `_compute_scoped_positions_value()` backs the `TOTAL_VALUE_DRIFT` WARNING (fixed/non-null
+  `total_value` portfolios, `--live` only, `cfg.total_value_drift_warning_pct`, default `0.10`):
+  an EXPLICIT `set(tickers) | set(confirmed_orphaned)` intersection, deliberately NOT reusing
+  the pre-existing `positions_value`/`write_portfolio_snapshot()` computation, which was found
+  (during this work, not previously known) to double-count a ticker legitimately shared between
+  two portfolios under the documented `TICKER OVERLAP` warning, since it only scopes implicitly
+  via `latest_prices` price-availability, not an explicit ticker-membership check. That
+  pre-existing double-counting bug itself is NOT fixed here, out of scope, flag it before
+  touching `positions_value` or `write_portfolio_snapshot()` again. Only the anomalous-high side
+  is checked (real positions exceeding the whole configured capital base), real per-portfolio
+  cash can't be isolated on a shared IBKR account, so no attempt is made to reconstruct a full
+  "total value," only the position side.
 
 **Config flow**: `config.yaml` (gitignored; copy from `config.example.yaml`) →
 `daily_runner.load_config()` builds one `BacktestConfig` per portfolio from

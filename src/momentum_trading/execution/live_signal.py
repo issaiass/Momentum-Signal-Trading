@@ -310,6 +310,45 @@ def calculate_period_returns(df_prices: pd.DataFrame, period: int = 12) -> pd.Da
     return df_prices.ffill().pct_change(periods=period)
 
 
+def compute_required_lookback_days(cfg: BacktestConfig, buffer_days: int = 60) -> int:
+    """
+    Minimum days of daily history fetch_live_prices() must pull so every consumer of the
+    resulting daily_prices DataFrame gets a valid computation, not just momentum ranking.
+    LIVE-ONLY (lookback_period has no effect on the backtest engine, which consumes
+    pre-computed picks). Confirmed by direct reproduction, not guessed: the OLD fixed
+    lookback_days=400 default gave the shipped default (lookback_period=12, holding_period=1)
+    only a 1-monthly-bar margin (14 bars available, 13 needed), and produced an ENTIRELY NaN
+    latest-row score (calculate_period_returns()'s pct_change(periods=...) with insufficient
+    history), silently resolving to ZERO picks (get_top_etfs()'s nsmallest() on an all-NaN rank
+    row returns empty), for a monthly lookback_period as unremarkable as 18 or a weekly one
+    around 15 (60 weeks).
+
+    Covers every real consumer of daily_prices, not just resolve_momentum_scores(): the same
+    DataFrame also feeds compute_target_weights()'s regime filter (regime_sma_window),
+    portfolio-level vol targeting (portfolio_vol_lookback), position-level inverse-vol sizing
+    (vol_lookback_days), and, when enabled, the correlation penalty/spike checks
+    (correlation_lookback_days/correlation_spike_baseline_window), each with the identical
+    silent-NaN failure mode if under-fetched. holding_period < 1 (weekly regime) mirrors
+    resolve_momentum_scores()'s own week-quarter formula so the two stay in lockstep.
+    buffer_days=60 gives the shipped default roughly 2 full extra monthly bars of real margin
+    (today's ~1-bar margin was too thin), and scales proportionally for any larger configured
+    lookback_period in either regime.
+    """
+    if cfg.holding_period < 1:
+        weeks_lookback = max(1, round(cfg.lookback_period * 4))
+        momentum_days = weeks_lookback * 7
+    else:
+        momentum_days = round(cfg.lookback_period) * 31
+    candidates = [momentum_days, cfg.vol_lookback_days, cfg.portfolio_vol_lookback]
+    if cfg.use_regime_filter:
+        candidates.append(cfg.regime_sma_window)
+    if cfg.use_correlation_penalty:
+        candidates.append(cfg.correlation_lookback_days)
+    if cfg.use_correlation_spike_regime:
+        candidates.append(cfg.correlation_spike_baseline_window)
+    return max(candidates) + buffer_days
+
+
 def resolve_momentum_scores(
     daily_prices: pd.DataFrame, lookback_period: float, holding_period: float,
     skip_month_guardrail: bool = False,
@@ -2070,7 +2109,11 @@ def run(
     if daily_prices is not None and not daily_prices.empty and set(price_tickers).issubset(daily_prices.columns):
         pass  # reuse the already-fetched prices, skip the redundant fetch_live_prices() call
     else:
-        daily_prices = with_retry(fetch_live_prices, 3, 2.0, price_tickers, fmp_api_key=fmp_api_key, eodhd_api_key=eodhd_api_key)
+        daily_prices = with_retry(
+            fetch_live_prices, 3, 2.0, price_tickers,
+            lookback_days=compute_required_lookback_days(cfg),
+            fmp_api_key=fmp_api_key, eodhd_api_key=eodhd_api_key,
+        )
     if daily_prices.empty:
         logger.error("No price data returned; aborting.")
         return {}
@@ -2098,6 +2141,26 @@ def run(
         daily_prices, tickers, cfg, lookback_period,
         os.environ.get("FMP_API_KEY"), os.environ.get("EODHD_API_KEY"),
     ).dropna(how="all")
+    # --- Defensive backstop: compute_required_lookback_days() sizes the fetch correctly for
+    #     the CONFIGURED lookback_period/holding_period, but a vendor genuinely not having that
+    #     much real history for every ticker (e.g. a newly-listed ETF) is an edge case sizing
+    #     alone can't fix. scores.empty here means EVERY resampled date came back all-NaN
+    #     (calculate_period_returns()'s pct_change(periods=...) had insufficient history for
+    #     ANY row, not just the latest), the exact silent-zero-picks failure mode this whole
+    #     function exists to catch, now diagnosable instead of a quiet empty rebalance. ---
+    if scores.empty:
+        logger.warning(
+            "[%s] No valid momentum scores this rebalance (lookback_period=%s, "
+            "holding_period=%s), the fetched price history is too short for this "
+            "configuration, resulting in zero picks.", portfolio, lookback_period, cfg.holding_period,
+        )
+        log_alert(
+            portfolio, "INSUFFICIENT_PRICE_HISTORY", "WARNING",
+            f"No valid momentum scores this rebalance (lookback_period={lookback_period}, "
+            f"holding_period={cfg.holding_period}), zero picks resulted, the fetched price "
+            f"history is too short for this configuration.",
+            log_path=alerts_log_path,
+        )
     ranks = assign_ranks(scores)
     latest_scores = scores.iloc[-1] if not scores.empty else None
     latest_ranks_row = ranks.iloc[-1] if not ranks.empty else None

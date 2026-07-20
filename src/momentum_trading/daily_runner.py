@@ -1431,9 +1431,14 @@ def main():
             #     Widened by confirmed_orphaned so those positions also regain stop-loss/
             #     time-stop protection (both already skip any ticker missing from
             #     latest_prices), not just order-generation reconciliation. ---
-            from .execution.live_signal import fetch_live_prices, check_price_staleness
+            from .execution.live_signal import (
+                fetch_live_prices, check_price_staleness, compute_required_lookback_days,
+            )
             price_fetch_tickers = tickers + confirmed_orphaned if confirmed_orphaned else tickers
-            daily_prices = with_retry(fetch_live_prices, 3, 2.0, price_fetch_tickers)
+            daily_prices = with_retry(
+                fetch_live_prices, 3, 2.0, price_fetch_tickers,
+                lookback_days=compute_required_lookback_days(cfg),
+            )
             latest_prices = daily_prices.iloc[-1].to_dict() if not daily_prices.empty else {}
 
             # --- Abort THIS portfolio's run (not the whole process)

@@ -168,6 +168,28 @@ that tests enforce, don't casually violate these when editing:
   inline, don't reintroduce a hardcoded `resample("ME")` there. `is_lookback_period_too_short()`
   is the sub-2-week advisory warning, mirrors `is_holding_period_too_frequent()`'s non-blocking
   pattern, only meaningful in the weekly regime.
+  `execution/live_signal.py`'s `compute_required_lookback_days(cfg, buffer_days=60)` sizes the
+  LIVE `fetch_live_prices()` call to what the portfolio's config actually needs, fixing a real,
+  confirmed incident: `fetch_live_prices()`'s old fixed `lookback_days=400` default was NEVER
+  scaled to `lookback_period`/`holding_period`, and gave the shipped default
+  (`lookback_period=12`) only a 1-monthly-bar margin; a monthly `lookback_period` as
+  unremarkable as `18`, or a weekly one around `15` (60 weeks), produced an ENTIRELY NaN
+  latest-row score (`calculate_period_returns()`'s `pct_change(periods=...)` with insufficient
+  history), which `get_top_etfs()`'s `nsmallest()` silently turns into ZERO picks, no exception,
+  no diagnostic. Covers every real consumer of `daily_prices`, not just momentum ranking (the
+  same DataFrame also feeds `compute_target_weights()`'s regime filter, portfolio/position vol
+  targeting, and correlation checks, each with the identical silent-NaN failure mode if
+  under-fetched). Wired into BOTH real fetch call sites: `daily_runner.py`'s "ALWAYS runs" block
+  and `run()`'s own internal fallback fetch. LIVE-ONLY, `lookback_period` has no effect on the
+  backtest engine. A defensive backstop (`scores.empty` after `resolve_strategy_scores(...)
+  .dropna(how="all")`, right where `scores`/`latest_scores` are computed in `run()`) logs an
+  `INSUFFICIENT_PRICE_HISTORY` `WARNING` (via `log_alert()`, matching this file's own
+  log-only-no-direct-email convention, `daily_runner.py` owns email-sending for every other
+  advisory check, don't reintroduce a direct `send_action_email()` call from inside this file)
+  for the residual edge case sizing alone can't fix (a vendor genuinely not having that much
+  real history for a given ticker), so a future occurrence is immediately diagnosable instead of
+  a silent empty rebalance (which, worse, would also SELL every currently-held position, since
+  `generate_orders()`'s target universe would be empty too, not merely "no new buys").
   `is_rebalance_day()` targets the first REAL trading day of the period (monthly or weekly), not
   a fixed calendar date: `mcal.get_calendar(exchange)` (default `"NYSE"`) +
   `cal.schedule(start_date, end_date)` builds the exchange's actual trading-session list for the

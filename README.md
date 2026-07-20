@@ -405,6 +405,20 @@ answer whether the strategy actually works.
   supports both (`SMTP_PORT=465` picks `smtplib.SMTP_SSL`), plus a configurable
   `SMTP_TIMEOUT_SECONDS` (default `30`) and one bounded retry, shared by every SMTP call site
   in the project. See `docs/DEPLOYMENT.md`'s "Troubleshooting: SMTP timeouts".
+- **A real, confirmed silent-zero-picks failure for a larger `lookback_period` (2026-07-20), now
+  fixed**: the LIVE price fetch's window was hardcoded at 400 days regardless of the portfolio's
+  configured `lookback_period`/`holding_period`. Reproduced directly, not guessed: the shipped
+  default (`lookback_period=12`) only had a 1-monthly-bar margin under the old fixed window, and
+  a monthly `lookback_period` as unremarkable as `18`, or a weekly one around `15` (60 weeks),
+  produced an entirely NaN latest-row momentum score, silently resolving to ZERO picks, no
+  exception, no warning, and (worse) `generate_orders()` would then SELL every currently-held
+  position too, since its target universe would be empty. `execution/live_signal.py`'s
+  `compute_required_lookback_days()` now sizes the fetch to what the portfolio's actual config
+  needs (covering momentum ranking, the regime filter, vol targeting, and correlation checks,
+  every real consumer of the fetched price history, not just ranking), wired into both real
+  fetch call sites, plus a defensive `INSUFFICIENT_PRICE_HISTORY` warning for the residual edge
+  case (a vendor genuinely lacking that much real history for a ticker) that sizing alone can't
+  fix. LIVE-ONLY, `lookback_period` has no effect on the backtest engine.
 
 ### Who should allocate capital here
 

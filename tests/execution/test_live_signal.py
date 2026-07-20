@@ -27,6 +27,7 @@ from momentum_trading.execution.live_signal import (
     compute_low_capital_drop_fraction, is_low_capital_drop_too_high,
     most_recent_rebalance_target_date,
     build_position_performance, resolve_momentum_scores, calculate_period_returns,
+    compute_required_lookback_days,
     _realized_weighted_portfolio_vol, apply_absolute_momentum_filter,
 )
 from momentum_trading.core.audit_log import read_recent_alerts
@@ -342,6 +343,77 @@ class TestIsLowCapitalDropTooHigh:
 
     def test_below_threshold_is_not_too_high(self):
         assert is_low_capital_drop_too_high(0.10, 0.30) is False
+
+
+class TestComputeRequiredLookbackDays:
+    """
+    Confirmed by direct reproduction (not guessed): the OLD fixed lookback_days=400 default
+    gave the shipped default (lookback_period=12, holding_period=1) only a 1-monthly-bar
+    margin, and silently produced an all-NaN latest-row score (zero picks) for a monthly
+    lookback_period as unremarkable as 18, or a weekly one around 15 (60 weeks). These tests
+    pin the formula that replaces the fixed default.
+    """
+
+    def test_default_config_gets_comfortable_margin_over_old_400(self):
+        # The shipped default (lookback_period=12, holding_period=1) previously had only a
+        # 1-monthly-bar margin under the old fixed 400. The new formula must give more room,
+        # not just barely clear the same edge.
+        cfg = BacktestConfig(lookback_period=12, holding_period=1)
+        days = compute_required_lookback_days(cfg)
+        assert days > 400
+
+    def test_monthly_scales_with_lookback_period(self):
+        cfg_small = BacktestConfig(lookback_period=6, holding_period=1, use_regime_filter=False)
+        cfg_large = BacktestConfig(lookback_period=18, holding_period=1, use_regime_filter=False)
+        assert compute_required_lookback_days(cfg_large) > compute_required_lookback_days(cfg_small)
+
+    def test_weekly_scales_in_weeks_not_months(self):
+        # holding_period < 1: lookback_period is in week-quarters, same round(x*4) formula as
+        # resolve_momentum_scores() itself, must stay in lockstep or the fetch window and the
+        # ranking window disagree about what "this many periods back" means.
+        cfg = BacktestConfig(lookback_period=15, holding_period=0.25, use_regime_filter=False)
+        days = compute_required_lookback_days(cfg)
+        weeks_lookback = round(15 * 4)  # 60 weeks
+        assert days >= weeks_lookback * 7  # at least the raw weeks requirement, plus buffer
+
+    def test_regime_filter_widens_the_window_when_it_dominates(self):
+        # A tiny lookback_period under use_regime_filter=True (regime_sma_window=150 default)
+        # must not under-fetch relative to the regime filter's own trailing-SMA requirement.
+        cfg = BacktestConfig(lookback_period=1, holding_period=0.25, use_regime_filter=True,
+                              regime_sma_window=150)
+        days = compute_required_lookback_days(cfg)
+        assert days >= 150
+
+    def test_correlation_penalty_widens_the_window_when_it_dominates(self):
+        cfg = BacktestConfig(lookback_period=1, holding_period=1, use_regime_filter=False,
+                              use_correlation_penalty=True, correlation_lookback_days=200)
+        days = compute_required_lookback_days(cfg)
+        assert days >= 200
+
+    def test_fix_actually_closes_the_gap_for_a_large_monthly_lookback(self):
+        # Regression: reproduces this epic's own repro. A 400-day fetch left lookback_period=18
+        # with an entirely NaN latest row (zero picks). Fetching compute_required_lookback_days()
+        # days instead must NOT be all-NaN.
+        cfg = BacktestConfig(lookback_period=18, holding_period=1, use_regime_filter=False)
+        days = compute_required_lookback_days(cfg)
+        dates = pd.bdate_range(end=pd.Timestamp("2026-07-20"), periods=int(days * 5 / 7))
+        rng = np.random.default_rng(1)
+        prices = pd.DataFrame(
+            {"SPY": 100 * np.cumprod(1 + rng.normal(0.0003, 0.01, len(dates)))}, index=dates,
+        )
+        scores = resolve_momentum_scores(prices, lookback_period=18, holding_period=1)
+        assert not scores.iloc[-1].isna().all()
+
+    def test_fix_actually_closes_the_gap_for_a_large_weekly_lookback(self):
+        cfg = BacktestConfig(lookback_period=15, holding_period=0.25, use_regime_filter=False)
+        days = compute_required_lookback_days(cfg)
+        dates = pd.bdate_range(end=pd.Timestamp("2026-07-20"), periods=int(days * 5 / 7))
+        rng = np.random.default_rng(1)
+        prices = pd.DataFrame(
+            {"SPY": 100 * np.cumprod(1 + rng.normal(0.0003, 0.01, len(dates)))}, index=dates,
+        )
+        scores = resolve_momentum_scores(prices, lookback_period=15, holding_period=0.25)
+        assert not scores.iloc[-1].isna().all()
 
 
 class TestResolveMomentumScores:
@@ -670,6 +742,60 @@ class TestRunReusesPreFetchedDailyPrices:
         )
 
         assert fetch_calls == [["SPY", "QQQ"]]
+
+
+class TestRunInsufficientPriceHistoryWarning:
+    """
+    Defensive backstop: even with compute_required_lookback_days() sizing the fetch correctly,
+    a vendor genuinely not having enough real history for any ticker (or a daily_prices
+    passed in directly, e.g. by a caller bypassing daily_runner.py) can still leave every
+    resampled date NaN. This must be diagnosable, not a silent empty rebalance.
+    """
+
+    def _short_daily_prices(self, n_business_days, seed=1):
+        dates = pd.bdate_range(end=pd.Timestamp("2026-07-20"), periods=n_business_days)
+        rng = np.random.default_rng(seed)
+        return pd.DataFrame(
+            {"SPY": 100 * np.cumprod(1 + rng.normal(0.0003, 0.01, n_business_days))}, index=dates,
+        )
+
+    def test_warns_and_logs_alert_when_scores_come_back_empty(self, monkeypatch, tmp_path, caplog):
+        import momentum_trading.execution.live_signal as ls
+        # Deliberately too little history for lookback_period=18 (needs ~18 monthly bars).
+        short_prices = self._short_daily_prices(60)
+        monkeypatch.setattr(ls, "fetch_live_prices", lambda tickers, **k: short_prices[list(tickers)])
+        monkeypatch.chdir(tmp_path)
+        alerts_log_path = str(tmp_path / "alerts_log.csv")
+
+        cfg = BacktestConfig(holding_period=1, lookback_period=18, use_regime_filter=False)
+        with caplog.at_level("WARNING"):
+            ls.run(
+                tickers=["SPY"], current_holdings={}, total_value=1000.0, cfg=cfg,
+                top_n=1, lookback_period=18, dry_run=True, portfolio="p1",
+                alerts_log_path=alerts_log_path,
+            )
+
+        assert any("No valid momentum scores" in r.message for r in caplog.records)
+        with open(alerts_log_path) as f:
+            content = f.read()
+        assert "INSUFFICIENT_PRICE_HISTORY" in content
+
+    def test_no_warning_with_sufficient_history(self, monkeypatch, tmp_path, caplog):
+        import momentum_trading.execution.live_signal as ls
+        long_prices = self._short_daily_prices(450)
+        monkeypatch.setattr(ls, "fetch_live_prices", lambda tickers, **k: long_prices[list(tickers)])
+        monkeypatch.chdir(tmp_path)
+        alerts_log_path = str(tmp_path / "alerts_log.csv")
+
+        cfg = BacktestConfig(holding_period=1, lookback_period=12, use_regime_filter=False)
+        with caplog.at_level("WARNING"):
+            ls.run(
+                tickers=["SPY"], current_holdings={}, total_value=1000.0, cfg=cfg,
+                top_n=1, lookback_period=12, dry_run=True, portfolio="p1",
+                alerts_log_path=alerts_log_path,
+            )
+
+        assert not any("No valid momentum scores" in r.message for r in caplog.records)
 
 
 class TestRunAbsoluteMomentumFilter:

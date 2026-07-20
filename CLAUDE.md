@@ -96,6 +96,59 @@ that tests enforce, don't casually violate these when editing:
   fetch is never cached, so a transient outage or a since-added API key doesn't block retrying.
   `core/macro_data.py` needs its own `FRED_API_KEY` (free, `fred.stlouisfed.org`), unset means
   the whole macro section is silently omitted, not an error.
+- **`core/strategy_signals.py`** (NEW module, selectable-momentum-strategy plan), dispatches on
+  `BacktestConfig.strategy_type` (`config.yaml`'s per-portfolio `default_risk`/`risk_overrides`,
+  one of 11 allowed values, `ALLOWED_STRATEGY_TYPES` in `backtest/momentum_backtest.py`, see
+  `docs/MOMENTUM_STRATEGIES.md`), the single shared router BOTH `execution/live_signal.py`'s
+  `run()` (LIVE) and this file's own `generate_strategy_monthly_picks()` (BACKTEST) call, so live
+  and backtest can never diverge on which tickers get selected for a given strategy. Deliberately
+  imports `resolve_momentum_scores()`/`assign_ranks()` from `execution/live_signal.py`, a
+  documented one-directional exception to `core/`'s usual "no dependency on `execution/`" rule
+  (this module's own docstring explains why: reusing the shared resample/skip-month-guardrail
+  logic rather than reimplementing it a second time, avoiding exactly the live/backtest
+  divergence risk this whole architecture exists to prevent).
+  `resolve_strategy_scores(daily_prices, tickers, cfg, lookback_period, fmp_api_key=None,
+  eodhd_api_key=None)` is the LIVE-facing router (scores for "today", scopes `daily_prices` to
+  `tickers` internally EXCEPT for `residual_momentum`, which needs the wider unscoped
+  `daily_prices` since its benchmark is very likely not one of `tickers` itself);
+  `generate_strategy_monthly_picks(daily_prices, tickers, cfg, lookback_period, top_n)` is the
+  BACKTEST-facing counterpart (a full historical `monthly_picks` series feedable UNCHANGED into
+  `run_custom_backtest()`/`run_risk_managed_backtest()`, neither of which needed any change).
+  `_BASE_SCORE_STRATEGY_TYPES` (`momentum`, `relative_momentum`, `dual_momentum`,
+  `volatility_scaled_momentum`, `correlation_weighted_momentum`, `absolute_momentum`,
+  `rank_sign_momentum`) all fall through to the EXISTING `resolve_momentum_scores()` unchanged
+  for SCORING, they only affect sizing/exposure (via `daily_runner.py`'s
+  `apply_strategy_type_preset()`) or selection (`absolute_momentum`), never ranking.
+  `resolve_strategy_picks(scores_row, ranks_row, tickers, cfg, top_n)` centralizes the
+  "cross-sectional `top_n` cutoff vs. absolute per-ticker selection" decision, shared by `run()`
+  and `generate_strategy_monthly_picks()`: every `strategy_type` except `absolute_momentum`
+  replicates `get_top_etfs()`'s exact behavior, `absolute_momentum` delegates to
+  `select_absolute_momentum_picks(latest_scores, tickers, defensive_ticker)` (no `top_n` cutoff
+  at all, every ticker with a positive OWN trailing score is held, `defensive_ticker` alone
+  otherwise, `defensive_ticker` must be priced alongside the portfolio's own `tickers:`, the same
+  "must be priced" requirement `dual_momentum`'s `use_absolute_momentum` already documents).
+  Four genuinely new ranking functions, one per strategy: `blend_momentum_scores()` (reused
+  UNCHANGED from `core/functions_quant_extensions.py`, previously fully coded but dead code, zero
+  production call sites before this, for `multi_timeframe_composite`, resamples to monthly FIRST
+  then blends across `cfg.multi_timeframe_lookbacks`/`multi_timeframe_weights`);
+  `resolve_residual_momentum_scores(daily_prices, tickers, benchmark, lookback_period,
+  holding_period)` (`residual_momentum`, market-model OLS beta via `np.polyfit` on trailing DAILY
+  returns against `cfg.regime_benchmark`, reused, no new field,
+  `residual_score = raw_period_return - beta * raw_benchmark_period_return`, requires the
+  benchmark priced in `daily_prices` or raises `ValueError`, unlike the regime filter's silent
+  no-op); `resolve_path_dependent_momentum_scores(daily_prices, tickers, lookback_period,
+  holding_period)` (`path_dependent_momentum`, linear-trend R² on log-price via `np.polyfit`,
+  `path_adjusted_score = raw_period_return * trend_r_squared`, purely price-based, no benchmark
+  needed); `resolve_hybrid_multi_factor_scores(daily_prices, tickers, lookback_period,
+  holding_period, fundamentals_by_ticker)` (`hybrid_multi_factor`, LIVE-ONLY, blends a momentum
+  percentile rank with a Quality/Value composite percentile built from `core/fundamentals.py`'s
+  EXISTING P/E, PEG, ROE, Debt-to-Equity, Current Ratio fields via
+  `_quality_value_percentile_scores()`, `get_cached_or_fetch_fundamentals()` fetched per ticker
+  inside `resolve_strategy_scores()`'s `hybrid_multi_factor` branch, reusing `core/fundamentals.py`
+  UNCHANGED). `generate_strategy_monthly_picks()` RAISES `NotImplementedError` for
+  `hybrid_multi_factor` (not a silent wrong number), no point-in-time historical fundamentals
+  data source exists anywhere in this project or its free-tier vendors, applying today's
+  fundamentals across historical dates would silently look-ahead bias a backtest.
 - **`backtest/momentum_backtest.py`**, `BacktestConfig` (validated on construction) and
   `resolve_target_weights()`, the sizing logic shared by *both* the backtest engine and live
   execution, specifically so the two paths can't silently diverge. `lookback_period` is LIVE-ONLY
@@ -150,6 +203,24 @@ that tests enforce, don't casually violate these when editing:
   `max_bid_ask_spread_pct` (default `None`) backs the "Liquidity/Slippage Monitor" (Nice-to-Have
   tier), threaded through to `execution/live_signal.py`'s `place_orders_ibkr()`, LIVE-ONLY,
   requires a real-time IBKR market-data subscription, see that file's bullet below.
+  `strategy_type: str = "momentum"` (`ALLOWED_STRATEGY_TYPES`, 11 values, validated in
+  `__post_init__` via the exact `sizing_method` `not in (...)` precedent) selects among the
+  momentum strategies documented in `docs/MOMENTUM_STRATEGIES.md`, per-portfolio via
+  `config.yaml`'s `default_risk`/`risk_overrides`, dispatched by `core/strategy_signals.py`'s
+  `resolve_strategy_scores()`/`generate_strategy_monthly_picks()` (see that file's own bullet
+  above). `daily_runner.py`'s `apply_strategy_type_preset()` auto-configures a bundle of EXISTING
+  fields for the 4 preset-only `strategy_type`s (`dual_momentum`, `volatility_scaled_momentum`,
+  `correlation_weighted_momentum`, `rank_sign_momentum`) BEFORE `BacktestConfig` construction, an
+  explicit field value in the portfolio's own config always wins over the preset.
+  `multi_timeframe_lookbacks: list = field(default_factory=lambda: [3, 6, 12])` (needed
+  `field(default_factory=...)`, a bare mutable list default raises a dataclass error) and
+  `multi_timeframe_weights: list | None = None` back `multi_timeframe_composite`.
+  `sizing_method` gained a third value, `"equal_weight"` (`_equal_weight_weights(picks)`, every
+  pick gets an identical `1/N` weight, ignoring both score magnitude and trailing vol), the
+  `rank_sign_momentum` preset's field, independently usable without selecting that
+  `strategy_type` too, wired into `resolve_target_weights()` alongside the existing
+  `inverse_vol`/`score_proportional` branches, same position-cap/correlation-penalty pipeline
+  applied afterward regardless of which of the three is chosen.
 - **`execution/live_signal.py`**, live signal/order generation, IBKR integration (`ibapi`
   `EClient`/`EWrapper`, not a third-party wrapper), multi-portfolio orchestration, FIFO P&L,
   hash-chained audit log. `fetch_ohlcv_for_tickers()` is distinct from `fetch_live_prices()`,
@@ -244,6 +315,22 @@ that tests enforce, don't casually violate these when editing:
   spread drops into the EXISTING `dropped_orders` mechanism (`DROPPED_WIDE_SPREAD`, same merge
   pattern as `DROPPED_FRACTIONAL`/`DROPPED_INSUFFICIENT_CASH`), don't just `continue` without
   recording it there.
+  `run()`'s picks-selection call was rerouted through `core/strategy_signals.py`'s
+  `resolve_strategy_scores()`/`resolve_strategy_picks()` (a LAZY, function-local import inside
+  `run()`'s body, breaking an otherwise-circular import since `core/strategy_signals.py` itself
+  imports `resolve_momentum_scores()`/`assign_ranks()` from THIS file, the same lazy-import
+  pattern this file already uses for `ibapi`), the single live call site every `strategy_type`
+  (see `docs/MOMENTUM_STRATEGIES.md`) now flows through. For
+  `strategy_type == "hybrid_multi_factor"`, `resolve_strategy_scores()` needs
+  `FMP_API_KEY`/`EODHD_API_KEY` to fetch real fundamentals; `run()` reads them directly via
+  `os.environ.get(...)` at that one call site, DELIBERATELY NOT reusing this function's own
+  `fmp_api_key`/`eodhd_api_key` params (those remain scoped to `fetch_live_prices()`'s
+  PRICE-vendor selection only, and `daily_runner.py` deliberately never populates them, confirmed
+  by every strategy-plan epic's live validation, production price data comes from `yfinance`).
+  Reusing the price-fetch keys for fundamentals too would have silently switched the real
+  production price vendor for EVERY portfolio the first time `daily_runner.py` started passing
+  real keys through, an unrelated, unbudgeted side effect discovered and avoided while wiring up
+  `hybrid_multi_factor`.
 - **`risk/circuit_breaker.py`**, extracted from `daily_runner.py` with alerting
   dependency-injected (`alert_fn` param) specifically so `risk/` has zero import dependency on
   `interfaces/`, enforced by an AST-based test
@@ -428,6 +515,8 @@ explicitly rejected, since an env var toggle would let real-money trading get en
 - `docs/EMAIL_REPORTING.md` / `docs/EMAIL_COMMANDS.md`, notification and remote-command setup
 - `docs/RISK_CONSTRAINTS.md`, long-term vs. short-term momentum risk constraints (advisory
   warnings and opt-in config toggles), and why they're deliberately invisible to `risk_monitor.py`
+- `docs/MOMENTUM_STRATEGIES.md`, the selectable `strategy_type` field, all 11 momentum variants,
+  how presets compose with explicit config values, and per-strategy best-parameter tables
 
 ## Constraints for documentation
 - Do not use "—" to comment, document the code or add this marks on files.

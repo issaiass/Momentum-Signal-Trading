@@ -519,11 +519,15 @@ today's, not the missed day's) is left to you.
 - **Alternative position sizing**: set `sizing_method: score_proportional` in `config.yaml`'s
   risk config to weight by momentum strength instead of inverse volatility. See
   `STRATEGY_THEORY.md` for the theory and a worked comparison example.
-- **Multi-Timeframe Composite momentum**: set `strategy_type: multi_timeframe_composite` in a
-  portfolio's `risk_overrides` to blend multiple lookback windows (default 3/6/12-month, see
-  `multi_timeframe_lookbacks`/`multi_timeframe_weights`) into one ranking signal instead of a
-  single lookback, wired end to end (live AND backtest) via
-  `functions_quant_extensions.blend_momentum_scores()`, see `docs/MOMENTUM_STRATEGIES.md`.
+- **Selectable momentum strategy**: set `strategy_type` in a portfolio's `risk_overrides`, one
+  of 11 momentum variants (Dual, Volatility-Scaled, Correlation-Weighted, Rank & Sign,
+  Multi-Timeframe Composite, Absolute (Time-Series), Residual, Path-Dependent, Hybrid
+  Multi-Factor), independent per portfolio on a shared account, e.g.
+  `strategy_type: multi_timeframe_composite` blends multiple lookback windows (default
+  3/6/12-month, see `multi_timeframe_lookbacks`/`multi_timeframe_weights`) into one ranking
+  signal instead of a single lookback, wired end to end (live AND backtest) via
+  `functions_quant_extensions.blend_momentum_scores()`. Full field list, per-strategy
+  best-parameter tables, and which strategies are LIVE-ONLY: `docs/MOMENTUM_STRATEGIES.md`.
 - **Additional safety checks**: `max_dollar_drawdown`, `max_slippage_tolerance_pct`,
   `max_price_staleness_minutes`, `max_holding_days`, all in `config.yaml`'s risk config,
   all disabled by default (`null`/`0`).

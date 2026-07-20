@@ -101,7 +101,7 @@ README says so on purpose.
   monthly report, 1-day/1/2/3-week for the daily report)
 - Dockerized, self-scheduling deployment (`docker compose up -d`, internal cron, no manual
   triggering needed for normal operation)
-- 504-test pytest suite covering code mechanics, order sizing, config validation, audit-log
+- 566-test pytest suite covering code mechanics, order sizing, config validation, audit-log
   integrity, multi-portfolio capital math, entirely on synthetic/mocked data, no live broker
   required to run it
 
@@ -197,6 +197,10 @@ momentum-trading/
 │   │   │                             positions, FMP `/stable/` first, EODHD fallback, file-cached
 │   │   ├── macro_data.py            Fed Funds Rate, CPI via FRED, needs FRED_API_KEY,
 │   │   │                             portfolio-wide (one fetch per run), file-cached
+│   │   ├── strategy_signals.py      selectable strategy_type dispatch (see
+│   │   │                             docs/MOMENTUM_STRATEGIES.md), the shared router BOTH
+│   │   │                             live and backtest call so they can't diverge on which
+│   │   │                             tickers get selected for a given strategy
 │   │   ├── paths.py                 PROJECT_ROOT resolution, single source of truth for
 │   │   │                             where config.yaml/data/logs live, regardless of CWD
 │   │   ├── smtp_auth.py             shared SMTP auth for email sending, password-based
@@ -206,11 +210,12 @@ momentum-trading/
 │   │                                 kept separate from the trade log and email command log
 │   │
 │   ├── backtest/
-│   │   └── momentum_backtest.py     risk-managed backtest engine: BacktestConfig,
-│   │                                 run_custom_backtest, resolve_target_weights (shared
-│   │                                 sizing logic also used by execution/), crash protection
-│   │                                 (correlation-spike detection, liquidity-stress handling,
-│   │                                 time-based stops)
+│   │   └── momentum_backtest.py     risk-managed backtest engine: BacktestConfig
+│   │                                 (strategy_type selector, sizing_method incl.
+│   │                                 equal_weight), run_custom_backtest, resolve_target_weights
+│   │                                 (shared sizing logic also used by execution/), crash
+│   │                                 protection (correlation-spike detection, liquidity-stress
+│   │                                 handling, time-based stops)
 │   │
 │   ├── execution/
 │   │   └── live_signal.py           live signal generation, order generation, IBKR
@@ -238,7 +243,7 @@ momentum-trading/
 │       └── email_diagnostics.py     backs `daily-runner --test-email`, live SMTP+IMAP
 │                                     check independent of config.yaml
 │
-└── tests/                         pytest suite (504 tests), mirrors src/ layout where a
+└── tests/                         pytest suite (566 tests), mirrors src/ layout where a
     ├── conftest.py                  test's primary subject is a single sub-package;
     ├── test_architecture.py         cross-cutting/integration tests stay at tests/ root
     ├── test_daily_runner.py
@@ -254,7 +259,9 @@ momentum-trading/
     │   ├── test_technical_indicators.py
     │   ├── test_functions_quant_extensions.py   since-inception + trailing-window stats
     │   ├── test_fundamentals.py       P/E, PEG, ROE, Debt-to-Equity, Current Ratio
-    │   └── test_macro_data.py         Fed Funds Rate, CPI (FRED)
+    │   ├── test_macro_data.py         Fed Funds Rate, CPI (FRED)
+    │   └── test_strategy_signals.py   selectable strategy_type dispatch (11 momentum
+    │                                    variants), live/backtest parity
     ├── execution/
     │   └── test_live_signal.py
     └── interfaces/

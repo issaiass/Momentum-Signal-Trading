@@ -607,6 +607,147 @@ class TestComputeScopedPositionsValue:
         assert daily_runner._compute_scoped_positions_value({}, {}, ["SPY"], []) == 0.0
 
 
+class TestScopeOverlappingHoldings:
+    """
+    Epic 1 of the cross-portfolio-sell-prevention plan: the real root cause of a confirmed
+    incident (2026-07-16, portfolio1 sold portfolio2's real TLT/XLE/XLF shares) was that
+    get_ibkr_positions()'s whole-account result flowed straight into generate_orders()'s drift
+    math with zero per-portfolio scoping. For a ticker shared with >=1 sibling portfolio (per
+    check_ticker_overlap()'s `overlap` map), this caps the broker-reported share count at
+    min(broker_shares, this_portfolio's_own_derive_own_live_positions()_shares), so a portfolio
+    can never generate a SELL sized off a sibling's legitimately-held shares. A ticker unique to
+    this portfolio passes through byte-identical (no unnecessary FIFO substitution).
+    """
+
+    def _write_log(self, tmp_path, rows, name="log.csv"):
+        path = tmp_path / name
+        with open(path, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["timestamp", "ticker", "action", "shares", "price", "reason", "dry_run"])
+            w.writerows(rows)
+        return str(path)
+
+    def test_caps_shares_to_min_broker_and_own_fifo_when_broker_is_larger(self, tmp_path):
+        # The core leakage case: broker reports 10 shares of XLF (portfolio2's real position),
+        # but THIS portfolio (portfolio1) never bought any of its own.
+        log_path = self._write_log(tmp_path, [])
+        current_positions = {"XLF": {"shares": 10.0, "avg_entry_price": 56.0}}
+        scoped, capped = daily_runner.scope_overlapping_holdings(
+            current_positions, ["SPY", "XLF"], {"XLF": ["portfolio1", "portfolio2"]},
+            log_path, "portfolio1",
+        )
+        assert scoped["XLF"]["shares"] == pytest.approx(0.0)
+        assert capped == ["XLF"]
+
+    def test_leaves_shares_uncapped_when_own_fifo_covers_or_exceeds_broker(self, tmp_path):
+        # This portfolio's own log shows it bought all 5 shares the broker reports, no capping
+        # needed, the portfolio genuinely owns everything shown.
+        log_path = self._write_log(tmp_path, [
+            ["2026-01-05T09:35:00", "XLF", "BUY", 5, 56.0, "entry", False],
+        ])
+        current_positions = {"XLF": {"shares": 5.0, "avg_entry_price": 56.0}}
+        scoped, capped = daily_runner.scope_overlapping_holdings(
+            current_positions, ["SPY", "XLF"], {"XLF": ["portfolio1", "portfolio2"]},
+            log_path, "portfolio1",
+        )
+        assert scoped["XLF"]["shares"] == pytest.approx(5.0)
+        assert capped == []
+
+    def test_non_overlapping_ticker_passes_through_untouched(self, tmp_path):
+        log_path = self._write_log(tmp_path, [])
+        current_positions = {"SPY": {"shares": 3.0, "avg_entry_price": 500.0}}
+        scoped, capped = daily_runner.scope_overlapping_holdings(
+            current_positions, ["SPY"], {}, log_path, "portfolio1",
+        )
+        assert scoped == current_positions
+        assert capped == []
+
+    def test_ticker_absent_from_own_log_entirely_scopes_to_zero(self, tmp_path):
+        log_path = self._write_log(tmp_path, [])
+        current_positions = {"TLT": {"shares": 1.0, "avg_entry_price": 84.24}}
+        scoped, capped = daily_runner.scope_overlapping_holdings(
+            current_positions, ["TLT"], {"TLT": ["portfolio1", "portfolio2"]},
+            log_path, "portfolio1",
+        )
+        assert scoped["TLT"]["shares"] == pytest.approx(0.0)
+        assert capped == ["TLT"]
+
+    def test_capped_ticker_uses_this_portfolios_own_fifo_avg_cost_not_brokers_blended_one(self, tmp_path):
+        log_path = self._write_log(tmp_path, [
+            ["2026-01-05T09:35:00", "XLF", "BUY", 2, 40.0, "entry", False],
+        ])
+        # broker's blended avg cost (56.95) reflects BOTH portfolios' shares, this portfolio's
+        # own FIFO cost basis (40.0) is what should end up in the scoped result.
+        current_positions = {"XLF": {"shares": 10.0, "avg_entry_price": 56.95}}
+        scoped, capped = daily_runner.scope_overlapping_holdings(
+            current_positions, ["SPY", "XLF"], {"XLF": ["portfolio1", "portfolio2"]},
+            log_path, "portfolio1",
+        )
+        assert scoped["XLF"]["shares"] == pytest.approx(2.0)
+        assert scoped["XLF"]["avg_entry_price"] == pytest.approx(40.0)
+        assert capped == ["XLF"]
+
+    def test_real_incident_regression_fixture(self, tmp_path):
+        # Reproduces the actual 2026-07-16 incident's own numbers: portfolio1's rebalance sold
+        # a REAL TLT position (1.0 share), and partial XLE (4.5192 sh)/XLF (5.0905 sh) positions
+        # that were actually portfolio2's, because current_holdings was never scoped per
+        # portfolio. Portfolio1's own trade log had little/no buy history for these tickers.
+        log_path = self._write_log(tmp_path, [
+            # portfolio1 never bought TLT or XLF at all; a tiny, since-fully-sold XLE history.
+            ["2026-01-05T09:35:00", "XLE", "BUY", 0.48, 56.5, "entry", False],
+        ])
+        current_positions = {
+            "TLT": {"shares": 1.286, "avg_entry_price": 84.24},     # all portfolio2's
+            "XLE": {"shares": 5.6345 + 0.48, "avg_entry_price": 56.5},  # portfolio2's + a sliver of portfolio1's
+            "XLF": {"shares": 6.1881, "avg_entry_price": 56.56},    # all portfolio2's
+        }
+        overlap = {"TLT": ["portfolio1", "portfolio2"], "XLE": ["portfolio1", "portfolio2"],
+                   "XLF": ["portfolio1", "portfolio2"]}
+        scoped, capped = daily_runner.scope_overlapping_holdings(
+            current_positions, ["SPY", "QQQ", "XLK", "XLF", "XLE", "XLY", "XLP", "XLU", "GLD", "TLT", "BIL"],
+            overlap, log_path, "portfolio1",
+        )
+        assert scoped["TLT"]["shares"] == pytest.approx(0.0)
+        assert scoped["XLF"]["shares"] == pytest.approx(0.0)
+        assert scoped["XLE"]["shares"] == pytest.approx(0.48)
+        assert set(capped) == {"TLT", "XLE", "XLF"}
+
+    def test_full_path_scoped_current_holdings_prevents_the_cross_portfolio_sell_in_run(self, monkeypatch, tmp_path):
+        # The full path this fix protects: scope_overlapping_holdings()'s output feeds
+        # current_holdings into execution/live_signal.py's run(), which must NOT then generate
+        # a SELL for XLF sized off the broker-wide (sibling-inclusive) share count.
+        import numpy as np
+        import momentum_trading.execution.live_signal as live_signal
+
+        dates = pd.bdate_range("2023-01-01", periods=100)
+        rng = np.random.default_rng(2)
+        prices = pd.DataFrame({
+            "SPY": 100 * np.cumprod(1 + rng.normal(0.001, 0.01, 100)),
+            "XLF": 100 * np.cumprod(1 + rng.normal(0.001, 0.01, 100)),
+        }, index=dates)
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        monkeypatch.chdir(tmp_path)
+
+        log_path = self._write_log(tmp_path, [])  # portfolio1 never bought any XLF itself
+        broker_current_positions = {"XLF": {"shares": 10.0, "avg_entry_price": 56.0}}
+        scoped, capped = daily_runner.scope_overlapping_holdings(
+            broker_current_positions, ["SPY", "XLF"], {"XLF": ["portfolio1", "portfolio2"]},
+            log_path, "portfolio1",
+        )
+        assert capped == ["XLF"]
+        current_holdings = {t: p["shares"] for t, p in scoped.items()}
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False, top_n=2)
+        orders = live_signal.run(
+            tickers=["SPY", "XLF"], current_holdings=current_holdings, total_value=1000.0,
+            cfg=cfg, top_n=2, lookback_period=3.0, dry_run=True,
+        )
+        # XLF's scoped current_holdings is 0 (this portfolio's own log shows nothing), so any
+        # order for it must be a BUY/HOLD from a clean slate, never a SELL sized against the
+        # 10 broker-reported shares that actually belong to the sibling portfolio.
+        assert orders["XLF"]["action"] != "SELL"
+
+
 class TestAlertFallback:
     """
     If SMTP isn't configured, an alert must still be VISIBLE (as an ERROR log

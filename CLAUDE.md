@@ -456,6 +456,34 @@ that tests enforce, don't casually violate these when editing:
   is checked (real positions exceeding the whole configured capital base), real per-portfolio
   cash can't be isolated on a shared IBKR account, so no attempt is made to reconstruct a full
   "total value," only the position side.
+  `scope_overlapping_holdings(current_positions, tickers, overlap, trade_log_path, portfolio)`
+  fixes a real, confirmed incident (2026-07-16, not a theoretical risk): `get_ibkr_positions()`'s
+  whole-account result was flowing straight into `current_holdings` with zero per-portfolio
+  scoping, so for a ticker configured in more than one portfolio sharing this real account, one
+  portfolio's rebalance saw a SIBLING portfolio's legitimately-held shares as its own
+  over-allocation and generated a real SELL against them, confirmed directly against real trade
+  log timestamps and share counts matching the sibling's own buy sizes. Caps
+  `current_positions[ticker].shares` at `min(broker_reported_shares, this portfolio's own
+  execution/live_signal.py's derive_own_live_positions() shares)` for every ticker BOTH
+  configured in this portfolio's own `tickers:` list AND present in `check_ticker_overlap()`'s
+  overlap map, and substitutes this portfolio's own FIFO `avg_entry_price` for that ticker too
+  (the broker's `avgCost` is blended across ALL shares including a sibling's, which would also
+  corrupt stop-loss threshold accuracy). A ticker with zero FIFO history for this portfolio
+  scopes to `0` even if the broker shows a large combined position, the safe failure direction,
+  same "unrecognized -> untouched" philosophy as `_classify_orphaned_tickers()` above (a
+  different, narrower scenario: that one only covers a ticker no longer in a portfolio's CURRENT
+  config, never a ticker actively configured in two portfolios at once, which is what actually
+  caused this). Called immediately after `get_ibkr_positions()`, before `current_holdings` is
+  built or used anywhere, so every downstream consumer (orphaned-ticker classification, `run()`/
+  `generate_orders()`, stop-loss checks, snapshot writing) gets the corrected numbers for free.
+  `check_ticker_overlap()`'s call is HOISTED above the per-portfolio loop (previously only
+  computed inside the warning-email gate) so `overlap` is unconditionally available every
+  iteration. Fires a new `OVERLAPPING_TICKER_SCOPED` WARNING alert only on a run where capping
+  actually happened (naming the ticker, both share counts, and the sibling portfolio), distinct
+  from the pre-existing static `TICKER_OVERLAP` warning (still fires whenever configs share a
+  ticker regardless of whether capping ever triggers, now reworded to reflect that destructive
+  sells are prevented, not just flagged). No new config field, this corrects unintended
+  behavior, always-on, not an opt-in toggle like `skip_month_guardrail`/`use_absolute_momentum`.
 
 **Config flow**: `config.yaml` (gitignored; copy from `config.example.yaml`) →
 `daily_runner.load_config()` builds one `BacktestConfig` per portfolio from

@@ -94,10 +94,19 @@ portfolios:
   hand-specified allocation side by side, on the same schedule, same run.
 - **Ticker overlap across portfolios** (e.g. both portfolios above hold XLF/XLE/GLD/TLT) is
   checked once at the start of every run and triggers a warning email + log line if found,
-  each portfolio computes and submits its own orders independently, so a shared ticker on a
-  shared account risks uncoordinated, conflicting orders against the same real position. This
-  is a warning, not a blocking error (some setups intentionally run different weightings on the
-  same tickers across portfolios, like the example above), review the warning, don't ignore it.
+  each portfolio computes and submits its own orders independently. This is a warning, not a
+  blocking error (some setups intentionally run different weightings on the same tickers across
+  portfolios, like the example above), review the warning, don't ignore it. A shared ticker on a
+  shared account is now SAFE from the one genuinely destructive failure mode this used to only
+  warn about: a real, confirmed incident (2026-07-16) had one portfolio's rebalance sell a
+  SIBLING portfolio's legitimately-held shares of a shared ticker, because the broker's
+  whole-account position query flowed into order sizing with no per-portfolio scoping.
+  `daily_runner.py`'s `scope_overlapping_holdings()` fixes this: each portfolio's view of a
+  shared ticker is now capped at its own trade log's real shares, so it can never generate a
+  SELL sized off a sibling's position. Aggregate exposure/vol-targeting for each portfolio still
+  doesn't account for the sibling's position in the same name, that part of the warning's
+  rationale is unchanged, uncoordinated (but no longer destructive) orders against a shared
+  ticker are still worth reviewing.
 - `top_n` (how many top-momentum-ranked tickers to actually hold) is a normal
   `default_risk`/`risk_overrides` field like any other, give each portfolio its own value
   the same way you'd override `stop_loss_pct`. There is no limit on the number of portfolios,

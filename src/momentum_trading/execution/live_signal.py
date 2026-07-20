@@ -988,12 +988,31 @@ def measure_live_performance(
     return result
 
 
+def _positions_from_trade_log(trade_log_path: str, dry_run: bool) -> dict:
+    """
+    Shared FIFO reconstruction: a current_positions-shaped dict
+    ({ticker: {'shares', 'avg_entry_price'}}, the SAME shape get_ibkr_positions() returns) from
+    a trade log, filtered to rows whose `dry_run` column matches, via
+    measure_live_performance()'s EXISTING FIFO open_positions/open_position_avg_cost
+    computation, not a new, separately-maintained FIFO implementation. Reused by
+    reconstruct_dry_run_positions() (dry_run=True) and derive_own_live_positions()
+    (dry_run=False), so the two can never drift onto two different FIFO algorithms.
+    """
+    if not os.path.isfile(trade_log_path):
+        return {}
+    result = measure_live_performance(
+        "1970-01-01", pd.Timestamp.today().strftime("%Y-%m-%d"),
+        log_path=trade_log_path, dry_run=dry_run,
+    )
+    return {
+        t: {"shares": shares, "avg_entry_price": result["open_position_avg_cost"].get(t, 0.0)}
+        for t, shares in result["open_positions"].items()
+    }
+
+
 def reconstruct_dry_run_positions(log_path: str = TRADE_LOG_PATH) -> dict:
     """
-    Reconstructs a current_positions-shaped dict ({ticker: {'shares', 'avg_entry_price'}}, the
-    SAME shape get_ibkr_positions() returns) from the trade log's dry_run=True rows only, via
-    measure_live_performance()'s EXISTING FIFO open_positions/open_position_avg_cost
-    computation, not a new, separately-maintained FIFO implementation.
+    Reconstructs a current_positions-shaped dict from the trade log's dry_run=True rows only.
 
     Backs an OPT-IN dry-run persistence feature (daily_runner.py's
     persist_dry_run_state config flag, default off): lets dry-run mode OPTIONALLY behave like
@@ -1001,16 +1020,22 @@ def reconstruct_dry_run_positions(log_path: str = TRADE_LOG_PATH) -> dict:
     of always starting from {} (dry-run's default, and this function's own return value when
     the log doesn't exist yet or has no open dry-run positions, matching that default exactly).
     """
-    if not os.path.isfile(log_path):
-        return {}
-    result = measure_live_performance(
-        "1970-01-01", pd.Timestamp.today().strftime("%Y-%m-%d"),
-        log_path=log_path, dry_run=True,
-    )
-    return {
-        t: {"shares": shares, "avg_entry_price": result["open_position_avg_cost"].get(t, 0.0)}
-        for t, shares in result["open_positions"].items()
-    }
+    return _positions_from_trade_log(log_path, dry_run=True)
+
+
+def derive_own_live_positions(trade_log_path: str = TRADE_LOG_PATH) -> dict:
+    """
+    Live counterpart to reconstruct_dry_run_positions(): reconstructs a current_positions-shaped
+    dict from the trade log's dry_run=False rows only, "what does THIS portfolio's own log show
+    it holds," independent of what the shared broker account shows for a ticker overall.
+
+    Backs Epic 1 of the cross-portfolio-sell-prevention plan (see
+    daily_runner.py's scope_overlapping_holdings()): each portfolio writes to its OWN
+    live_trades_log_<portfolio>.csv, so calling this with that path gives a portfolio-scoped
+    real-share count for a ticker even when the broker's whole-account reqPositions() result
+    combines it with a sibling portfolio's shares of the same ticker.
+    """
+    return _positions_from_trade_log(trade_log_path, dry_run=False)
 
 
 def derive_entry_date(ticker: str, trade_log_path: str = TRADE_LOG_PATH) -> pd.Timestamp | None:

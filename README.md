@@ -366,6 +366,20 @@ answer whether the strategy actually works.
   available`. This is the real-world shape of the `TICKER OVERLAP` warning every run already
   prints when portfolios share tickers; worth understanding before running multiple portfolios
   against one real account.
+- **A real, confirmed cross-portfolio destructive sell (2026-07-16), now fixed**: distinct from
+  the orphaned/unrecognized-ticker case above (that's about a ticker no longer in a portfolio's
+  CURRENT config), this was a ticker legitimately configured in TWO portfolios sharing one real
+  account at once. `get_ibkr_positions()`'s whole-account result flowed into `generate_orders()`'s
+  drift math with zero per-portfolio scoping, so one portfolio's rebalance saw a SIBLING
+  portfolio's legitimately-held shares of the shared ticker as its own over-allocation and sold
+  them down, confirmed directly against real trade-log timestamps and share counts.
+  `daily_runner.py`'s `scope_overlapping_holdings()` fixes this: for any ticker configured in
+  more than one portfolio, each portfolio's view of it is capped at `min(broker-reported shares,
+  that portfolio's own trade-log-derived shares)`, so a portfolio can never generate a SELL sized
+  off a sibling's shares. The `TICKER OVERLAP` warning above still fires exactly as before
+  (advisory visibility that two portfolios share exposure to a name), a new
+  `OVERLAPPING_TICKER_SCOPED` alert fires specifically when the cap actually activates on a
+  given run.
 
 ### Who should allocate capital here
 

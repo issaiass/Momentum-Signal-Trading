@@ -34,7 +34,7 @@ from .execution.live_signal import (
     get_ibkr_positions, get_ibkr_account_value, with_retry,
     place_orders_ibkr, log_orders, write_portfolio_snapshot, get_latest_snapshot,
     derive_entry_date, measure_live_performance, fetch_ohlcv_for_tickers,
-    build_position_performance, reconstruct_dry_run_positions,
+    build_position_performance, reconstruct_dry_run_positions, derive_own_live_positions,
 )
 from .core.smtp_auth import authenticate as authenticate_smtp, smtp_ready
 from .core.audit_log import log_alert, read_recent_alerts, ALERTS_LOG_PATH
@@ -237,6 +237,54 @@ def _compute_scoped_positions_value(current_positions: dict, latest_prices: dict
         for t, p in current_positions.items()
         if t in scoped and t in latest_prices
     )
+
+
+def scope_overlapping_holdings(
+    current_positions: dict, tickers: list[str], overlap: dict[str, list[str]],
+    trade_log_path: str, portfolio: str,
+) -> tuple[dict, list[str]]:
+    """
+    Real, confirmed incident fix (2026-07-16: portfolio1's rebalance sold portfolio2's real
+    TLT/XLE/XLF shares). get_ibkr_positions() returns the WHOLE real account's positions,
+    unfiltered, to every portfolio's loop iteration; generate_orders() computes drift against
+    whatever current_holdings it's handed with zero per-portfolio attribution, so for a ticker
+    configured in >1 portfolio sharing this account, one portfolio's rebalance could (and did)
+    see a SIBLING portfolio's legitimately-held shares as its own over-allocation and sell them
+    down. This caps that at the source, BEFORE current_holdings is built or used anywhere.
+
+    For every ticker BOTH in this portfolio's own `tickers` list AND present in `overlap` (i.e.
+    check_ticker_overlap()'s {ticker: [portfolio names]} map, shared with >=1 sibling), caps
+    `shares` at min(broker_reported_shares, this_portfolio's_own_derive_own_live_positions()
+    shares), and substitutes this portfolio's own FIFO avg_entry_price for that ticker (the
+    broker's avgCost is a blended cost basis across ALL shares including a sibling's, which
+    would also corrupt stop-loss threshold accuracy for that ticker otherwise). The broker is
+    ground truth for EXISTENCE (this portfolio's own claim can never exceed it); this
+    portfolio's own trade log is ground truth for ATTRIBUTION (a sibling's shares can never get
+    misattributed here). A ticker with zero FIFO history for this portfolio scopes to 0 even if
+    the broker shows a large combined position, the safe failure direction, symmetric with
+    _classify_orphaned_tickers()'s existing "unrecognized -> untouched" philosophy. A
+    non-overlapping ticker passes through completely untouched, no unnecessary FIFO
+    substitution for a ticker that was never actually shared.
+
+    Returns (scoped_current_positions, capped_tickers), capped_tickers backing the
+    OVERLAPPING_TICKER_SCOPED alert (fired only when this actually did something this run).
+    """
+    scoped = dict(current_positions)
+    capped = []
+    configured = set(tickers)
+    tickers_needing_scoping = [t for t in current_positions if t in configured and t in overlap]
+    if not tickers_needing_scoping:
+        return scoped, capped
+
+    own_positions = derive_own_live_positions(trade_log_path)
+    for t in tickers_needing_scoping:
+        own = own_positions.get(t, {"shares": 0.0, "avg_entry_price": 0.0})
+        broker_shares = current_positions[t]["shares"]
+        own_shares = own["shares"]
+        if own_shares < broker_shares:
+            scoped[t] = {"shares": own_shares, "avg_entry_price": own["avg_entry_price"]}
+            capped.append(t)
+    return scoped, capped
 
 
 # --------------------------------------------------------------------------- #
@@ -933,25 +981,35 @@ def main():
 
     # --- Ticker-overlap warning (non-blocking), portfolios sharing
     #     a ticker on the same real IBKR account would each independently compute and
-    #     submit orders against the same position, with no coordination between them. ---
-    if len(portfolios) > 1:
-        overlap = check_ticker_overlap(portfolios)
-        if overlap:
-            overlap_desc = "; ".join(f"{t}: {names}" for t, names in overlap.items())
-            logger.warning("TICKER OVERLAP across portfolios (independent, uncoordinated orders "
-                            "against the same real position if they share an account): %s", overlap_desc)
-            log_alert("ALL", "TICKER_OVERLAP", "WARNING", overlap_desc,
-                      log_path=ALERTS_LOG_PATH)
-            overlap_text = (
-                f"The following tickers appear in more than one portfolio in this run:\n"
-                f"{overlap_desc}\n\nEach portfolio computes and submits orders independently, "
-                f"if they share a real IBKR account, this can result in uncoordinated, "
-                f"conflicting orders against the same position. Review if unintentional."
-            )
-            send_action_email(
-                NotificationCategory.WARNING, "Ticker overlap across portfolios",
-                f"<pre>{overlap_text}</pre>", notification_cfg, plain_text_fallback=overlap_text,
-            )
+    #     submit orders against the same position, with no coordination between them.
+    #     `overlap` itself is HOISTED here (not just computed inside the `if overlap:` block
+    #     below), unconditionally available (empty dict for a single-portfolio config) before
+    #     the per-portfolio loop begins, since scope_overlapping_holdings() needs it every
+    #     iteration to prevent the destructive cross-portfolio sell this warning only used to
+    #     flag, never actually prevent, see that function's own docstring for the real
+    #     2026-07-16 incident this fixes. ---
+    overlap = check_ticker_overlap(portfolios) if len(portfolios) > 1 else {}
+    if overlap:
+        overlap_desc = "; ".join(f"{t}: {names}" for t, names in overlap.items())
+        logger.warning("TICKER OVERLAP across portfolios (destructive cross-portfolio "
+                        "sells are prevented, see scope_overlapping_holdings(), but signal/"
+                        "exposure computation for each portfolio still doesn't see the "
+                        "sibling's position in the same name): %s", overlap_desc)
+        log_alert("ALL", "TICKER_OVERLAP", "WARNING", overlap_desc,
+                  log_path=ALERTS_LOG_PATH)
+        overlap_text = (
+            f"The following tickers appear in more than one portfolio in this run:\n"
+            f"{overlap_desc}\n\nEach portfolio computes and submits orders independently. "
+            f"Destructive cross-portfolio sells are now prevented (scope_overlapping_"
+            f"holdings() caps each portfolio's view of a shared ticker at its own trade "
+            f"log's real shares), but aggregate exposure/vol-targeting for each portfolio "
+            f"still doesn't account for the sibling's position in the same name. Review if "
+            f"unintentional."
+        )
+        send_action_email(
+            NotificationCategory.WARNING, "Ticker overlap across portfolios",
+            f"<pre>{overlap_text}</pre>", notification_cfg, plain_text_fallback=overlap_text,
+        )
 
     # --- Resolve every portfolio's total_value ONCE, before
     #     the loop, total_value: null means "account value minus every OTHER portfolio's
@@ -1265,6 +1323,29 @@ def main():
             #     from resolved_total_values, resolved once above the loop. ---
             if args.live:
                 current_positions = with_retry(get_ibkr_positions, 3, 2.0, args.port)
+                # scope_overlapping_holdings() MUST run immediately here, before
+                # current_holdings is built or used by anything below (orphaned-ticker
+                # classification, run()/generate_orders(), stop-loss checks, snapshot writing),
+                # so every downstream consumer automatically sees the corrected, per-portfolio
+                # numbers, closing the real 2026-07-16 cross-portfolio-sell incident this fixes.
+                # Dry-run/backtest never query a shared real account, nothing to scope there.
+                current_positions, capped_tickers = scope_overlapping_holdings(
+                    current_positions, tickers, overlap, trade_log_path, name,
+                )
+                if capped_tickers:
+                    capped_desc = ", ".join(capped_tickers)
+                    logger.warning(
+                        "[%s] OVERLAPPING_TICKER_SCOPED: %s shared with a sibling portfolio "
+                        "(%s), this portfolio's own view capped at its own trade log's real "
+                        "shares, preventing a sell sized off the sibling's shares.",
+                        name, capped_desc, "; ".join(f"{t}: {overlap[t]}" for t in capped_tickers),
+                    )
+                    log_alert(
+                        name, "OVERLAPPING_TICKER_SCOPED", "WARNING",
+                        f"{capped_desc} shared with a sibling portfolio, this portfolio's view "
+                        f"capped at its own trade log's real shares this run.",
+                        log_path=ALERTS_LOG_PATH,
+                    )
             elif cfg.persist_dry_run_state:
                 # Opt-in (default False, see BacktestConfig.persist_dry_run_state), reconstructs
                 # a simulated portfolio from the trade log's own dry_run=True rows, so dry-run

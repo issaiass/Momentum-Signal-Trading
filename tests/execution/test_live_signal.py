@@ -1086,6 +1086,53 @@ class TestReconstructDryRunPositions:
         assert positions["XLK"]["avg_entry_price"] == pytest.approx(150.0)
 
 
+class TestDeriveOwnLivePositions:
+    """
+    Live counterpart to TestReconstructDryRunPositions above: reconstructs a
+    current_positions-shaped dict from the trade log's dry_run=False rows only, via the
+    SAME shared _positions_from_trade_log() helper (not a second, separately-maintained FIFO
+    implementation). Backs Epic 1 of the cross-portfolio-sell-prevention plan: this is "what
+    does THIS portfolio's own log show it holds," independent of what the shared broker
+    account shows for a ticker overall.
+    """
+
+    def test_missing_log_returns_empty_dict(self, tmp_path):
+        assert live_signal.derive_own_live_positions(str(tmp_path / "no_such_log.csv")) == {}
+
+    def test_reconstructs_shares_and_avg_cost_from_live_rows_only(self, tmp_path):
+        log_path = tmp_path / "log.csv"
+        with open(log_path, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["timestamp", "ticker", "action", "shares", "price", "reason", "dry_run"])
+            w.writerow(["2026-01-05T09:35:00", "XLK", "BUY", 5, 200.0, "entry", False])   # live
+            w.writerow(["2026-01-06T09:35:00", "XLK", "BUY", 2, 210.0, "entry", True])    # dry-run, excluded
+
+        positions = live_signal.derive_own_live_positions(str(log_path))
+        assert positions == {"XLK": {"shares": pytest.approx(5.0), "avg_entry_price": pytest.approx(200.0)}}
+
+    def test_fully_closed_live_position_is_absent(self, tmp_path):
+        log_path = tmp_path / "log.csv"
+        with open(log_path, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["timestamp", "ticker", "action", "shares", "price", "reason", "dry_run"])
+            w.writerow(["2026-01-05T09:35:00", "XLK", "BUY", 5, 200.0, "entry", False])
+            w.writerow(["2026-02-02T09:35:00", "XLK", "SELL", 5, 220.0, "exit", False])
+
+        assert live_signal.derive_own_live_positions(str(log_path)) == {}
+
+    def test_weighted_average_cost_across_two_buys(self, tmp_path):
+        log_path = tmp_path / "log.csv"
+        with open(log_path, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["timestamp", "ticker", "action", "shares", "price", "reason", "dry_run"])
+            w.writerow(["2026-01-05T09:35:00", "XLK", "BUY", 4, 100.0, "entry", False])
+            w.writerow(["2026-02-02T09:35:00", "XLK", "BUY", 4, 200.0, "add", False])
+        # (4*100 + 4*200) / 8 = 150.0
+        positions = live_signal.derive_own_live_positions(str(log_path))
+        assert positions["XLK"]["shares"] == pytest.approx(8.0)
+        assert positions["XLK"]["avg_entry_price"] == pytest.approx(150.0)
+
+
 class TestRunMultiPortfolio:
     """
     run_multi_portfolio() must keep each portfolio's signal, sizing, and

@@ -516,7 +516,15 @@ that tests enforce, don't casually violate these when editing:
 
 **Config flow**: `config.yaml` (gitignored; copy from `config.example.yaml`) →
 `daily_runner.load_config()` builds one `BacktestConfig` per portfolio from
-`default_risk` + that portfolio's `risk_overrides`. A `total_value: <number>` means a fixed
+`default_risk` + that portfolio's `risk_overrides`, and any `BacktestConfig` field is accepted
+via `**kwargs` even if `config.example.yaml` doesn't mention it. `config.example.yaml`
+documents every LIVE-relevant field as of this writing (confirmed by enumerating the dataclass
+directly against the file, not guessed); a lower-priority set of BACKTEST-ONLY research/notebook
+fields (`initial_capital`, the slippage/liquidity-stress cost-model knobs, `random_seed`,
+`monthly_contribution`, `log_file_path`) is tracked separately, not yet added, see the file's own
+header comment. None of `default_risk`/`risk_overrides` apply to `risk_monitor.py`, see its own
+bullet above.
+A `total_value: <number>` means a fixed
 capital baseline, used as-is every run, never auto-refreshed against real account P&L
 (intentional, an explicit allocation ceiling, not auto-compounding, see the `total_value` drift
 warning above). `total_value: null` does NOT mean "pull the full account value", it means "a

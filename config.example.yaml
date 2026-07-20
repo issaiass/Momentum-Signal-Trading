@@ -58,8 +58,21 @@ notifications:
 
 # Every field below is a BacktestConfig field (src/momentum_trading/backtest/momentum_backtest.py),
 # config.yaml's default_risk/risk_overrides pass straight through to it, so any field defined
-# there is automatically accepted here too; this is a curated subset of the ones most worth
-# tuning, not an exhaustive list of every BacktestConfig field.
+# there is automatically accepted here too. This file documents every field relevant to a
+# --live/scheduled deployment (confirmed by enumerating the dataclass directly, not guessed);
+# most fields apply to LIVE and BACKTEST both (via the shared resolve_target_weights()/
+# compute_vol_scalar() etc.), some are LIVE-ONLY, each field's own comment says which. A
+# separate, lower-priority set of BACKTEST-ONLY fields (research/notebook cost-model and
+# crash-protection knobs with no effect on daily-runner) is not yet included here.
+#
+# NONE of these fields apply to risk_monitor.py. It is a deliberately INDEPENDENT, read-only
+# oversight process (see CLAUDE.md/docs/RISK_CONSTRAINTS.md's "Independence from
+# risk_monitor.py"): it never imports BacktestConfig or reads default_risk/risk_overrides at
+# all, it has its own separate CLI flags instead (--portfolio, --initial-capital,
+# --max-loss-pct, --log-dir, --config), and the ONLY thing it reads from this file directly is
+# portfolios.<name>.total_value (below), not any risk-strategy field on this page. Don't look
+# here for "the risk monitor's stop-loss setting", it doesn't have config fields of that kind,
+# see `python -m momentum_trading.risk.risk_monitor --help`.
 default_risk:
   holding_period: 1               # months between forced rebalances, accepts fractional values
                                    # that map onto weeks: 0.25 = every week, 0.5 = every 2 weeks,
@@ -135,6 +148,17 @@ default_risk:
   commission: 0.0                 # flat $ commission charged per trade, BACKTEST-ONLY,
                                    # has no effect on --live (real commission is already
                                    # reflected in your broker's real account balance)
+  exchange: NYSE                  # LIVE + BACKTEST. Which real trading-session calendar
+                                   # is_rebalance_day()/_trading_days() use (via
+                                   # pandas_market_calendars' mcal.get_calendar(exchange)) to
+                                   # find the first REAL trading day of each rebalance period
+                                   # (monthly or weekly) and roll forward past weekends/
+                                   # holidays. Any exchange code pandas_market_calendars
+                                   # supports is valid (e.g. NASDAQ, LSE, TSX), only change
+                                   # this if your tickers actually trade on a different
+                                   # exchange's real calendar than NYSE's, mismatching this
+                                   # against where your tickers actually trade would target the
+                                   # wrong exchange's holiday schedule.
   drift_threshold: 0.03           # only trade a name if |target_weight - current_weight| exceeds this
                                    # (skips trivial rebalances that aren't worth the trading cost)
   min_trade_size: 25.0            # skip any single trade below this $ notional
@@ -199,8 +223,34 @@ default_risk:
                                    # regardless of how strong the momentum signal is.
   stop_loss_pct: 0.12             # per-position stop-loss, as a fraction below entry price
   auto_execute_stop_loss: false   # true = auto-sell on stop-loss trigger; false = flag + email only
+  attach_broker_stop_loss: false  # LIVE-ONLY. Belt-and-suspenders alongside
+                                   # auto_execute_stop_loss above, NOT a replacement for it:
+                                   # true attaches a REAL IBKR bracket order at BUY time (parent
+                                   # BUY + child STP SELL, reusing stop_loss_pct above for the
+                                   # stop offset), protecting the position at the BROKER ITSELF
+                                   # even when this app isn't running, unlike
+                                   # auto_execute_stop_loss's Python-side check, which only ever
+                                   # runs when daily-runner --live is actually invoked.
+                                   # auto_execute_stop_loss still has independent value even
+                                   # with this on (it's the only mechanism for max_holding_days,
+                                   # and reacts to a stop_loss_pct changed mid-position). See
+                                   # docs/RISK_CONSTRAINTS.md's "Broker-Side Protective Stop".
   use_correlation_penalty: false  # true = downweight sizing for positions correlated with other
                                    # current picks (distinct from use_correlation_spike_regime below)
+  correlation_lookback_days: 63   # LIVE + BACKTEST, only meaningful when use_correlation_penalty
+                                   # is true. Trailing trading days used to compute the pairwise
+                                   # correlation matrix inside resolve_target_weights() (shared
+                                   # sizing function, same one both the backtest and --live use),
+                                   # ~3 months by default. Most directly relevant to
+                                   # strategy_type: correlation_weighted_momentum (its preset
+                                   # sets use_correlation_penalty: true for you), but active for
+                                   # ANY strategy_type once use_correlation_penalty is enabled.
+  correlation_penalty_strength: 0.5   # LIVE + BACKTEST, [0, 1.0] (validated at load time), only
+                                   # meaningful when use_correlation_penalty is true. 0 = no
+                                   # penalty (identical to disabled), 1.0 = full pairwise-
+                                   # correlation-based downweighting. 0.5 (default) is a
+                                   # moderate middle ground; a value outside [0, 1.0] fails
+                                   # config validation with a clear error naming this field.
   aggregate_drift_threshold: 0.0  # 0 = disabled (always rebalance if scheduled);
                                    # e.g. 0.02 = skip the WHOLE rebalance if aggregate drift is <2%
                                    # (applies to both backtest and --live, same formula)
@@ -253,6 +303,21 @@ default_risk:
                                        # holdings and react defensively (crash protection,
                                        # distinct from use_correlation_penalty above). Applies to
                                        # both backtest and --live.
+  correlation_spike_short_window: 7       # LIVE + BACKTEST, only meaningful when
+                                           # use_correlation_spike_regime is true.
+                                           # detect_correlation_spike()'s SHORT recent window
+                                           # (trading days), compared against
+                                           # correlation_spike_baseline_window below to catch a
+                                           # fast-moving crash ("correlation goes to 1") faster
+                                           # than a single long rolling average would.
+  correlation_spike_baseline_window: 63   # the LONGER baseline window (trading days, ~3 months)
+                                           # the short window above is compared against.
+  correlation_spike_threshold: 0.3        # a percentage-POINT jump, not a percentage: 0.3 means
+                                           # "flag a spike when the short window's average
+                                           # pairwise correlation exceeds the baseline's by more
+                                           # than 30 percentage points." Strategy-agnostic, a
+                                           # market-wide crash detector, not tied to any single
+                                           # strategy_type.
 
   # Alternative sizing
   sizing_method: inverse_vol          # "inverse_vol" (default, underweights noisier names) or
@@ -276,6 +341,17 @@ default_risk:
                                        # "correlation_weighted_momentum" /
                                        # "multi_timeframe_composite"
 
+  # ONLY meaningful when strategy_type: multi_timeframe_composite above, ignored otherwise.
+  # Blends momentum scores across multiple lookback windows (months, resampled monthly first)
+  # into ONE ranking signal instead of relying on a single lookback_period, via
+  # core/functions_quant_extensions.py's blend_momentum_scores(). See docs/MOMENTUM_STRATEGIES.md.
+  multi_timeframe_lookbacks: [3, 6, 12]   # trailing months per blended window, matches
+                                           # blend_momentum_scores()'s own defaults exactly
+  multi_timeframe_weights: null           # null (default) = equal weight per lookback above;
+                                           # or a list of weights the SAME length as
+                                           # multi_timeframe_lookbacks, e.g. [0.5, 0.3, 0.2] to
+                                           # favor the shorter window
+
   # Additional execution safety checks
   max_dollar_drawdown: null           # e.g. 500.0, independent $ breaker alongside the % one above
   max_slippage_tolerance_pct: null    # e.g. 0.02, alert (not un-fill) on excess fill deviation
@@ -296,6 +372,21 @@ default_risk:
                                        # usable quote does NOT block the order, only a
                                        # confirmed-wide spread does. See docs/DEPLOYMENT.md's
                                        # IBKR troubleshooting section.
+
+  # Capacity / market-impact check
+  max_pct_of_adv: 0.0                 # 0 = disabled (default). LIVE-ONLY in practice (the
+                                       # backtest ENGINE never calls this, only validates the
+                                       # range), [0, 1.0]. Advisory, best-effort, NEVER blocks
+                                       # trading: run()'s capacity check fetches ~60 days of
+                                       # real volume and flags (CAPACITY WARNING, logged only) a
+                                       # position whose target dollar size exceeds this fraction
+                                       # of average daily dollar volume, a market-impact proxy.
+                                       # e.g. 0.05 = warn if a target position is more than 5%
+                                       # of a ticker's own average daily volume. The pure
+                                       # check_capacity() function (core/functions_quant_
+                                       # extensions.py) is also directly callable from a
+                                       # notebook for ad-hoc backtest-side capacity analysis,
+                                       # this field only wires it into the LIVE path.
 
 # Account-wide Drawdown Circuit Breaker (Recommended tier, docs/RISK_CONSTRAINTS.md),
 # deliberately a TOP-LEVEL field, not inside default_risk/risk_overrides: it's account-scoped,

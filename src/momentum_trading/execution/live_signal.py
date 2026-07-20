@@ -46,6 +46,7 @@ import logging
 import os
 import sys
 from datetime import datetime, timedelta
+from datetime import time as dt_time
 
 import numpy as np
 import pandas as pd
@@ -238,6 +239,42 @@ def is_rebalance_day(holding_period_months: float = 1, exchange: str = "NYSE",
         months_since_epoch = today.year * 12 + today.month
         return (months_since_epoch % holding_period_months) == 0
     return is_target
+
+
+def is_outside_all_trading_windows(exchange: str = "NYSE", allow_extended_hours: bool = False,
+                                    now: pd.Timestamp | None = None) -> bool:
+    """
+    True when `now` (default: real current time) falls entirely outside every window this
+    project could actually submit a live order into: regular trading hours (RTH, 9:30am-4:00pm
+    ET), plus, when allow_extended_hours is set, the pre-market/after-hours window too
+    (4:00-9:30am ET / 4:00-8:00pm ET, the exact coverage allow_extended_hours' own docstring in
+    place_orders_ibkr() already documents). Backs a proactive, up-front log line
+    (place_orders_ibkr()) instead of only learning this from IBKR's own error-399 "will not be
+    placed until <next session>" text after the fact, buried among other informational codes.
+
+    Compared purely on ET local time-of-day (`now.time()`), not via mcal's market_open/
+    market_close (which is_rebalance_day() above uses for DATE-level trading-day resolution,
+    a different question), a fixed 9:30/16:00/4:00/20:00 boundary set is accurate for every
+    regular session; this does NOT special-case early/late half-days (e.g. the day after
+    Thanksgiving's 1pm close), an intentional, documented simplification, this is an advisory
+    log line, not a hard submission gate. True also on a day the exchange has no session at all
+    (weekend/holiday, checked via the same mcal calendar is_rebalance_day() uses), zero valid
+    windows either way.
+    """
+    now = pd.Timestamp.now(tz="America/New_York") if now is None else (
+        now.tz_localize("America/New_York") if now.tzinfo is None else now.tz_convert("America/New_York")
+    )
+    cal = mcal.get_calendar(exchange)
+    today = now.normalize().tz_localize(None)
+    if cal.schedule(start_date=today, end_date=today).empty:
+        return True
+
+    t = now.time()
+    if dt_time(9, 30) <= t < dt_time(16, 0):
+        return False
+    if allow_extended_hours and dt_time(4, 0) <= t < dt_time(20, 0):
+        return False
+    return True
 
 
 def most_recent_rebalance_target_date(holding_period_months: float = 1, exchange: str = "NYSE",
@@ -1539,6 +1576,17 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
         BacktestConfig.stop_loss_pct, reused as-is for the bracket's stop offset, no duplicate
         field. Required (non-None) for attach_broker_stop_loss to do anything.
     """
+    # --- Proactive off-hours notice, before ever connecting. IBKR itself will still queue
+    #     the order for the next session rather than reject it (correct broker behavior), this
+    #     is purely visibility, surfacing what would otherwise only be learned from IBKR's own
+    #     error-399 text after submission, buried among other informational codes. ---
+    if is_outside_all_trading_windows(allow_extended_hours=allow_extended_hours):
+        logger.warning(
+            "Submitting outside all trading windows (%s), orders will queue at the broker "
+            "until the next session opens rather than executing now.",
+            "RTH + extended hours" if allow_extended_hours else "RTH",
+        )
+
     try:
         from ibapi.client import EClient
         from ibapi.wrapper import EWrapper

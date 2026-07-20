@@ -374,6 +374,18 @@ that tests enforce, don't casually violate these when editing:
   batch via `cancelOrder(orderId)` before that SELL is submitted, broker-truth-based, not
   dependent on any locally-cached order ID, zero extra IBKR round trip when
   `attach_broker_stop_loss` is off (the default).
+  `is_outside_all_trading_windows(exchange, allow_extended_hours, now)` (pure, `now` injectable
+  for testing, defaults to real `pd.Timestamp.now(tz="America/New_York")`) backs a proactive
+  `WARNING` logged at the very top of `place_orders_ibkr()`, before ever connecting, when the
+  current time is outside both RTH (9:30am-4:00pm ET) and, if `allow_extended_hours` is set,
+  the pre-market/after-hours window too (4:00-9:30am ET / 4:00-8:00pm ET, exactly
+  `allow_extended_hours`' own documented coverage). Compares plain ET time-of-day boundaries,
+  not `mcal`'s `market_open`/`market_close` (a deliberate, documented simplification, doesn't
+  special-case early/late half-days, this is advisory visibility, not a hard submission gate);
+  still uses `mcal` to confirm today has a session at all (weekend/holiday -> always "outside").
+  Motivated by a real observed gap: a late-night manual `--force-rebalance --live` test run
+  only surfaced this via IBKR's own `error 399` ("will not be placed until <next session>")
+  after submission, buried among other informational codes, not proactively.
 - **`risk/circuit_breaker.py`**, extracted from `daily_runner.py` with alerting
   dependency-injected (`alert_fn` param) specifically so `risk/` has zero import dependency on
   `interfaces/`, enforced by an AST-based test

@@ -594,6 +594,39 @@ a materially worse price than the same order would get during RTH. Off (`false`)
 LIVE-only, no effect on the backtest (which is daily-close based and has no concept of session
 timing).
 
+A run submitting orders fully outside RTH **and** (if enabled) the extended-hours window above
+(e.g. a manual `--force-rebalance --live` test run late at night) now logs a proactive
+`WARNING` up front, before ever connecting: `Submitting outside all trading windows (...),
+orders will queue at the broker until the next session opens rather than executing now.` This
+is not a bug or a blocked submission, IBKR itself correctly queues the order (`error 399`,
+"will not be placed at the exchange until <next session>") rather than rejecting it; the log
+line just surfaces that up front instead of leaving you to piece it together from IBKR's own
+per-order informational text afterward.
+
+## 4.15. Reviewing and cancelling stale resting orders
+
+Repeated manual `--force-rebalance --live` testing (especially outside trading hours, see
+above) can leave real, queued-but-unfilled orders resting on your paper (or real) account from
+a PREVIOUS test run that no longer reflects your current intent, TWS does not know "that was
+just a test," every order it accepts is real and stays resting until filled, cancelled, or
+expired.
+
+To review and clean these up:
+1. In TWS, open **Account -> Trades** (or the **Orders** panel), which lists every working
+   order, filled or not, across the account.
+2. A resting order shows a fill count like `0/1` (nothing filled yet) and a green (BUY) or red
+   (SELL) status dot; a bracket's protective stop (if `attach_broker_stop_loss` was used, see
+   `docs/RISK_CONSTRAINTS.md`'s "Broker-Side Protective Stop") appears as a child row indented
+   under its parent, labeled e.g. `StopLoss`.
+3. Right-click any order you don't want and choose **Cancel**, or select multiple and cancel
+   them together. Cancelling a bracket's parent BUY also cancels its linked child stop
+   automatically (confirmed: IBKR reports the child as `Cannot be cancelled, state: Cancelled`,
+   i.e. it's already gone, not a separate step you need to take).
+4. This app's own cancel-before-sell mechanism (`attach_broker_stop_loss` only, see
+   `execution/live_signal.py`'s `place_orders_ibkr()`) only ever cancels a resting protective
+   STP for a ticker THIS run is about to sell, it does not clean up unrelated stale orders from
+   old manual tests, that's a manual TWS review, same as any other real trading account.
+
 ## 5. Quick reference
 
 If you're running natively (or inside the container's own shell), use the command as-is. If

@@ -21,7 +21,7 @@ import momentum_trading.execution.live_signal as live_signal
 from momentum_trading.execution.live_signal import (
     generate_orders, log_orders, measure_live_performance, run_multi_portfolio, get_top_etfs,
     compute_aggregate_drift, derive_entry_date, compute_target_weights,
-    is_rebalance_day, is_holding_period_too_frequent, is_lookback_period_too_short,
+    is_rebalance_day, is_outside_all_trading_windows, is_holding_period_too_frequent, is_lookback_period_too_short,
     is_lookback_shorter_than_holding, is_lookback_to_holding_ratio_too_low,
     compute_turnover, is_turnover_too_high,
     compute_low_capital_drop_fraction, is_low_capital_drop_too_high,
@@ -110,6 +110,52 @@ class TestMostRecentRebalanceTargetDate:
         # this function is built directly on top of it.
         found = most_recent_rebalance_target_date(0.25, today=pd.Timestamp("2026-02-20"))
         assert found == pd.Timestamp("2026-02-17")
+
+
+class TestIsOutsideAllTradingWindows:
+    """
+    Backs place_orders_ibkr()'s proactive off-hours log line. All times injected via `now`
+    (tz-aware America/New_York) rather than the real wall clock. 2026-01-07 is a Wednesday,
+    a plain, holiday-free NYSE trading day.
+    """
+
+    def test_during_rth_is_not_outside(self):
+        now = pd.Timestamp("2026-01-07 10:00", tz="America/New_York")
+        assert is_outside_all_trading_windows(now=now) is False
+
+    def test_rth_open_boundary_is_not_outside(self):
+        now = pd.Timestamp("2026-01-07 09:30", tz="America/New_York")
+        assert is_outside_all_trading_windows(now=now) is False
+
+    def test_rth_close_boundary_is_outside(self):
+        now = pd.Timestamp("2026-01-07 16:00", tz="America/New_York")
+        assert is_outside_all_trading_windows(now=now) is True
+
+    def test_before_open_without_extended_hours_is_outside(self):
+        now = pd.Timestamp("2026-01-07 06:00", tz="America/New_York")
+        assert is_outside_all_trading_windows(now=now, allow_extended_hours=False) is True
+
+    def test_before_open_with_extended_hours_is_not_outside(self):
+        now = pd.Timestamp("2026-01-07 06:00", tz="America/New_York")
+        assert is_outside_all_trading_windows(now=now, allow_extended_hours=True) is False
+
+    def test_after_close_with_extended_hours_is_not_outside(self):
+        now = pd.Timestamp("2026-01-07 18:00", tz="America/New_York")
+        assert is_outside_all_trading_windows(now=now, allow_extended_hours=True) is False
+
+    def test_late_night_even_with_extended_hours_is_outside(self):
+        # This is exactly the scenario from the real incident that prompted this feature:
+        # a manual --force-rebalance --live run at ~23:57 ET, well outside extended hours too.
+        now = pd.Timestamp("2026-01-07 23:57", tz="America/New_York")
+        assert is_outside_all_trading_windows(now=now, allow_extended_hours=True) is True
+
+    def test_weekend_is_outside_regardless_of_time_or_extended_hours(self):
+        now = pd.Timestamp("2026-01-10 10:00", tz="America/New_York")  # Saturday
+        assert is_outside_all_trading_windows(now=now, allow_extended_hours=True) is True
+
+    def test_naive_timestamp_is_treated_as_eastern(self):
+        now = pd.Timestamp("2026-01-07 10:00")  # tz-naive
+        assert is_outside_all_trading_windows(now=now) is False
 
 
 class TestIsHoldingPeriodTooFrequent:
@@ -2122,6 +2168,58 @@ class TestBrokerStopLossBracket:
         ls.place_orders_ibkr(orders, port=9999, alerts_log_path=str(tmp_path / "alerts_log.csv"))
 
         assert captured[0]["tif"] == "DAY"
+
+
+class TestOffHoursSubmissionWarning:
+    """
+    place_orders_ibkr()'s proactive off-hours log line, gated by
+    is_outside_all_trading_windows() (already unit-tested in isolation above), monkeypatched
+    directly here so this doesn't depend on the real wall clock.
+    """
+
+    def _install_fake_ibkr(self, monkeypatch):
+        from ibapi.client import EClient
+
+        def fake_connect(self, host, port, clientId):
+            self.nextValidId(1)
+
+        def fake_run(self):
+            pass
+
+        def fake_place_order(self, orderId, contract, order):
+            self.orderStatus(orderId, "Filled", order.totalQuantity, 0, 100.0)
+
+        def fake_disconnect(self):
+            pass
+
+        monkeypatch.setattr(EClient, "connect", fake_connect)
+        monkeypatch.setattr(EClient, "run", fake_run)
+        monkeypatch.setattr(EClient, "placeOrder", fake_place_order)
+        monkeypatch.setattr(EClient, "disconnect", fake_disconnect)
+
+    def test_warns_when_outside_all_trading_windows(self, monkeypatch, tmp_path, caplog):
+        import momentum_trading.execution.live_signal as ls
+        self._install_fake_ibkr(monkeypatch)
+        monkeypatch.setattr(ls, "is_outside_all_trading_windows", lambda **k: True)
+
+        orders = {"BUY1": {"action": "BUY", "shares": 5}}
+        with caplog.at_level("WARNING"):
+            ls.place_orders_ibkr(orders, port=9999, expected_prices={"BUY1": 100.0},
+                                  alerts_log_path=str(tmp_path / "alerts_log.csv"))
+
+        assert any("outside all trading windows" in r.message for r in caplog.records)
+
+    def test_no_warning_during_trading_windows(self, monkeypatch, tmp_path, caplog):
+        import momentum_trading.execution.live_signal as ls
+        self._install_fake_ibkr(monkeypatch)
+        monkeypatch.setattr(ls, "is_outside_all_trading_windows", lambda **k: False)
+
+        orders = {"BUY1": {"action": "BUY", "shares": 5}}
+        with caplog.at_level("WARNING"):
+            ls.place_orders_ibkr(orders, port=9999, expected_prices={"BUY1": 100.0},
+                                  alerts_log_path=str(tmp_path / "alerts_log.csv"))
+
+        assert not any("outside all trading windows" in r.message for r in caplog.records)
 
 
 class TestCancelRestingStopBeforeSell:

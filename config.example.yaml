@@ -58,12 +58,11 @@ notifications:
 
 # Every field below is a BacktestConfig field (src/momentum_trading/backtest/momentum_backtest.py),
 # config.yaml's default_risk/risk_overrides pass straight through to it, so any field defined
-# there is automatically accepted here too. This file documents every field relevant to a
-# --live/scheduled deployment (confirmed by enumerating the dataclass directly, not guessed);
-# most fields apply to LIVE and BACKTEST both (via the shared resolve_target_weights()/
-# compute_vol_scalar() etc.), some are LIVE-ONLY, each field's own comment says which. A
-# separate, lower-priority set of BACKTEST-ONLY fields (research/notebook cost-model and
-# crash-protection knobs with no effect on daily-runner) is not yet included here.
+# there is automatically accepted here too. This file documents EVERY BacktestConfig field
+# (confirmed by enumerating the dataclass directly, not guessed); most fields apply to LIVE and
+# BACKTEST both (via the shared resolve_target_weights()/compute_vol_scalar() etc.), some are
+# LIVE-ONLY or BACKTEST-ONLY (research/notebook cost-model and crash-protection knobs with no
+# effect on daily-runner), each field's own comment says which.
 #
 # NONE of these fields apply to risk_monitor.py. It is a deliberately INDEPENDENT, read-only
 # oversight process (see CLAUDE.md/docs/RISK_CONSTRAINTS.md's "Independence from
@@ -387,6 +386,63 @@ default_risk:
                                        # extensions.py) is also directly callable from a
                                        # notebook for ad-hoc backtest-side capacity analysis,
                                        # this field only wires it into the LIVE path.
+
+  # Backtest-only (research/notebook use, no effect on daily-runner). run_risk_managed_backtest()
+  # is the ONLY consumer of every field in this block, none of them are read anywhere in the
+  # --live or dry-run execution path, setting these in a portfolio's risk_overrides has zero
+  # effect on real or simulated live trading, only on a backtest run started from a notebook
+  # that points at THIS config.yaml for its BacktestConfig kwargs.
+  initial_capital: 100000.0           # starting $ for a SIMULATED backtest equity curve. NOT the
+                                       # same field as a portfolio's own total_value above (that
+                                       # one sizes real/simulated LIVE positions), a common
+                                       # confusion point, the two are never read by the same code
+                                       # path and can safely differ.
+  base_slippage_bps: 2.0              # baseline simulated execution slippage, in basis points
+                                       # (2.0 = 0.02%), applied to every backtest fill regardless
+                                       # of vol. _slippage_bps() (momentum_backtest.py).
+  vol_slippage_multiplier: 0.5        # extra simulated slippage layered on top of
+                                       # base_slippage_bps, scaled by the traded ticker's own
+                                       # trailing annualized vol (higher-vol names get modeled as
+                                       # more expensive to trade), 0 = disable the vol scaling
+                                       # entirely and use a flat base_slippage_bps for every trade.
+  random_seed: 42                     # seeds np.random.default_rng() for the backtest's
+                                       # reproducible simulated-fill jitter, same seed = identical
+                                       # backtest run every time, change it to sample a different
+                                       # draw of the same jitter distribution.
+  monthly_contribution: 0.0           # $ added to the simulated backtest's cash balance at each
+                                       # rebalance date, 0 (default) = no recurring contribution,
+                                       # models a systematic dollar-cost-averaging backtest instead
+                                       # of a single lump-sum initial_capital.
+  log_file_path: trades_log.txt       # where run_risk_managed_backtest() writes its own
+                                       # plain-text per-trade backtest log (fills, slippage,
+                                       # contributions, reduce-only skips). UNRELATED to
+                                       # daily_runner.py's real, hash-chained
+                                       # logs/live_trades_log_<portfolio>.csv audit trail, this
+                                       # one is backtest-only and gets overwritten ("w" mode) on
+                                       # every run, not append-only.
+
+  # Liquidity-stress crash protection (BACKTEST-ONLY, distinct from use_correlation_spike_regime
+  # above, which IS live). Simulates execution quality degrading faster than a long trailing
+  # window would show: compares each traded ticker's MOST RECENT liquidity_stress_recent_days of
+  # vol against its own trailing vol_lookback_days baseline, and reacts when the recent spike
+  # exceeds liquidity_stress_vol_ratio.
+  liquidity_stress_multiplier: 1.0    # 1.0 (default) = disabled, the liquidity-stress check
+                                       # never runs. > 1.0 (e.g. 2.0) = during a detected spike,
+                                       # multiply that trade's simulated slippage (from
+                                       # base_slippage_bps/vol_slippage_multiplier above) by this
+                                       # factor, modeling worse fills exactly when a real book
+                                       # would also be thinner.
+  liquidity_stress_recent_days: 5     # trading days in the "recent" window compared against the
+                                       # ticker's own trailing vol_lookback_days baseline, must be
+                                       # >= 1.
+  liquidity_stress_vol_ratio: 2.0     # recent-vol / baseline-vol ratio that counts as a stress
+                                       # spike, e.g. 2.0 = recent vol running at more than double
+                                       # the trailing average. Must be > 0.
+  liquidity_stress_reduce_only: false # false (default) = a detected spike only multiplies
+                                       # slippage (above). true = ALSO blocks new simulated BUYs
+                                       # (never SELLs) into that ticker for the rest of the stress
+                                       # window, a stricter, opt-in crash-protection mode, logged
+                                       # to log_file_path as a REDUCE-ONLY skip line.
 
 # Account-wide Drawdown Circuit Breaker (Recommended tier, docs/RISK_CONSTRAINTS.md),
 # deliberately a TOP-LEVEL field, not inside default_risk/risk_overrides: it's account-scoped,

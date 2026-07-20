@@ -387,14 +387,15 @@ answer whether the strategy actually works.
   (advisory visibility that two portfolios share exposure to a name), a new
   `OVERLAPPING_TICKER_SCOPED` alert fires specifically when the cap actually activates on a
   given run.
-- **`config.example.yaml` previously under-documented 20 of `BacktestConfig`'s 58 fields**,
-  confirmed by enumerating the dataclass directly. The 10 LIVE-relevant ones (`exchange`,
+- **`config.example.yaml` previously under-documented 20 of `BacktestConfig`'s 58 fields**, now
+  closed, confirmed by enumerating the dataclass directly. The 10 LIVE-relevant ones (`exchange`,
   `correlation_lookback_days`/`correlation_penalty_strength`, `correlation_spike_short_window`/
   `correlation_spike_baseline_window`/`correlation_spike_threshold`, `max_pct_of_adv`,
-  `attach_broker_stop_loss`, `multi_timeframe_lookbacks`/`multi_timeframe_weights`) are now
-  documented; a lower-priority set of 10 BACKTEST-ONLY research/notebook fields
-  (`initial_capital`, the slippage/liquidity-stress cost-model knobs, `random_seed`,
-  `monthly_contribution`, `log_file_path`) is tracked separately, not yet added.
+  `attach_broker_stop_loss`, `multi_timeframe_lookbacks`/`multi_timeframe_weights`) and the 10
+  BACKTEST-ONLY research/notebook ones (`initial_capital`, `base_slippage_bps`/
+  `vol_slippage_multiplier`, `random_seed`, `monthly_contribution`, `log_file_path`, the 4
+  `liquidity_stress_*` crash-protection fields) are all documented now, every `BacktestConfig`
+  field has a comment in `config.example.yaml`.
 
 ### Who should allocate capital here
 

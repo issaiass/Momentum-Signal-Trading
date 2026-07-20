@@ -17,7 +17,6 @@ Operational wrapper: schedule this ONE script to run daily (cron/Task Scheduler)
 import argparse
 import logging
 import os
-import smtplib
 import sys
 from datetime import datetime
 from email.mime.text import MIMEText
@@ -36,7 +35,7 @@ from .execution.live_signal import (
     derive_entry_date, measure_live_performance, fetch_ohlcv_for_tickers,
     build_position_performance, reconstruct_dry_run_positions, derive_own_live_positions,
 )
-from .core.smtp_auth import authenticate as authenticate_smtp, smtp_ready
+from .core.smtp_auth import authenticate as authenticate_smtp, smtp_ready, connect as smtp_connect, send_with_retry
 from .core.audit_log import log_alert, read_recent_alerts, ALERTS_LOG_PATH
 from .core.paths import data_dir, logs_dir
 from .core.technical_indicators import compute_latest_indicators
@@ -50,7 +49,8 @@ from .risk.circuit_breaker import (
 )
 from .interfaces.notifications import (
     NotificationCategory, send_action_email, send_standard_action,
-    build_rebalance_summary_html, send_monthly_report, send_daily_report,
+    build_rebalance_summary_html, build_no_action_summary_html,
+    send_monthly_report, send_daily_report,
 )
 from .interfaces.email_commands import (
     poll_and_process_commands, PauseCommand, ResumeCommand, LiquidateCommand,
@@ -99,11 +99,13 @@ def send_alert_email(subject: str, body: str) -> None:
     msg["To"] = to_addr
     msg["X-Momentum-Trading-Bot"] = "1"
 
-    try:
-        with smtplib.SMTP(host, port, timeout=15) as server:
-            server.starttls()
+    def _do_send():
+        with smtp_connect(host, port) as server:
             authenticate_smtp(server, user, password)
             server.sendmail(user, [to_addr], msg.as_string())
+
+    try:
+        send_with_retry(_do_send)
         logger.info("Alert email sent: %s", subject)
     except Exception as e:
         logger.error("Failed to send alert email (%s): %s", subject, e)
@@ -1646,11 +1648,21 @@ def main():
                         plain_text_fallback=turnover_text,
                     )
 
-                # --- STANDARD-category notification (filterable) ---
+                # --- STANDARD-category notification (filterable). Always sent when a
+                #     rebalance actually ran (this branch only runs on a rebalance day or
+                #     --force-rebalance), whether or not it produced any orders, so a quiet
+                #     day (e.g. AGGREGATE_DRIFT_SKIP) still gets a confirmation instead of
+                #     silence indistinguishable from a failed/skipped run. ---
                 if orders_result:
                     send_standard_action(
                         f"Rebalance executed: {name}",
                         build_rebalance_summary_html(name, orders_result, dry_run=not args.live),
+                        notification_cfg,
+                    )
+                else:
+                    send_standard_action(
+                        f"Rebalance checked, no changes: {name}",
+                        build_no_action_summary_html(name),
                         notification_cfg,
                     )
 

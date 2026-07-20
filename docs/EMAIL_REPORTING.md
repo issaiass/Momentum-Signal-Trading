@@ -46,7 +46,13 @@ notifications:
 ```
 
 Plus the same SMTP environment variables already documented in `DEPLOYMENT.md`
-(`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `ALERT_TO_EMAIL`).
+(`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `ALERT_TO_EMAIL`), plus the optional
+`SMTP_TIMEOUT_SECONDS` (default `30`). Every send (`daily_runner.py`'s `send_alert_email()`,
+every category email here, `--test-email`) goes through `core/smtp_auth.py`'s shared
+`connect()` (implicit-TLS `SMTP_SSL` for `SMTP_PORT=465`, STARTTLS otherwise) and
+`send_with_retry()` (2 attempts). If every send times out despite correct credentials, see
+`DEPLOYMENT.md`'s "Troubleshooting: SMTP timeouts", `SMTP_PORT=465` fixes a real, confirmed
+case of this.
 
 ## What each category actually contains
 
@@ -110,6 +116,15 @@ since an intended BUY/SELL doesn't always actually fill. Built by
 - **HOLD**, `"—"`, no order was ever attempted for this ticker this cycle
 - **Dry-run** (`"Dry-run) no order sent"`, the rebalance ran without `--live`, so nothing was
   ever sent to a broker; passed through as `build_rebalance_summary_html(..., dry_run=True)`
+
+**STANDARD (no-change confirmation)**, sent instead of the table above whenever a rebalance
+(scheduled or `--force-rebalance`) ran to completion but produced zero orders (e.g. every
+computed drift was below `min_trade_size`, or `AGGREGATE_DRIFT_SKIP` fired), subject
+`"Rebalance checked, no changes: <portfolio>"`, built by `build_no_action_summary_html()`,
+same rich-HTML look as the table above rather than a bare log line. This only fires on a day
+`run()` was actually invoked, not on every daily cron tick, a non-rebalance day stays silent
+here by design (the daily portfolio snapshot/stop-loss check still runs regardless, see
+`RUNNING.md`).
 
 **PERIODIC (monthly report)**, HTML email with:
 - An embedded portfolio-value-over-time chart (PNG, generated via matplotlib)

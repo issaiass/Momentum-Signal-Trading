@@ -34,10 +34,17 @@ services:
       # or "outlook" (OAuth2 via MS_OAUTH_CLIENT_ID below).
       - SMTP_PROVIDER=${SMTP_PROVIDER:-gmail}
       - SMTP_HOST=${SMTP_HOST:-}
+      # 587 (STARTTLS) is the common default, but some networks/Docker hosts block it at
+      # the raw TCP level while leaving 465 (implicit TLS/SMTP_SSL) open, confirmed
+      # directly against this project's own container, see core/smtp_auth.py's connect().
+      # Set SMTP_PORT=465 here if every SMTP send times out despite correct credentials.
       - SMTP_PORT=${SMTP_PORT:-587}
       - SMTP_USER=${SMTP_USER:-}
       - SMTP_PASS=${SMTP_PASS:-}
       - ALERT_TO_EMAIL=${ALERT_TO_EMAIL:-}
+      # Per-attempt SMTP connect/send timeout in seconds (default 30), 2 attempts total,
+      # see core/smtp_auth.py's connect()/send_with_retry().
+      - SMTP_TIMEOUT_SECONDS=${SMTP_TIMEOUT_SECONDS:-30}
       # Outlook.com/Hotmail/Microsoft 365 only: OAuth2 in place of SMTP_PASS (basic
       # auth is disabled on those accounts). See docs/DEPLOYMENT.md. The token
       # cache lives under ./data, which is already volume-mounted below, so the

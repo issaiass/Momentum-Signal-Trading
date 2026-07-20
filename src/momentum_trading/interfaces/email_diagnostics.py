@@ -20,7 +20,10 @@ import os
 import smtplib
 from email.mime.text import MIMEText
 
-from ..core.smtp_auth import authenticate as authenticate_smtp, get_provider, smtp_ready
+from ..core.smtp_auth import (
+    authenticate as authenticate_smtp, get_provider, smtp_ready,
+    connect as smtp_connect, send_with_retry,
+)
 
 GMAIL_APP_PASSWORD_HINT = (
     "Gmail rejects a normal account password for SMTP AUTH. Generate an App Password at "
@@ -55,11 +58,13 @@ def _check_smtp() -> bool:
     msg["To"] = to_addr
     msg["X-Momentum-Trading-Bot"] = "1"
 
-    try:
-        with smtplib.SMTP(host, port, timeout=15) as server:
-            server.starttls()
+    def _do_send():
+        with smtp_connect(host, port) as server:
             authenticate_smtp(server, user, password)
             server.sendmail(user, [to_addr], msg.as_string())
+
+    try:
+        send_with_retry(_do_send)
     except smtplib.SMTPAuthenticationError as e:
         hint = GMAIL_APP_PASSWORD_HINT if get_provider() == "gmail" else OUTLOOK_OAUTH_HINT
         print(f"SMTP: FAILED, authentication rejected ({e}). {hint}")

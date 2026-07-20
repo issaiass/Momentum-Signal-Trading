@@ -41,7 +41,9 @@ CRONTAB_PATH="${CRONTAB_PATH:-/etc/cron.d/momentum-cron}"
 # also silently stop the daily stop-loss/time-stop checks, which run independently of
 # holding_period. See docs/DEPLOYMENT.md's "Choosing a rebalance cadence" for worked examples.
 {
-  echo "$DAILY_RUNNER_CRON"' cd /app && daily-runner >> /app/logs/daily_$(date +%Y%m%d).log 2>&1'
+  echo "$DAILY_RUNNER_CRON"' cd /app && daily-runner >> /app/logs/daily_$(date +%Y%m%d).log 2>&1' # dry run
+  # echo "$DAILY_RUNNER_CRON"' cd /app && daily-runner --live --port 7497 >> /app/logs/daily_$(date +%Y%m%d).log 2>&1' # trading (paper)
+  # echo "$DAILY_RUNNER_CRON"' cd /app && daily-runner --live --confirm-live-trading --port 7496 >> /app/logs/daily_$(date +%Y%m%d).log 2>&1' # trading (live account)  
   # To go live, replace the line above with (paper: --port 7497, real money also needs
   # --confirm-live-trading with --port 7496), see docs/DEPLOYMENT.md "Going live for real":
   #   echo "$DAILY_RUNNER_CRON"' cd /app && daily-runner --live --port 7497 >> /app/logs/daily_$(date +%Y%m%d).log 2>&1'

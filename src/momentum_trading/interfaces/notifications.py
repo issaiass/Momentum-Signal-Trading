@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import logging
 import os
-import smtplib
 from datetime import datetime
 from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
@@ -28,7 +27,7 @@ from enum import Enum
 
 import pandas as pd
 
-from ..core.smtp_auth import authenticate as authenticate_smtp, smtp_ready
+from ..core.smtp_auth import authenticate as authenticate_smtp, smtp_ready, connect as smtp_connect, send_with_retry
 
 logger = logging.getLogger("notifications")
 
@@ -129,11 +128,13 @@ def send_action_email(
         msg.attach(MIMEText(plain_text_fallback, "plain"))
     msg.attach(MIMEText(full_html, "html"))
 
-    try:
-        with smtplib.SMTP(smtp["host"], smtp["port"], timeout=15) as server:
-            server.starttls()
+    def _do_send():
+        with smtp_connect(smtp["host"], smtp["port"]) as server:
             authenticate_smtp(server, smtp["user"], smtp["password"])
             server.sendmail(smtp["user"], [smtp["to"]], msg.as_string())
+
+    try:
+        send_with_retry(_do_send)
         logger.info("Notification sent (category=%s): %s", category.value, subject)
         return True
     except Exception as e:
@@ -219,6 +220,25 @@ def build_rebalance_summary_html(portfolio_name: str, orders: dict, dry_run: boo
           <th style='padding:4px 8px; text-align:left;'>What Actually Happened</th></tr>
       {rows}
     </table>
+    """
+
+
+def build_no_action_summary_html(portfolio_name: str) -> str:
+    """
+    Standard-category HTML notice for a rebalance day (or --force-rebalance) that ran to
+    completion but produced zero orders (e.g. AGGREGATE_DRIFT_SKIP, or every computed drift
+    fell below min_trade_size). Reuses the same rich-HTML look as
+    build_rebalance_summary_html() rather than a bare plain-text line, so this portfolio's
+    "we checked, nothing to report" confirmation reads consistently with every other
+    portfolio email. The specific reason (if any) is already in logs/alerts_log.csv via
+    log_alert(), not repeated here.
+    """
+    return f"""
+    <h3>Rebalance Summary: {portfolio_name}</h3>
+    <p>This portfolio's rebalance ran to completion today with no order changes, every
+    computed drift was either zero or below the configured trading thresholds. See
+    logs/alerts_log.csv for this portfolio if a specific skip reason (e.g. aggregate drift
+    below threshold) was logged.</p>
     """
 
 
@@ -661,11 +681,13 @@ def send_monthly_report(
         img.add_header("Content-ID", "<comparison_chart>")
         msg.attach(img)
 
-    try:
-        with smtplib.SMTP(smtp["host"], smtp["port"], timeout=15) as server:
-            server.starttls()
+    def _do_send():
+        with smtp_connect(smtp["host"], smtp["port"]) as server:
             authenticate_smtp(server, smtp["user"], smtp["password"])
             server.sendmail(smtp["user"], [smtp["to"]], msg.as_string())
+
+    try:
+        send_with_retry(_do_send)
         logger.info("Monthly report sent: %s", portfolio_name)
         return True
     except Exception as e:
@@ -716,11 +738,13 @@ def send_daily_report(
         img.add_header("Content-ID", "<comparison_chart>")
         msg.attach(img)
 
-    try:
-        with smtplib.SMTP(smtp["host"], smtp["port"], timeout=15) as server:
-            server.starttls()
+    def _do_send():
+        with smtp_connect(smtp["host"], smtp["port"]) as server:
             authenticate_smtp(server, smtp["user"], smtp["password"])
             server.sendmail(smtp["user"], [smtp["to"]], msg.as_string())
+
+    try:
+        send_with_retry(_do_send)
         logger.info("Daily report sent: %s", portfolio_name)
         return True
     except Exception as e:

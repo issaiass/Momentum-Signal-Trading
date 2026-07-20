@@ -458,6 +458,29 @@ sudo systemctl enable --now momentum-runner.timer
 `Persistent=true` means a missed run (machine was off at 9:35am) fires as soon as the machine
 is back up, which plain cron does not do automatically.
 
+## Troubleshooting: SMTP timeouts
+
+- **Every notification/alert/report fails with `Failed to send ...: timed out`, 100% of
+  attempts, across every category and portfolio.** Confirmed directly, this is not a
+  borderline-slow-server problem a longer timeout alone fixes, it's usually port 587
+  (STARTTLS, the common default) being blocked at the raw TCP level by the network/Docker
+  host, while port 465 (implicit TLS) stays open. Diagnose first, don't guess: from inside the
+  container, `python3 -c "import socket; socket.create_connection(('smtp.gmail.com', 587),
+  timeout=8)"` vs the same call with `465` will show the difference immediately (one hangs the
+  full timeout then fails, the other connects in well under a second). If port 587 is the one
+  that hangs, set `SMTP_PORT=465` in `.env` (and `docker compose up -d --build` to pick it up),
+  `core/smtp_auth.py`'s `connect()` automatically switches to `smtplib.SMTP_SSL` for port 465
+  instead of `SMTP` + `starttls()`, no other config change needed.
+- **`daily-runner --test-email` is the fastest way to confirm/rule this out**, independent of
+  `config.yaml`, run it first (`docker exec momentum-signal daily-runner --test-email`, no
+  `-it` needed for a non-interactive shell) before changing anything.
+- Every SMTP send (alerts, category emails, `--test-email`) already retries once
+  (`core/smtp_auth.py`'s `send_with_retry()`, 2 attempts, 3s apart) and uses a configurable
+  per-attempt timeout (`SMTP_TIMEOUT_SECONDS`, default `30`), neither helps against a genuinely
+  blocked port, only against a transient/slow connection.
+- A failed send is always non-fatal, the run itself always completes and writes its logs/trade
+  history regardless of whether any email went out, see `docs/EMAIL_REPORTING.md`.
+
 ## Troubleshooting: IBKR connection
 
 - **`IBKR error 502: Couldn't connect to TWS` on every port you try (Docker only).** This is

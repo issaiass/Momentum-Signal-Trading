@@ -424,6 +424,35 @@ that tests enforce, don't casually violate these when editing:
   `notifications.send_email_command_feedback` (default `true`) gates the ACCEPTED/REJECTED/
   ERROR reply EMAIL only, same pattern as `send_warning`, `log_command_attempt()`'s audit
   write is never gated by it or anything else.
+  `core/smtp_auth.py`'s `connect(host, port, timeout=None)` is the single shared connection
+  helper for every SMTP call site in the project (`daily_runner.py`'s `send_alert_email()`,
+  every category email in `notifications.py`, `email_diagnostics.py`'s `--test-email` check),
+  replacing what used to be five separate, duplicated `smtplib.SMTP(...) + starttls()` blocks.
+  Picks the connection type from the port: `smtplib.SMTP_SSL` (implicit TLS) for `465`,
+  `smtplib.SMTP` + `starttls()` for everything else (`587`, the common default). This exists
+  because of a real, confirmed incident: every SMTP send inside the Docker container was
+  timing out (100% failure rate, `Failed to send notification: timed out` on every category),
+  and a raw socket probe from inside that same container proved port 587 hangs the full
+  timeout while port 465 connects in under a second, against the identical Gmail host, IMAP
+  (993) also connected instantly, ruling out a general network-egress problem. `SMTP_PORT=465`
+  in `.env` is the fix, not a longer timeout, a genuinely blocked port times out identically
+  regardless of how long you wait. `send_with_retry(send_fn, max_attempts=2,
+  backoff_seconds=3.0)` (also `core/smtp_auth.py`) wraps the actual send in a bounded retry,
+  mirrors `execution/live_signal.py`'s `with_retry()` pattern but kept local to avoid a new
+  cross-domain import from `interfaces/` into `execution/`; still fully non-fatal on final
+  failure, every call site's own `except Exception -> logger.error(...); return False` (or
+  equivalent) is unchanged. `smtp_timeout()` reads `SMTP_TIMEOUT_SECONDS` (default `30`, up
+  from the old hardcoded `15`).
+  `notifications.py`'s `build_no_action_summary_html(portfolio_name)` backs a new always-sent
+  STANDARD notice (`daily_runner.py`, the `else` branch alongside the existing
+  `if orders_result: send_standard_action(...)`): a rebalance that ran to completion (this
+  branch is only reached on a rebalance day or `--force-rebalance`) but produced zero orders
+  (e.g. `AGGREGATE_DRIFT_SKIP`) previously sent NO summary at all, indistinguishable from a
+  failed/skipped run purely from your inbox. Reuses the same rich-HTML look as
+  `build_rebalance_summary_html()`, not a plain-text fallback, deliberately, to stay visually
+  consistent with every other portfolio email. Does NOT fire on a non-rebalance day (the daily
+  snapshot/stop-loss block runs regardless but was never gated by `orders_result` and stays
+  silent by design, this isn't a new daily-cron email).
 - **`daily_runner.py`**, the actual scheduled entry point (`daily-runner` console script).
   Loads and schema-validates `config.yaml`, loops over every portfolio defined under
   `portfolios:`, idempotent per day, refuses `--live` unless `config.yaml`'s

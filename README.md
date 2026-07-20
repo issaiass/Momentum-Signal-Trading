@@ -396,6 +396,15 @@ answer whether the strategy actually works.
   `vol_slippage_multiplier`, `random_seed`, `monthly_contribution`, `log_file_path`, the 4
   `liquidity_stress_*` crash-protection fields) are all documented now, every `BacktestConfig`
   field has a comment in `config.example.yaml`.
+- **A real, confirmed 100%-of-attempts SMTP send failure inside Docker (2026-07-19), now
+  fixed**: every notification/alert/report was timing out, regardless of category or portfolio.
+  Root-caused, not guessed: a raw TCP probe from inside the container showed port 587
+  (STARTTLS, the previous only-supported mode) hanging the full timeout while port 465
+  (implicit TLS) connected in under a second against the same host, IMAP on 993 connecting
+  instantly too, ruling out a general network problem. `core/smtp_auth.py`'s `connect()` now
+  supports both (`SMTP_PORT=465` picks `smtplib.SMTP_SSL`), plus a configurable
+  `SMTP_TIMEOUT_SECONDS` (default `30`) and one bounded retry, shared by every SMTP call site
+  in the project. See `docs/DEPLOYMENT.md`'s "Troubleshooting: SMTP timeouts".
 
 ### Who should allocate capital here
 

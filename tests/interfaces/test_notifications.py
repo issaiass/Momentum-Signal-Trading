@@ -102,6 +102,32 @@ class TestHTMLGeneration:
         html = build_rebalance_summary_html("portfolio1", {})
         assert "portfolio1" in html  # doesn't crash, still identifies the portfolio
 
+    def test_rebalance_summary_shows_money_invested_columns(self):
+        orders = {"SPY": {"action": "BUY", "shares": 2, "reason": "drift",
+                           "money_invested": 600.0, "pct_money_invested": 0.6},
+                  "QQQ": {"action": "HOLD", "shares": 0, "reason": "no drift",
+                           "money_invested": 400.0, "pct_money_invested": 0.4}}
+        html = build_rebalance_summary_html("portfolio1", orders)
+        assert "Money Invest" in html and "% Money Invest" in html
+        assert "$600.00" in html and "60.0%" in html
+        assert "$400.00" in html and "40.0%" in html
+
+    def test_rebalance_summary_capital_header_sums_money_invested(self):
+        orders = {"SPY": {"action": "BUY", "shares": 2, "reason": "drift",
+                           "money_invested": 600.0, "pct_money_invested": 0.6},
+                  "QQQ": {"action": "HOLD", "shares": 0, "reason": "no drift",
+                           "money_invested": 400.0, "pct_money_invested": 0.4}}
+        html = build_rebalance_summary_html("portfolio1", orders)
+        assert "Capital allocated this rebalance" in html
+        assert "$1,000.00" in html
+
+    def test_rebalance_summary_missing_money_invested_defaults_to_zero(self):
+        # An order dict from a call site that doesn't set money_invested (shouldn't happen via
+        # generate_orders() anymore, but defensively) must not crash the email builder.
+        orders = {"SPY": {"action": "BUY", "shares": 2, "reason": "drift"}}
+        html = build_rebalance_summary_html("portfolio1", orders)
+        assert "$0.00" in html
+
     def test_rebalance_summary_dry_run_shows_no_order_sent(self):
         # dry_run=True (no --live): a BUY/SELL order was decided but never sent to a
         # broker, so the new column should say so rather than imply a real outcome.

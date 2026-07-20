@@ -94,14 +94,22 @@ reaches your inbox:
   commission/slippage/whole-share drift cost without improving signal quality. Fires on every
   run (not just once) so a persistent misconfiguration keeps surfacing until fixed.
 
-**STANDARD (rebalance summary)**, an HTML table per portfolio, sent after each rebalance,
-showing ticker / action / shares / reason for every position considered that cycle (including
-HOLDs, so you can see what *wasn't* traded and why), plus a **"What Actually Happened"** column
-showing the REAL execution outcome per ticker, distinct from the signal's intended action,
-since an intended BUY/SELL doesn't always actually fill. Built by
-`build_rebalance_summary_html()` from `fill_status`/`fill_price`/`fill_shares`, which
-`execution/live_signal.py`'s `run()` merges onto each order after a `--live` call to
-`place_orders_ibkr()`:
+**STANDARD (rebalance summary)**, an HTML table per portfolio, sent after each rebalance, headed
+by a **"Capital allocated this rebalance"** line (the sum of every row's "Money Invest" below,
+equal to `total_value * gross_exposure` for that rebalance), showing ticker / action / **money
+invest** / **% money invest** / shares / reason for every position considered that cycle
+(including HOLDs, so you can see what *wasn't* traded and why), plus a **"What Actually
+Happened"** column showing the REAL execution outcome per ticker, distinct from the signal's
+intended action, since an intended BUY/SELL doesn't always actually fill. "Money Invest"/"%
+Money Invest" are `execution/live_signal.py`'s `generate_orders()`'s `money_invested`/
+`pct_money_invested`, each ticker's TARGET dollar allocation this rebalance (not the incremental
+drift the BUY/SELL decision itself is based on), set on every row including HOLDs, so a
+currently-held, not-traded position still shows its real target allocation. Reporting-only:
+IBKR has no dollar-denominated order type for equities/ETFs (`cashQty` only works for forex/CASH
+pairs, confirmed empirically, see `README.md`'s Known Gaps), the actual order submitted is still
+sized in whole shares regardless. Built by `build_rebalance_summary_html()` from
+`fill_status`/`fill_price`/`fill_shares`, which `execution/live_signal.py`'s `run()` merges onto
+each order after a `--live` call to `place_orders_ibkr()`:
 - **Filled**, `"Filled N @ $price"` (green)
 - **Dropped, fractional** (`"Dropped) rounds to 0 whole shares"` (amber), the order's share
   count floored to 0 whole shares before ever reaching IBKR (IBKR has no fractional equity API

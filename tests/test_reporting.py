@@ -100,6 +100,19 @@ class TestSignalContextInOrders:
         assert df.iloc[0]["rank"] == 1
         assert df.iloc[0]["signal_score"] == pytest.approx(0.22)
 
+    def test_money_invested_reaches_the_log(self, tmp_path):
+        path = str(tmp_path / "log.csv")
+        cfg = BacktestConfig(min_trade_size=1.0)
+        orders = generate_orders(
+            current_holdings={}, target_weights={"XLK": 1.0}, gross_exposure=1.0,
+            total_value=1000.0, latest_prices={"XLK": 220.0}, cfg=cfg,
+        )
+        log_orders(orders, {"XLK": 220.0}, True, path=path, cfg=cfg)
+        import pandas as pd
+        df = pd.read_csv(path)
+        assert df.iloc[0]["money_invested"] == pytest.approx(1000.0)
+        assert df.iloc[0]["pct_money_invested"] == pytest.approx(1.0)
+
     def test_pnl_parsing_unaffected_by_wider_schema(self, tmp_path):
         path = str(tmp_path / "log.csv")
         cfg = BacktestConfig(min_trade_size=1.0)

@@ -386,6 +386,25 @@ that tests enforce, don't casually violate these when editing:
   Motivated by a real observed gap: a late-night manual `--force-rebalance --live` test run
   only surfaced this via IBKR's own `error 399` ("will not be placed until <next session>")
   after submission, buried among other informational codes, not proactively.
+  `generate_orders()` now sets `money_invested`/`pct_money_invested` on EVERY returned order
+  (BUY/SELL/HOLD, every HOLD reason including "no live price available"), via the same
+  `_with_context()` helper that already injects `rank`/`signal_score` uniformly.
+  `money_invested` is `target_dollar[t] = total_value * gross_exposure * weight[t]`, each
+  ticker's TARGET dollar allocation this rebalance, deliberately NOT `drift_dollar` (the
+  incremental change the BUY/SELL/HOLD decision itself is based on, a few lines below in the
+  same function), so a currently-held, not-traded HOLD still reports a real, non-zero target
+  allocation. Summed across every order this function returns, `money_invested` totals exactly
+  `total_value * gross_exposure` by construction (a ticker being sold out of the target universe
+  entirely correctly contributes `0`). `log_orders()` gained matching `money_invested`/
+  `pct_money_invested` CSV columns (same schema-evolution caveat as the pre-existing `rank`/
+  `signal_score` addition, archive old `live_trades_log_*.csv` files first), and
+  `notifications.py`'s `build_rebalance_summary_html()` gained "Money Invest"/"% Money Invest"
+  columns plus a "Capital allocated this rebalance" line above the table (the same sum,
+  recomputed from the enriched `orders` dict, no new function parameters needed anywhere
+  upstream). Reporting-only: IBKR has no dollar-denominated order type for equities/ETFs
+  (`cashQty` only works for forex/CASH pairs, confirmed empirically, see `README.md`'s Known
+  Gaps), the actual order submitted to `place_orders_ibkr()` is still sized in whole shares
+  regardless of this.
 - **`risk/circuit_breaker.py`**, extracted from `daily_runner.py` with alerting
   dependency-injected (`alert_fn` param) specifically so `risk/` has zero import dependency on
   `interfaces/`, enforced by an AST-based test

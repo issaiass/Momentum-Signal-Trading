@@ -1153,6 +1153,80 @@ class TestGenerateOrders:
         assert orders["XLK"]["shares"] == 4
         assert isinstance(orders["XLK"]["shares"], int)
 
+    def test_money_invested_is_target_dollar_not_drift(self):
+        # money_invested is each ticker's TARGET allocation (total_value * gross_exposure *
+        # weight), not the incremental drift_dollar the BUY/SELL decision is based on. SPY is
+        # already fully sized (small drift, correctly a HOLD) but still carries a real
+        # money_invested figure equal to its target weight's dollar value.
+        cfg = BacktestConfig(drift_threshold=0.5, min_trade_size=1.0)
+        orders = generate_orders(
+            current_holdings={"SPY": 1.0}, target_weights={"SPY": 0.5, "XLK": 0.5},
+            gross_exposure=1.0, total_value=1000.0,
+            latest_prices={"SPY": 500.0, "XLK": 220.0}, cfg=cfg,
+        )
+        assert orders["SPY"]["action"] == "HOLD"
+        assert orders["SPY"]["money_invested"] == pytest.approx(500.0)
+        assert orders["XLK"]["money_invested"] == pytest.approx(500.0)
+
+    def test_pct_money_invested_matches_target_weight(self):
+        cfg = BacktestConfig(drift_threshold=0.0, min_trade_size=1.0)
+        orders = generate_orders(
+            current_holdings={}, target_weights={"SPY": 0.6, "XLK": 0.4}, gross_exposure=1.0,
+            total_value=1000.0, latest_prices={"SPY": 500.0, "XLK": 220.0}, cfg=cfg,
+        )
+        assert orders["SPY"]["pct_money_invested"] == pytest.approx(0.6)
+        assert orders["XLK"]["pct_money_invested"] == pytest.approx(0.4)
+
+    def test_pct_money_invested_scales_with_gross_exposure(self):
+        # gross_exposure < 1.0 (vol-scaling/regime throttling) shrinks the capital actually
+        # being deployed; pct_money_invested is relative to THAT deployed capital (target
+        # weights still sum to 1.0), not to the full total_value.
+        cfg = BacktestConfig(drift_threshold=0.0, min_trade_size=1.0)
+        orders = generate_orders(
+            current_holdings={}, target_weights={"SPY": 1.0}, gross_exposure=0.5,
+            total_value=1000.0, latest_prices={"SPY": 500.0}, cfg=cfg,
+        )
+        assert orders["SPY"]["money_invested"] == pytest.approx(500.0)  # 1000 * 0.5 * 1.0
+        assert orders["SPY"]["pct_money_invested"] == pytest.approx(1.0)
+
+    def test_no_live_price_hold_still_carries_money_invested(self):
+        # The earliest-return HOLD branch (missing price) must not skip money_invested, or the
+        # email/log would silently show $0 for a ticker that still has a real target allocation.
+        cfg = BacktestConfig(drift_threshold=0.0, min_trade_size=1.0)
+        orders = generate_orders(
+            current_holdings={}, target_weights={"SPY": 0.5, "GHOST": 0.5}, gross_exposure=1.0,
+            total_value=1000.0, latest_prices={"SPY": 500.0}, cfg=cfg,  # GHOST has no price
+        )
+        assert orders["GHOST"]["action"] == "HOLD"
+        assert orders["GHOST"]["reason"] == "no live price available"
+        assert orders["GHOST"]["money_invested"] == pytest.approx(500.0)
+        assert orders["GHOST"]["pct_money_invested"] == pytest.approx(0.5)
+
+    def test_sold_out_ticker_has_zero_money_invested(self):
+        # A ticker held but no longer in the target universe at all (full exit) correctly
+        # contributes $0 to money_invested, it's not part of this rebalance's allocation.
+        cfg = BacktestConfig(drift_threshold=0.0, min_trade_size=1.0)
+        orders = generate_orders(
+            current_holdings={"OLD": 5.0}, target_weights={"SPY": 1.0}, gross_exposure=1.0,
+            total_value=1000.0, latest_prices={"OLD": 100.0, "SPY": 500.0}, cfg=cfg,
+        )
+        assert orders["OLD"]["action"] == "SELL"
+        assert orders["OLD"]["money_invested"] == pytest.approx(0.0)
+
+    def test_money_invested_sums_to_capital_this_rebalance(self):
+        # Summed across every ticker generate_orders() returns, money_invested totals exactly
+        # total_value * gross_exposure, the exact invariant the rebalance email's capital
+        # header relies on.
+        cfg = BacktestConfig(drift_threshold=0.0, min_trade_size=1.0)
+        orders = generate_orders(
+            current_holdings={"OLD": 5.0},
+            target_weights={"SPY": 0.5, "XLK": 0.3, "QQQ": 0.2}, gross_exposure=0.8,
+            total_value=1000.0,
+            latest_prices={"OLD": 100.0, "SPY": 500.0, "XLK": 220.0, "QQQ": 400.0}, cfg=cfg,
+        )
+        total_invested = sum(o["money_invested"] for o in orders.values())
+        assert total_invested == pytest.approx(1000.0 * 0.8)
+
 
 class TestMeasureLivePerformance:
     """

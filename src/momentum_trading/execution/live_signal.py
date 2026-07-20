@@ -639,51 +639,66 @@ def generate_orders(
 ) -> dict:
     """
     Returns {ticker: {'action': 'BUY'|'SELL'|'HOLD', 'shares': int, 'reason': str,
-                       'rank': int|None, 'signal_score': float|None}}
+                       'rank': int|None, 'signal_score': float|None, 'money_invested': float,
+                       'pct_money_invested': float}}
     Applies the same drift_threshold / min_trade_size filtering as the backtest,
     so live turnover matches the cost assumptions the backtest validated against.
 
     signal_context, if provided, is carried through into
     each order dict so a trade can be reviewed later with "why" context (e.g.
     "XLK was rank 2 of 10"), not just "what" was traded.
+
+    money_invested/pct_money_invested are each ticker's TARGET dollar allocation this rebalance
+    (target_dollar[t] = total_value * gross_exposure * weight, the same figure resolve_target_
+    weights()/compute_target_weights() already produce), NOT the incremental drift_dollar used
+    for the BUY/SELL decision itself, distinct concepts: a HOLD ticker still has a real target
+    allocation (money_invested > 0) even though nothing traded. Summed across every ticker this
+    function returns, money_invested totals exactly total_value * gross_exposure (a ticker being
+    sold out of the target universe entirely contributes 0, correctly excluded). Set uniformly on
+    every order (BUY/SELL/HOLD, every HOLD reason including "no live price available") via
+    _with_context() below, so the rebalance summary email/log can show "how much of this
+    period's capital is allocated here" for every row, not just the ones that traded.
     """
     signal_context = signal_context or {}
     current_value = {t: s * latest_prices.get(t, 0.0) for t, s in current_holdings.items()}
     target_dollar = {t: total_value * gross_exposure * w for t, w in target_weights.items()}
+    capital_this_rebalance = total_value * gross_exposure
     all_tickers = set(current_holdings) | set(target_dollar)
 
-    def _with_context(order: dict, ticker: str) -> dict:
+    def _with_context(order: dict, ticker: str, tgt_dollar: float) -> dict:
         ctx = signal_context.get(ticker, {})
         order["rank"] = ctx.get("rank")
         order["signal_score"] = ctx.get("signal_score")
+        order["money_invested"] = tgt_dollar
+        order["pct_money_invested"] = (tgt_dollar / capital_this_rebalance) if capital_this_rebalance > 0 else 0.0
         return order
 
     orders = {}
     for t in all_tickers:
+        tgt_dollar = target_dollar.get(t, 0.0)
         price = latest_prices.get(t)
         if price is None or price <= 0:
-            orders[t] = _with_context({"action": "HOLD", "shares": 0, "reason": "no live price available"}, t)
+            orders[t] = _with_context({"action": "HOLD", "shares": 0, "reason": "no live price available"}, t, tgt_dollar)
             continue
 
         c_dollar = current_value.get(t, 0.0)
-        tgt_dollar = target_dollar.get(t, 0.0)
         drift_dollar = tgt_dollar - c_dollar
         is_continuing = (t in current_value) and (t in target_dollar)
 
         if abs(drift_dollar) < cfg.min_trade_size:
-            orders[t] = _with_context({"action": "HOLD", "shares": 0, "reason": f"below min_trade_size (${abs(drift_dollar):.2f})"}, t)
+            orders[t] = _with_context({"action": "HOLD", "shares": 0, "reason": f"below min_trade_size (${abs(drift_dollar):.2f})"}, t, tgt_dollar)
             continue
         if is_continuing and total_value > 0 and abs(drift_dollar) / total_value < cfg.drift_threshold:
-            orders[t] = _with_context({"action": "HOLD", "shares": 0, "reason": f"within drift_threshold ({abs(drift_dollar)/total_value:.1%})"}, t)
+            orders[t] = _with_context({"action": "HOLD", "shares": 0, "reason": f"within drift_threshold ({abs(drift_dollar)/total_value:.1%})"}, t, tgt_dollar)
             continue
 
         shares = abs(drift_dollar) / price
         shares = (np.floor(shares * 10_000) / 10_000) if cfg.allow_fractional_shares else int(shares)
         if shares <= 0:
-            orders[t] = _with_context({"action": "HOLD", "shares": 0, "reason": "drift too small for 1 share"}, t)
+            orders[t] = _with_context({"action": "HOLD", "shares": 0, "reason": "drift too small for 1 share"}, t, tgt_dollar)
         else:
             action = "BUY" if drift_dollar > 0 else "SELL"
-            orders[t] = _with_context({"action": action, "shares": shares, "reason": f"drift ${drift_dollar:,.2f}"}, t)
+            orders[t] = _with_context({"action": action, "shares": shares, "reason": f"drift ${drift_dollar:,.2f}"}, t, tgt_dollar)
 
     return orders
 
@@ -815,12 +830,16 @@ def verify_log_integrity(path: str) -> dict:
 def log_orders(orders: dict, latest_prices: dict, dry_run: bool, path: str = TRADE_LOG_PATH,
                 cfg=None) -> None:
     """
-    NOTE on schema evolution: this adds 'rank' and
-    'signal_score' columns. If you have an existing log file from before this
-    change, its header won't have these columns, appending new-schema rows
-    to an old-schema file will misalign columns. Archive/rename any pre-existing
-    live_trades_log_*.csv before your first run after upgrading, so a fresh
-    file with the new header gets created.
+    NOTE on schema evolution: this adds 'rank', 'signal_score', 'money_invested', and
+    'pct_money_invested' columns. If you have an existing log file from before this change, its
+    header won't have these columns, appending new-schema rows to an old-schema file will
+    misalign columns. Archive/rename any pre-existing live_trades_log_*.csv before your first
+    run after upgrading, so a fresh file with the new header gets created.
+
+    money_invested/pct_money_invested are generate_orders()' TARGET dollar allocation for this
+    ticker this rebalance (see that function's own docstring), not the incremental drift; set on
+    every order including HOLDs, so the log answers "how much of this period's capital was
+    allocated here" for every row, matching the same columns in the rebalance summary email.
     """
     file_exists = os.path.isfile(path)
     config_hash = _config_hash(cfg) if cfg is not None else ""
@@ -830,12 +849,14 @@ def log_orders(orders: dict, latest_prices: dict, dry_run: bool, path: str = TRA
         writer = csv.writer(f)
         if not file_exists:
             writer.writerow(["timestamp", "ticker", "action", "shares", "price", "reason",
-                              "rank", "signal_score", "dry_run", "config_hash", "row_hash"])
+                              "rank", "signal_score", "money_invested", "pct_money_invested",
+                              "dry_run", "config_hash", "row_hash"])
         ts = datetime.now().isoformat()
         for ticker, order in orders.items():
             row_fields = [
                 ts, ticker, order["action"], order["shares"], latest_prices.get(ticker, ""),
                 order["reason"], order.get("rank", ""), order.get("signal_score", ""),
+                order.get("money_invested", ""), order.get("pct_money_invested", ""),
                 dry_run, config_hash,
             ]
             row_hash = _compute_row_hash(prev_hash, row_fields)

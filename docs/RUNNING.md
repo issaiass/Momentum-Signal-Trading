@@ -497,6 +497,12 @@ IBKR account:
   since `get_ibkr_positions()` returns the WHOLE shared IBKR account, a ticker in this bucket
   could genuinely belong to a SIBLING portfolio (the "TICKER OVERLAP"/leakage scenario below),
   not just be a stale drop-out from this portfolio's own history. Investigate manually.
+  **This warning is NOT the same thing as your portfolios' strategies mixing tickers**: it fires
+  purely because the shared IBKR account holds a real position this portfolio doesn't recognize,
+  it does not mean this portfolio's own momentum ranking/selection ever considered, priced, or
+  traded that ticker, `resolve_momentum_scores()`/`resolve_strategy_picks()` only ever see this
+  portfolio's own configured `tickers:` list, confirmed unaffected regardless of what a sibling
+  portfolio happens to hold on the shared account.
 
 **`total_value` drift visibility** (`--live` only, fixed/non-null `total_value` portfolios
 only): a fixed `total_value` never auto-refreshes from real account P&L, a deliberate,

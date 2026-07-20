@@ -198,7 +198,16 @@ def build_rebalance_summary_html(portfolio_name: str, orders: dict, dry_run: boo
 
     dry_run should be True whenever this rebalance ran without --live (no orders were ever
     sent to IBKR), so the new column reads correctly as "Dry-run" rather than "No order sent".
+
+    "Money Invest"/"% Money Invest" columns show each ticker's TARGET dollar allocation this
+    rebalance (generate_orders()'s money_invested/pct_money_invested, set on every row
+    including HOLDs, not just BUY/SELL, see that function's own docstring), and the capital
+    line above the table is the sum of money_invested across every row, which by construction
+    equals total_value * gross_exposure for this rebalance, IBKR has no dollar-denominated
+    order type for equities/ETFs (confirmed, cashQty only works for forex/CASH pairs), so this
+    is reporting-only, the actual order submitted is still sized in shares.
     """
+    capital_this_rebalance = sum(o.get("money_invested", 0.0) for o in orders.values())
     rows = ""
     for ticker, order in orders.items():
         action_color = {"BUY": "#27ae60", "SELL": "#c0392b", "HOLD": "#7f8c8d"}.get(order["action"], "#333")
@@ -206,15 +215,20 @@ def build_rebalance_summary_html(portfolio_name: str, orders: dict, dry_run: boo
         rows += (
             f"<tr><td style='padding:4px 8px;'>{ticker}</td>"
             f"<td style='padding:4px 8px; color:{action_color}; font-weight:bold;'>{order['action']}</td>"
+            f"<td style='padding:4px 8px;'>${order.get('money_invested', 0.0):,.2f}</td>"
+            f"<td style='padding:4px 8px;'>{order.get('pct_money_invested', 0.0):.1%}</td>"
             f"<td style='padding:4px 8px;'>{order.get('shares', 0)}</td>"
             f"<td style='padding:4px 8px;'>{order.get('reason', '')}</td>"
             f"<td style='padding:4px 8px; color:{outcome_color};'>{outcome_text}</td></tr>"
         )
     return f"""
     <h3>Rebalance Summary: {portfolio_name}</h3>
+    <p>Capital allocated this rebalance: <b>${capital_this_rebalance:,.2f}</b></p>
     <table style="border-collapse: collapse; width: 100%;">
       <tr style="background:#f4f4f4;"><th style='padding:4px 8px; text-align:left;'>Ticker</th>
           <th style='padding:4px 8px; text-align:left;'>Action</th>
+          <th style='padding:4px 8px; text-align:left;'>Money Invest</th>
+          <th style='padding:4px 8px; text-align:left;'>% Money Invest</th>
           <th style='padding:4px 8px; text-align:left;'>Shares</th>
           <th style='padding:4px 8px; text-align:left;'>Reason</th>
           <th style='padding:4px 8px; text-align:left;'>What Actually Happened</th></tr>

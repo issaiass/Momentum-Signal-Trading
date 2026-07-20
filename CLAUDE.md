@@ -331,6 +331,35 @@ that tests enforce, don't casually violate these when editing:
   production price vendor for EVERY portfolio the first time `daily_runner.py` started passing
   real keys through, an unrelated, unbudgeted side effect discovered and avoided while wiring up
   `hybrid_multi_factor`.
+  `place_orders_ibkr()`'s `attach_broker_stop_loss`/`stop_loss_pct` params (from
+  `BacktestConfig`, belt-and-suspenders alongside `auto_execute_stop_loss`, see
+  `docs/RISK_CONSTRAINTS.md`'s "Broker-Side Protective Stop") attach a real IBKR bracket at BUY
+  time when set: parent BUY (`transmit=False`) + child `STP` SELL (`parentId` linked,
+  `transmit=True`, `auxPrice = expected_prices[ticker] * (1 - stop_loss_pct)`), inside the
+  existing per-order loop, no reference price -> falls back to a plain, unprotected BUY (same
+  fallback shape as `allow_extended_hours`'s "no reference price" case). Only the PARENT oid
+  goes into `order_id_to_ticker` (the fill-poll wait set), the child's oid is tracked separately
+  (`stop_order_ids[ticker]`) and surfaced via `results[ticker]["stop_order_id"]` ->
+  `orders[ticker]["broker_stop_order_id"]` in `run()`, purely in-memory for the rebalance
+  summary email's "What Actually Happened" column (`interfaces/notifications.py` already reads
+  `fill_status`/`fill_price` from that same dict), deliberately NOT added to `log_orders()`'s
+  hash-chained CSV schema, that log is append-only with a fixed header and is written BEFORE
+  `place_orders_ibkr()` even runs, the stop orderId isn't known yet at that point, and a schema
+  change there would misalign columns for any pre-existing log file (see that function's own
+  "NOTE on schema evolution"). TIF is deliberately asymmetric: the parent explicitly carries
+  `tif="DAY"` (Fix 3, matches the account's own previously-implicit default, now made explicit
+  for EVERY order, bracket or not), the child protective STP explicitly carries `tif="GTC"`, a
+  `DAY` stop would be cancelled by IBKR at end of day and leave the position unprotected on
+  every subsequent day this app doesn't run, defeating the entire point. Cancel-before-sell (any
+  SELL this app itself generates, whether from a rebalance, `check_and_handle_stop_losses()`, or
+  `check_and_handle_time_stops()`, all funnel through this one function) is centralized here via
+  a new `IBApp.openOrder()`/`openOrderEnd()` pair and `reqAllOpenOrders()` (NOT
+  `reqOpenOrders()`, which only returns the SAME client connection's own orders; the run that
+  PLACED a bracket and the run that later decides to EXIT are almost always different
+  connections), cancelling any resting `(symbol, SELL, STP)` order matching this run's SELL
+  batch via `cancelOrder(orderId)` before that SELL is submitted, broker-truth-based, not
+  dependent on any locally-cached order ID, zero extra IBKR round trip when
+  `attach_broker_stop_loss` is off (the default).
 - **`risk/circuit_breaker.py`**, extracted from `daily_runner.py` with alerting
   dependency-injected (`alert_fn` param) specifically so `risk/` has zero import dependency on
   `interfaces/`, enforced by an AST-based test

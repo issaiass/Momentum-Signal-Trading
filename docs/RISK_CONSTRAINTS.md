@@ -26,6 +26,13 @@ pre-existing shared-sizing-pipeline architecture (`resolve_target_weights()`).
 | Nice to Have | Liquidity/Slippage Monitor | **Implemented**, a pre-trade real-time bid-ask spread gate (new here), see "Liquidity/Slippage Monitor" below |
 | Nice to Have | Hard-to-Borrow (HTB) Sentinel | **Not Applicable**, this system is strictly long-only, no short legs exist to protect, see "Hard-to-Borrow (HTB) Sentinel" below |
 
+One mechanism below sits OUTSIDE this 7-tier institutional map, not because it's less
+important, but because it's not a signal/sizing/exposure constraint at all: **Broker-Side
+Protective Stop** (`attach_broker_stop_loss`, LIVE-ONLY, opt-in) attaches a real IBKR bracket
+order at BUY time, so a position is protected by the BROKER ITSELF even when this app isn't
+running, closing a gap every constraint above shares (all of them, like this whole pipeline,
+only ever act while `daily-runner` is actually invoked). See its own section below.
+
 Everything in this table lives entirely in the `daily_runner.py`/`execution/live_signal.py`/
 `backtest/momentum_backtest.py` live+backtest path. None of it is visible to
 `risk/risk_monitor.py`, that's deliberate, not an oversight, see "Independence from
@@ -198,6 +205,56 @@ work (add it to that portfolio's own `tickers:` list in `config.yaml`), there is
 widening of the price fetch for it, unlike the orphaned-ticker reconciliation's
 `extra_price_tickers` mechanism (a deliberately different, narrower feature).
 
+## Broker-Side Protective Stop [New, LIVE-ONLY, opt-in]
+
+`attach_broker_stop_loss` (default `false`): a REAL IBKR bracket order attached at BUY time,
+parent BUY + child `STP` (stop-market) SELL, so the position is protected by the BROKER ITSELF
+even when this app isn't running. This closes a real gap surfaced by a confirmed incident
+(2026-07-16, see the cross-portfolio-sell fix elsewhere in this project's history): this app is
+a scheduled batch job, not a persistent/always-on service, its EXISTING `auto_execute_stop_loss`
+check (below) only runs at all when `daily-runner --live` is actually invoked, so a position had
+zero downside protection on any day the app wasn't scheduled or the machine/container was off.
+
+**Belt-and-suspenders, deliberately NOT a replacement for `auto_execute_stop_loss`**:
+- `attach_broker_stop_loss` is what actually delivers "protection independent of whether this
+  app is running." `auto_execute_stop_loss` alone never does, by construction.
+- `auto_execute_stop_loss` still has independent value even with a bracket attached: it's the
+  ONLY mechanism for `max_holding_days` (a broker `STP` order has no concept of "N days held"),
+  it can react to a `stop_loss_pct` adjusted mid-position (e.g. via an `ADJUST_PARAM` email
+  command) without needing to cancel/replace a resting order, and it's a fallback for a position
+  opened before `attach_broker_stop_loss` was ever turned on.
+
+Both reuse the SAME `stop_loss_pct` field, no duplicate config. The child `STP` (not `STP LMT`):
+a genuine protective stop must reliably execute during a fast decline, a limit leg can be
+skipped over in a gap, defeating the purpose. `outsideRth=True` on both legs when
+`allow_extended_hours` is set, otherwise the stop only monitors/triggers during regular hours,
+leaving a real gap for a move in the same extended session the entry itself was allowed in.
+
+**TIF, deliberately asymmetric**: the parent BUY carries `tif="DAY"` (matches the account's own
+observed default, made explicit rather than implicit, a BUY either fills same-session or the
+whole bracket attempt can simply be resubmitted next run). The protective child carries
+`tif="GTC"`, NOT `"DAY"`: a `DAY` stop would be cancelled by IBKR at end of day and leave the
+position completely unprotected on every subsequent day this app doesn't run, defeating the
+entire purpose. IBKR allows a bracket's parent and child to carry different TIF values.
+
+**Cancel-before-sell**: when this app itself later decides to exit a position (a rebalance
+rotation, `risk_monitor.py`-triggered action, or the Python-side `auto_execute_stop_loss`
+check), any resting protective `STP` for that ticker is cancelled FIRST, via a real,
+broker-truth-based `reqAllOpenOrders()` query (not `reqOpenOrders()`, which only returns the
+SAME client connection's own orders; not a locally-cached order ID either), since the run that
+PLACED the bracket and the run that later decides to EXIT are almost always different process
+invocations. This prevents the broker's own triggered stop and this app's rebalance-driven sell
+from both trying to sell the same shares. Self-healing even if the placing run crashed before
+logging anything, or TWS restarted. Zero extra IBKR round trip when `attach_broker_stop_loss`
+is off (the default).
+
+```yaml
+risk_overrides:
+  attach_broker_stop_loss: true   # opt-in, reuses stop_loss_pct below
+  stop_loss_pct: 0.12             # shared with the Python-side auto_execute_stop_loss check
+  auto_execute_stop_loss: false   # independent, unaffected by attach_broker_stop_loss's default
+```
+
 ## Position Size Hard-Cap [Mandatory tier]
 
 `max_position_weight` (default `0.35`): a flat, single-name cap, identical for every ticker
@@ -363,7 +420,14 @@ risk-strategy tier map" above (`target_portfolio_vol`, `portfolio_vol_lookback`,
 `use_absolute_momentum`, `defensive_ticker`, `max_bid_ask_spread_pct`), all `default_risk`-scoped
 like every other field here. `account_wide_max_drawdown_pct` is deliberately NOT in either preset
 block: it's a TOP-LEVEL, account-scoped field, not per-portfolio/per-regime, see the note after
-both presets below.
+both presets below. `attach_broker_stop_loss` is likewise NOT in either preset block below,
+deliberately: unlike `holding_period`/`lookback_period`/`target_portfolio_vol`, its
+recommendation doesn't vary by cadence, it's `false` (default, no bracket order) unless you
+specifically want IBKR-native, broker-side stop-loss protection regardless of whether this app
+is running, set `attach_broker_stop_loss: true` in EITHER regime's preset the same way, reusing
+whichever `stop_loss_pct` that preset already specifies, see "Broker-Side Protective Stop" above
+for the full rationale (including why it's belt-and-suspenders alongside
+`auto_execute_stop_loss`, not a replacement for it).
 
 ### Long-Term Momentum (Monthly)
 

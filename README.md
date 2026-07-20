@@ -72,7 +72,14 @@ README says so on purpose.
   both circuit breakers, a correlation-spike monitor, and a pre-trade real-time bid-ask spread
   gate), plus the original six long-term/short-term advisory warnings and config toggles
   (Momentum Persistence, Lookback-to-Hold Ratio, Turnover Limit, Skip-Month Guardrail,
-  per-position Volatility-Adjustment budget), see `docs/RISK_CONSTRAINTS.md`. Restart-safe by
+  per-position Volatility-Adjustment budget), see `docs/RISK_CONSTRAINTS.md`. An opt-in
+  broker-side protective stop (`attach_broker_stop_loss`, LIVE-ONLY): a REAL IBKR bracket order
+  (parent BUY + child STP SELL) attached at BUY time, protecting the position at the BROKER
+  ITSELF even when this app isn't running, belt-and-suspenders alongside the pre-existing
+  Python-side `auto_execute_stop_loss` check (which only ever runs when this app is actually
+  invoked), with a broker-truth-based cancel-before-sell mechanism so this app's own rebalance
+  and the broker's own triggered stop can never both try to sell the same shares, see
+  `docs/RISK_CONSTRAINTS.md`'s "Broker-Side Protective Stop" section. Restart-safe by
   construction in `--live` mode (broker-sourced
   holdings, calendar-derived scheduling, persisted local/bind-mounted state, both native Python
   and Docker), plus a non-blocking `MISSED_REBALANCE_DAY` warning if a scheduled rebalance was

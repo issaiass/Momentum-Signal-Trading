@@ -1439,7 +1439,9 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
                        alerts_log_path: str = ALERTS_LOG_PATH,
                        host: str = IBKR_HOST, fill_poll_timeout: float = 60.0,
                        allow_extended_hours: bool = False,
-                       max_bid_ask_spread_pct: float | None = None) -> dict:
+                       max_bid_ask_spread_pct: float | None = None,
+                       attach_broker_stop_loss: bool = False,
+                       stop_loss_pct: float | None = None) -> dict:
     """
     Requires `ibapi` (pip install ibapi --break-system-packages) and a running
     TWS or IB Gateway instance listening on `port`. Only called when --live
@@ -1486,6 +1488,24 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
         DROPPED_INSUFFICIENT_CASH) instead of submitting it. A None quote (timeout / no usable
         real-time data, see fetch_bid_ask_spread()'s own docstring) does NOT block the order,
         "couldn't check" is treated as "proceed," not as "spread is wide."
+    attach_broker_stop_loss : bool
+        BacktestConfig.attach_broker_stop_loss, LIVE-ONLY, belt-and-suspenders alongside the
+        Python-side auto_execute_stop_loss check (NOT a replacement for it). When True, each
+        BUY with a usable reference price in expected_prices submits a real IBKR bracket:
+        parent BUY (transmit=False) + child STP SELL (parentId linked, transmit=True, stop
+        price = reference_price * (1 - stop_loss_pct)), so the position is protected by the
+        BROKER ITSELF even when this app isn't running, unlike the Python-side check, which
+        only ever runs when daily-runner --live is actually invoked. A ticker with no
+        reference price falls back to a plain, unprotected BUY (same fallback shape as
+        allow_extended_hours' "no reference price" case), never blocks the BUY entirely. Only
+        the parent's orderId is tracked in the fill-confirmation poll/wait set, a resting
+        protective STP correctly stays non-terminal indefinitely, that's the whole point; its
+        orderId is surfaced back via results[ticker]["stop_order_id"] instead (audit-only, see
+        log_orders()'s broker_stop_order_id column; the actual cancel-before-sell mechanism,
+        see below, is broker-truth-based via reqAllOpenOrders(), not dependent on this).
+    stop_loss_pct : float, optional
+        BacktestConfig.stop_loss_pct, reused as-is for the bracket's stop offset, no duplicate
+        field. Required (non-None) for attach_broker_stop_loss to do anything.
     """
     try:
         from ibapi.client import EClient
@@ -1501,6 +1521,10 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
             EClient.__init__(self, self)
             self.next_order_id = None
             self.order_status = {}   # orderId -> {'status', 'filled', 'avg_fill_price', 'ticker'}
+            self.open_orders = []    # [{'orderId', 'symbol', 'action', 'orderType'}], see
+                                      # reqAllOpenOrders() usage below (attach_broker_stop_loss's
+                                      # cancel-before-sell mechanism)
+            self.open_orders_done = False
 
         def nextValidId(self, orderId: int):
             self.next_order_id = orderId
@@ -1509,6 +1533,20 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
                          permId=0, parentId=0, lastFillPrice=0, clientId=0, whyHeld="", mktCapPrice=0):
             entry = self.order_status.setdefault(orderId, {})
             entry.update(status=status, filled=float(filled), avg_fill_price=float(avgFillPrice))
+
+        def openOrder(self, orderId, contract, order, orderState):
+            # reqAllOpenOrders() (unlike reqOpenOrders(), which only returns THIS clientId's own
+            # orders) returns every API-submitted open order account-wide, required for
+            # cancel-before-sell to correctly find a resting protective STP that a DIFFERENT
+            # process invocation/client connection placed (the run that placed a bracket and
+            # the run that later decides to exit are almost always different connections).
+            self.open_orders.append({
+                "orderId": orderId, "symbol": contract.symbol,
+                "action": order.action, "orderType": order.orderType,
+            })
+
+        def openOrderEnd(self):
+            self.open_orders_done = True
 
         def error(self, reqId, errorCode, errorString, advancedOrderRejectJson=""):
             _log_ibkr_message(reqId, errorCode, errorString)
@@ -1564,6 +1602,12 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
     # (the rebalance email, in particular) can show what actually happened for every order,
     # not just the ones that made it to a real IBKR order.
     dropped_orders: dict = {}
+
+    # {ticker: child STP orderId} for a bracket's resting protective stop
+    # (attach_broker_stop_loss), surfaced into results[ticker]["stop_order_id"] by
+    # _collect_results() below, audit-only, NOT the cancel-before-sell source of truth (that's
+    # broker-truth-based via reqAllOpenOrders(), see the SELLs-first block further down).
+    stop_order_ids: dict = {}
 
     def _submit_and_wait(order_subset: dict, start_order_id: int) -> tuple[dict, int]:
         """Submits every order in order_subset, polls until each reaches a terminal
@@ -1640,6 +1684,12 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
                 shares = floored
             ib_order.totalQuantity = shares
 
+            # Explicit TIF for every order (bracket or not), no longer relying on the account's
+            # own implicit preset (previously observed defaulting to DAY via IBKR's own
+            # informational code 10349, see module docstring). A bracket's child protective
+            # STP overrides this to "GTC" below, deliberately, see that code for why.
+            ib_order.tif = "DAY"
+
             # IBKR/exchanges reject plain MKT orders outside regular trading hours (error 201,
             # "Exchange is closed") and only accept LMT orders with outsideRth=True instead,
             # MKT does not work outside RTH at all (confirmed against IBKR's own TWS API docs),
@@ -1662,13 +1712,71 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
                         "%s: allow_extended_hours is set but no reference price is available, "
                         "submitting as a regular MKT order (RTH only) instead.", ticker)
 
+            # Broker-side protective bracket (BacktestConfig.attach_broker_stop_loss,
+            # belt-and-suspenders alongside the Python-side auto_execute_stop_loss check, see
+            # this function's own docstring). Only ever attaches to a BUY, needs a usable
+            # reference price to compute the stop's absolute trigger price (an STP's auxPrice
+            # is an absolute price, not a percentage, so it can't be computed post-fill without
+            # knowing the fill price in advance).
+            attach_stop = (
+                attach_broker_stop_loss and order["action"] == "BUY" and stop_loss_pct is not None
+            )
+            stop_ref_price = (expected_prices or {}).get(ticker)
+            if attach_stop and not (stop_ref_price and stop_ref_price > 0):
+                logger.warning(
+                    "%s: attach_broker_stop_loss is set but no reference price is available, "
+                    "submitting a plain, unprotected BUY instead.", ticker)
+                attach_stop = False
+            if attach_stop:
+                ib_order.transmit = False  # holds the parent until the child below transmits
+
             logger.info("Placing %s %s shares of %s (orderId=%d)%s",
                         order["action"], shares, ticker, oid, extended_hours_note)
             app.order_status[oid] = {"status": "SUBMITTED", "filled": 0.0, "avg_fill_price": 0.0}
             order_id_to_ticker[oid] = ticker
             app.placeOrder(oid, contract, ib_order)
+            parent_oid = oid
             oid += 1
             time.sleep(0.3)  # simple pacing; IBKR rate-limits rapid order submission
+
+            if attach_stop:
+                stop_contract = Contract()
+                stop_contract.symbol = ticker
+                stop_contract.secType = "STK"
+                stop_contract.exchange = "SMART"
+                stop_contract.currency = "USD"
+
+                stop_order = Order()
+                stop_order.eTradeOnly = False
+                stop_order.firmQuoteOnly = False
+                stop_order.action = "SELL"
+                stop_order.orderType = "STP"  # plain stop-market, not STP LMT: a genuine
+                                               # protective stop must reliably execute during a
+                                               # fast decline, a limit leg can be skipped over
+                                               # in a gap, defeating the purpose.
+                stop_order.auxPrice = round(stop_ref_price * (1 - stop_loss_pct), 2)
+                stop_order.totalQuantity = shares
+                stop_order.parentId = parent_oid
+                stop_order.transmit = True  # transmits the whole bracket atomically
+                # GTC, deliberately NOT "DAY": a DAY stop would be cancelled by IBKR at end of
+                # day and leave the position completely unprotected on every subsequent day
+                # this app doesn't run, defeating the entire purpose of this feature (broker-
+                # side protection independent of whether the app is running). Parent and child
+                # are allowed to carry different tif values in a bracket, IBKR supports this.
+                stop_order.tif = "GTC"
+                if allow_extended_hours:
+                    # A plain STP only monitors/triggers during RTH otherwise, leaving a real
+                    # gap for a move in the same extended session the entry itself was allowed
+                    # in.
+                    stop_order.outsideRth = True
+
+                logger.info(
+                    "Attaching broker-side protective STP SELL for %s: %d shares @ stop %.2f "
+                    "(orderId=%d, parentId=%d)", ticker, shares, stop_order.auxPrice, oid, parent_oid)
+                app.placeOrder(oid, stop_contract, stop_order)
+                stop_order_ids[ticker] = oid
+                oid += 1
+                time.sleep(0.3)
 
         # --- poll for fill confirmation instead of a blind fixed sleep ---
         waited = 0.0
@@ -1689,6 +1797,8 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
             results[ticker] = {
                 "status": status, "filled": info.get("filled", 0.0), "avg_fill_price": info.get("avg_fill_price", 0.0),
             }
+            if ticker in stop_order_ids:
+                results[ticker]["stop_order_id"] = stop_order_ids[ticker]
             if status not in ("Filled",):
                 logger.warning("Order for %s did not confirm as Filled (status=%s).", ticker, status)
             else:
@@ -1720,6 +1830,31 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
     # --- SELLs first, always, see docstring. ---
     sell_orders = {t: o for t, o in orders.items() if o["action"] == "SELL" and o["shares"] > 0}
     buy_orders = {t: o for t, o in orders.items() if o["action"] == "BUY" and o["shares"] > 0}
+
+    # Cancel any resting broker-side protective STP (attach_broker_stop_loss) for a ticker THIS
+    # run is about to SELL, BEFORE submitting that SELL, otherwise the broker's own triggered
+    # stop and this app's rebalance-driven sell could both try to sell the same shares.
+    # Deliberately broker-truth-based (reqAllOpenOrders(), NOT reqOpenOrders(), which only
+    # returns THIS clientId's own orders, and not a locally-cached order ID either): the run
+    # that PLACED the bracket and the run that later decides to EXIT are almost always
+    # different process invocations/client connections, self-healing even if the placing run
+    # crashed before logging anything, or TWS restarted. Only performed when
+    # attach_broker_stop_loss is truthy, so accounts that never opt in pay no extra IBKR round
+    # trip.
+    if attach_broker_stop_loss and sell_orders:
+        app.reqAllOpenOrders()
+        waited = 0.0
+        while not app.open_orders_done and waited < 10.0:
+            time.sleep(0.2)
+            waited += 0.2
+        for resting in app.open_orders:
+            if (resting["symbol"] in sell_orders and resting["action"] == "SELL"
+                    and resting["orderType"] == "STP"):
+                logger.info(
+                    "Cancelling resting protective STP orderId=%d for %s before submitting "
+                    "this run's SELL.", resting["orderId"], resting["symbol"])
+                app.cancelOrder(resting["orderId"])
+                time.sleep(0.3)
 
     next_oid = app.next_order_id
     sell_ids, next_oid = _submit_and_wait(sell_orders, next_oid)
@@ -1945,11 +2080,15 @@ def run(
                                           auto_reduce_on_insufficient_cash=cfg.auto_reduce_buys_on_insufficient_cash,
                                           portfolio=portfolio, alerts_log_path=alerts_log_path,
                                           allow_extended_hours=cfg.allow_extended_hours,
-                                          max_bid_ask_spread_pct=cfg.max_bid_ask_spread_pct)
+                                          max_bid_ask_spread_pct=cfg.max_bid_ask_spread_pct,
+                                          attach_broker_stop_loss=cfg.attach_broker_stop_loss,
+                                          stop_loss_pct=cfg.stop_loss_pct)
         for ticker, fill in fill_results.items():
             if ticker in orders:
                 orders[ticker]["fill_status"] = fill["status"]
                 orders[ticker]["fill_price"] = fill["avg_fill_price"]
+                if "stop_order_id" in fill:
+                    orders[ticker]["broker_stop_order_id"] = fill["stop_order_id"]
                 orders[ticker]["fill_shares"] = fill["filled"]
     else:
         logger.info("DRY RUN: no orders sent to broker. Use --live to actually trade.")

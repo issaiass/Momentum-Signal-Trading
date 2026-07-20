@@ -267,6 +267,15 @@ class BacktestConfig:
 
     # --- stop-loss automation (item 2) ---
     auto_execute_stop_loss: bool = False     # False = flag only (live_signal path); True = engine auto-sells (backtest already does this)
+    attach_broker_stop_loss: bool = False    # LIVE-ONLY, belt-and-suspenders alongside
+                                              # auto_execute_stop_loss above, NOT a replacement
+                                              # for it: attaches a REAL IBKR bracket STP order at
+                                              # BUY time (reuses stop_loss_pct below), protecting
+                                              # the position at the BROKER even when this app
+                                              # isn't running, unlike auto_execute_stop_loss's
+                                              # Python-side check, which only ever runs when
+                                              # daily-runner --live is actually invoked. See
+                                              # execution/live_signal.py's place_orders_ibkr().
 
     # --- correlation-aware sizing (item 10) ---
     use_correlation_penalty: bool = False

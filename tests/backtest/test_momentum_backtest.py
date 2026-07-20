@@ -40,6 +40,14 @@ class TestBacktestConfigValidation:
         with pytest.raises(ValueError, match="min_gross_exposure"):
             BacktestConfig(min_gross_exposure=0.9, max_gross_exposure=0.5)
 
+    def test_attach_broker_stop_loss_defaults_false(self):
+        # LIVE-ONLY (Epic 2 of the cross-portfolio-sell-prevention plan), default False must be
+        # byte-identical to before this field existed, no effect on the backtest engine at all.
+        assert BacktestConfig().attach_broker_stop_loss is False
+
+    def test_attach_broker_stop_loss_true_is_accepted(self):
+        BacktestConfig(attach_broker_stop_loss=True)  # should not raise
+
     def test_invalid_stop_loss_pct_raises(self):
         # stop_loss_pct is a fraction (0,1); >1 would mean "stop out after losing
         # more than 100%", which is meaningless and signals a units mistake

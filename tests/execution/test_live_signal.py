@@ -1836,6 +1836,252 @@ class TestExtendedHoursOrders:
         assert order["outsideRth"] is False
 
 
+class TestBrokerStopLossBracket:
+    """
+    attach_broker_stop_loss (Epic 2 of the cross-portfolio-sell-prevention plan, belt-and-
+    suspenders alongside the Python-side auto_execute_stop_loss check): when set, each BUY
+    submits a real IBKR bracket, parent BUY (transmit=False) + child STP SELL (parentId linked,
+    transmit=True, stop price = reference_price * (1 - stop_loss_pct)). Only the parent oid is
+    tracked in the fill-poll wait set, a resting protective stop correctly stays non-terminal
+    indefinitely, that's the whole point.
+    """
+
+    def _install_fake_ibkr_capturing_orders(self, monkeypatch, captured, fill_children=False):
+        from ibapi.client import EClient
+
+        def fake_connect(self, host, port, clientId):
+            self.nextValidId(1)
+
+        def fake_run(self):
+            pass
+
+        def fake_place_order(self, orderId, contract, order):
+            captured.append({
+                "orderId": orderId, "symbol": contract.symbol, "action": order.action,
+                "orderType": order.orderType, "transmit": order.transmit,
+                "parentId": order.parentId, "auxPrice": order.auxPrice,
+                "totalQuantity": order.totalQuantity, "outsideRth": order.outsideRth,
+                "tif": order.tif,
+            })
+            # A resting child STP naturally stays non-terminal (Submitted), matching real
+            # broker behavior, only the parent (or a plain, non-bracket order) fills instantly.
+            if order.parentId and not fill_children:
+                self.orderStatus(orderId, "Submitted", 0, order.totalQuantity, 0.0)
+            else:
+                self.orderStatus(orderId, "Filled", order.totalQuantity, 0, 100.0)
+
+        def fake_disconnect(self):
+            pass
+
+        monkeypatch.setattr(EClient, "connect", fake_connect)
+        monkeypatch.setattr(EClient, "run", fake_run)
+        monkeypatch.setattr(EClient, "placeOrder", fake_place_order)
+        monkeypatch.setattr(EClient, "disconnect", fake_disconnect)
+
+    def test_bracket_parent_not_transmitted_child_is_and_linked_by_parent_id(self, monkeypatch, tmp_path):
+        import momentum_trading.execution.live_signal as ls
+        captured = []
+        self._install_fake_ibkr_capturing_orders(monkeypatch, captured)
+
+        orders = {"BUY1": {"action": "BUY", "shares": 5}}
+        ls.place_orders_ibkr(orders, port=9999, expected_prices={"BUY1": 100.0},
+                              alerts_log_path=str(tmp_path / "alerts_log.csv"),
+                              attach_broker_stop_loss=True, stop_loss_pct=0.12)
+
+        assert len(captured) == 2
+        parent, child = captured[0], captured[1]
+        assert parent["action"] == "BUY" and parent["transmit"] is False
+        assert child["action"] == "SELL" and child["orderType"] == "STP"
+        assert child["transmit"] is True
+        assert child["parentId"] == parent["orderId"]
+        assert child["totalQuantity"] == parent["totalQuantity"] == 5
+
+    def test_child_stop_price_computed_from_stop_loss_pct(self, monkeypatch, tmp_path):
+        import momentum_trading.execution.live_signal as ls
+        captured = []
+        self._install_fake_ibkr_capturing_orders(monkeypatch, captured)
+
+        orders = {"BUY1": {"action": "BUY", "shares": 5}}
+        ls.place_orders_ibkr(orders, port=9999, expected_prices={"BUY1": 100.0},
+                              alerts_log_path=str(tmp_path / "alerts_log.csv"),
+                              attach_broker_stop_loss=True, stop_loss_pct=0.12)
+
+        child = captured[1]
+        assert child["auxPrice"] == pytest.approx(88.0, abs=0.01)  # 100 * (1 - 0.12)
+
+    def test_disabled_by_default_is_a_single_plain_order(self, monkeypatch, tmp_path):
+        import momentum_trading.execution.live_signal as ls
+        captured = []
+        self._install_fake_ibkr_capturing_orders(monkeypatch, captured)
+
+        orders = {"BUY1": {"action": "BUY", "shares": 5}}
+        ls.place_orders_ibkr(orders, port=9999, expected_prices={"BUY1": 100.0},
+                              alerts_log_path=str(tmp_path / "alerts_log.csv"))
+        # attach_broker_stop_loss not passed, must default to off, byte-identical single order.
+
+        assert len(captured) == 1
+        assert captured[0]["transmit"] is True
+
+    def test_missing_reference_price_falls_back_to_plain_unprotected_buy(self, monkeypatch, tmp_path, caplog):
+        import momentum_trading.execution.live_signal as ls
+        captured = []
+        self._install_fake_ibkr_capturing_orders(monkeypatch, captured)
+
+        orders = {"BUY1": {"action": "BUY", "shares": 5}}
+        with caplog.at_level("WARNING"):
+            ls.place_orders_ibkr(orders, port=9999,  # no expected_prices
+                                  alerts_log_path=str(tmp_path / "alerts_log.csv"),
+                                  attach_broker_stop_loss=True, stop_loss_pct=0.12)
+
+        assert len(captured) == 1  # no child, BUY still submitted
+        assert captured[0]["transmit"] is True
+        assert any("no reference price" in r.message for r in caplog.records)
+
+    def test_resting_child_stop_excluded_from_fill_poll_wait_and_result_surfaced(self, monkeypatch, tmp_path):
+        import momentum_trading.execution.live_signal as ls
+        captured = []
+        self._install_fake_ibkr_capturing_orders(monkeypatch, captured)
+
+        orders = {"BUY1": {"action": "BUY", "shares": 5}}
+        result = ls.place_orders_ibkr(orders, port=9999, expected_prices={"BUY1": 100.0},
+                                       alerts_log_path=str(tmp_path / "alerts_log.csv"),
+                                       attach_broker_stop_loss=True, stop_loss_pct=0.12,
+                                       fill_poll_timeout=2.0)
+
+        # Poll loop returned promptly (didn't wait the full timeout for the non-terminal
+        # resting child), and the parent BUY is correctly reported as Filled.
+        assert result["BUY1"]["status"] == "Filled"
+        assert result["BUY1"]["stop_order_id"] == captured[1]["orderId"]
+
+    def test_extended_hours_bracket_sets_outside_rth_on_both_legs(self, monkeypatch, tmp_path):
+        import momentum_trading.execution.live_signal as ls
+        captured = []
+        self._install_fake_ibkr_capturing_orders(monkeypatch, captured)
+
+        orders = {"BUY1": {"action": "BUY", "shares": 5}}
+        ls.place_orders_ibkr(orders, port=9999, expected_prices={"BUY1": 100.0},
+                              alerts_log_path=str(tmp_path / "alerts_log.csv"),
+                              attach_broker_stop_loss=True, stop_loss_pct=0.12,
+                              allow_extended_hours=True)
+
+        parent, child = captured[0], captured[1]
+        assert parent["outsideRth"] is True
+        assert child["outsideRth"] is True
+
+    def test_every_order_carries_explicit_tif_day_except_bracket_child_gtc(self, monkeypatch, tmp_path):
+        import momentum_trading.execution.live_signal as ls
+        captured = []
+        self._install_fake_ibkr_capturing_orders(monkeypatch, captured)
+
+        orders = {"BUY1": {"action": "BUY", "shares": 5}, "SELL1": {"action": "SELL", "shares": 3}}
+        ls.place_orders_ibkr(orders, port=9999, expected_prices={"BUY1": 100.0, "SELL1": 50.0},
+                              alerts_log_path=str(tmp_path / "alerts_log.csv"),
+                              attach_broker_stop_loss=True, stop_loss_pct=0.12)
+
+        by_action_type = {(o["action"], o["orderType"]): o for o in captured}
+        assert by_action_type[("SELL", "MKT")]["tif"] == "DAY"    # the plain rebalance SELL
+        assert by_action_type[("BUY", "MKT")]["tif"] == "DAY"     # the bracket's parent BUY
+        assert by_action_type[("SELL", "STP")]["tif"] == "GTC"    # the bracket's protective child
+
+    def test_plain_order_without_bracket_also_carries_explicit_tif_day(self, monkeypatch, tmp_path):
+        # Fix 3: every order (bracket or not) now carries an EXPLICIT tif, no longer relying on
+        # the account's own implicit preset (previously observed defaulting to DAY via IBKR's
+        # own informational code 10349).
+        import momentum_trading.execution.live_signal as ls
+        captured = []
+        self._install_fake_ibkr_capturing_orders(monkeypatch, captured)
+
+        orders = {"BUY1": {"action": "BUY", "shares": 5}}
+        ls.place_orders_ibkr(orders, port=9999, alerts_log_path=str(tmp_path / "alerts_log.csv"))
+
+        assert captured[0]["tif"] == "DAY"
+
+
+class TestCancelRestingStopBeforeSell:
+    """
+    attach_broker_stop_loss's cancel-before-sell mechanism: a resting protective STP for a
+    ticker THIS run is about to SELL (rebalance rotation, stop-loss check, or time-stop, all
+    funnel through place_orders_ibkr()) must be cancelled first, or the broker's own triggered
+    stop and this app's rebalance-driven sell could both try to sell the same shares.
+    Broker-truth-based (reqAllOpenOrders(), not a locally-cached order ID), since the run that
+    PLACED the bracket and the run that later decides to EXIT are almost always different
+    process invocations/client connections.
+    """
+
+    def _install_fake_ibkr_with_resting_orders(self, monkeypatch, resting_orders, cancelled):
+        from ibapi.client import EClient
+
+        def fake_connect(self, host, port, clientId):
+            self.nextValidId(1)
+
+        def fake_run(self):
+            pass
+
+        def fake_req_all_open_orders(self):
+            for o in resting_orders:
+                self.openOrder(o["orderId"], type("C", (), {"symbol": o["symbol"]})(),
+                                type("O", (), {"action": o["action"], "orderType": o["orderType"]})(),
+                                None)
+            self.openOrderEnd()
+
+        def fake_cancel_order(self, orderId):
+            cancelled.append(orderId)
+
+        def fake_place_order(self, orderId, contract, order):
+            self.orderStatus(orderId, "Filled", order.totalQuantity, 0, 100.0)
+
+        def fake_disconnect(self):
+            pass
+
+        monkeypatch.setattr(EClient, "connect", fake_connect)
+        monkeypatch.setattr(EClient, "run", fake_run)
+        monkeypatch.setattr(EClient, "reqAllOpenOrders", fake_req_all_open_orders)
+        monkeypatch.setattr(EClient, "cancelOrder", fake_cancel_order)
+        monkeypatch.setattr(EClient, "placeOrder", fake_place_order)
+        monkeypatch.setattr(EClient, "disconnect", fake_disconnect)
+
+    def test_resting_stop_for_a_sold_ticker_is_cancelled_before_the_sell(self, monkeypatch, tmp_path):
+        import momentum_trading.execution.live_signal as ls
+        cancelled = []
+        self._install_fake_ibkr_with_resting_orders(
+            monkeypatch,
+            [{"orderId": 42, "symbol": "SELL1", "action": "SELL", "orderType": "STP"}],
+            cancelled,
+        )
+
+        orders = {"SELL1": {"action": "SELL", "shares": 5}}
+        ls.place_orders_ibkr(orders, port=9999, alerts_log_path=str(tmp_path / "alerts_log.csv"),
+                              attach_broker_stop_loss=True, stop_loss_pct=0.12)
+
+        assert cancelled == [42]
+
+    def test_sell_for_ticker_with_no_resting_stop_is_unaffected(self, monkeypatch, tmp_path):
+        import momentum_trading.execution.live_signal as ls
+        cancelled = []
+        self._install_fake_ibkr_with_resting_orders(monkeypatch, [], cancelled)
+
+        orders = {"SELL1": {"action": "SELL", "shares": 5}}
+        result = ls.place_orders_ibkr(orders, port=9999, alerts_log_path=str(tmp_path / "alerts_log.csv"),
+                                       attach_broker_stop_loss=True, stop_loss_pct=0.12)
+
+        assert cancelled == []
+        assert result["SELL1"]["status"] == "Filled"
+
+    def test_disabled_by_default_never_calls_req_all_open_orders(self, monkeypatch, tmp_path):
+        import momentum_trading.execution.live_signal as ls
+        from ibapi.client import EClient
+        cancelled = []
+        self._install_fake_ibkr_with_resting_orders(monkeypatch, [], cancelled)
+        calls = []
+        monkeypatch.setattr(EClient, "reqAllOpenOrders", lambda self: calls.append(1))
+
+        orders = {"SELL1": {"action": "SELL", "shares": 5}}
+        ls.place_orders_ibkr(orders, port=9999, alerts_log_path=str(tmp_path / "alerts_log.csv"))
+        # attach_broker_stop_loss not passed, must default to off, zero extra IBKR round trip.
+
+        assert calls == []
+
+
 class TestInformationalOrderErrorDoesNotCorruptStatus:
     """
     IBKR error 10349 ("Order TIF was set to DAY based on order preset") carries a real

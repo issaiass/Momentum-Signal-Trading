@@ -23,7 +23,9 @@ from momentum_trading.execution.live_signal import (
     compute_aggregate_drift, derive_entry_date, compute_target_weights,
     is_rebalance_day, is_holding_period_too_frequent, is_lookback_period_too_short,
     is_lookback_shorter_than_holding, is_lookback_to_holding_ratio_too_low,
-    compute_turnover, is_turnover_too_high, most_recent_rebalance_target_date,
+    compute_turnover, is_turnover_too_high,
+    compute_low_capital_drop_fraction, is_low_capital_drop_too_high,
+    most_recent_rebalance_target_date,
     build_position_performance, resolve_momentum_scores, calculate_period_returns,
     _realized_weighted_portfolio_vol, apply_absolute_momentum_filter,
 )
@@ -243,6 +245,57 @@ class TestIsTurnoverTooHigh:
 
     def test_below_threshold_is_not_too_high(self):
         assert is_turnover_too_high(0.10, 0.20) is False
+
+
+class TestComputeLowCapitalDropFraction:
+    """
+    Fraction of intended BUYs whose computed shares would floor to 0 (IBKR has no
+    fractional-equity order support). Checked via shares < 1 directly, not the LIVE-ONLY
+    fill_status field, so it works identically in dry-run and --live.
+    """
+
+    def test_hand_computed_fraction(self):
+        orders = {
+            "A": {"action": "BUY", "shares": 0.5},
+            "B": {"action": "BUY", "shares": 2.0},
+            "C": {"action": "BUY", "shares": 0.1},
+            "D": {"action": "BUY", "shares": 3.0},
+            "E": {"action": "SELL", "shares": 1.0},
+            "F": {"action": "HOLD", "shares": 0},
+        }
+        fraction, dropped = compute_low_capital_drop_fraction(orders)
+        assert fraction == pytest.approx(0.5)
+        assert set(dropped) == {"A", "C"}
+
+    def test_empty_orders_is_zero(self):
+        assert compute_low_capital_drop_fraction({}) == (0.0, [])
+
+    def test_no_buys_is_zero_not_all_dropped(self):
+        orders = {"A": {"action": "SELL", "shares": 1.0}, "B": {"action": "HOLD", "shares": 0}}
+        assert compute_low_capital_drop_fraction(orders) == (0.0, [])
+
+    def test_all_buys_floor_to_zero(self):
+        orders = {"A": {"action": "BUY", "shares": 0.2}, "B": {"action": "BUY", "shares": 0.9}}
+        fraction, dropped = compute_low_capital_drop_fraction(orders)
+        assert fraction == 1.0
+        assert set(dropped) == {"A", "B"}
+
+    def test_exactly_one_share_is_not_dropped(self):
+        orders = {"A": {"action": "BUY", "shares": 1.0}}
+        fraction, dropped = compute_low_capital_drop_fraction(orders)
+        assert fraction == 0.0
+        assert dropped == []
+
+
+class TestIsLowCapitalDropTooHigh:
+    def test_exactly_at_threshold_is_not_too_high(self):
+        assert is_low_capital_drop_too_high(0.30, 0.30) is False
+
+    def test_above_threshold_is_too_high(self):
+        assert is_low_capital_drop_too_high(0.31, 0.30) is True
+
+    def test_below_threshold_is_not_too_high(self):
+        assert is_low_capital_drop_too_high(0.10, 0.30) is False
 
 
 class TestResolveMomentumScores:

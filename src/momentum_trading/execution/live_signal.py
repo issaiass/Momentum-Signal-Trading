@@ -678,6 +678,38 @@ def is_turnover_too_high(turnover_pct: float, max_turnover_pct: float) -> bool:
     return turnover_pct > max_turnover_pct
 
 
+def compute_low_capital_drop_fraction(orders: dict) -> tuple[float, list[str]]:
+    """
+    Fraction of intended BUYs whose computed share count would floor to 0 (IBKR has no
+    fractional-equity order support at all, place_orders_ibkr() floors and drops any BUY
+    where int(shares) <= 0, status DROPPED_FRACTIONAL). Deliberately checks orders[t]["shares"]
+    directly (generate_orders()'s raw computed value, set identically in dry-run and --live)
+    rather than the fill_status field place_orders_ibkr() sets, since fill_status is LIVE-ONLY
+    (place_orders_ibkr() never runs in dry-run) and this warning should catch a too-small
+    capital base during a SAFE dry-run test too, not just discover it after already going
+    live. shares < 1 for a BUY always predicts the same drop place_orders_ibkr() would make
+    (int(shares) <= 0 iff shares < 1 for a positive share count). A high fraction here means
+    total_value is too small relative to top_n and this portfolio's ticker prices for real
+    capital to actually get deployed, distinct from turnover (compute_turnover() above), which
+    measures signal noise, not capital sizing. Returns (0.0, []) for an empty dict or a
+    rebalance with no intended BUYs (nothing to divide by, not "all dropped").
+    """
+    buys = {t: o for t, o in orders.items() if o.get("action") == "BUY"}
+    if not buys:
+        return 0.0, []
+    dropped = [t for t, o in buys.items() if o.get("shares", 0) < 1]
+    return len(dropped) / len(buys), dropped
+
+
+def is_low_capital_drop_too_high(drop_fraction: float, low_capital_drop_warning_pct: float) -> bool:
+    """
+    True when compute_low_capital_drop_fraction()'s fraction exceeds the configured
+    low_capital_drop_warning_pct (BacktestConfig, default 0.30). Named for consistency with
+    this module's other is_*_too_* advisory-check functions.
+    """
+    return drop_fraction > low_capital_drop_warning_pct
+
+
 # --------------------------------------------------------------------------- #
 # 4. AUDIT LOG, written BEFORE any broker call, regardless of outcome
 # --------------------------------------------------------------------------- #

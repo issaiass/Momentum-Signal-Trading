@@ -28,7 +28,9 @@ import pandas as pd
 from .execution.live_signal import (
     is_rebalance_day, is_holding_period_too_frequent, is_lookback_period_too_short,
     is_lookback_shorter_than_holding, is_lookback_to_holding_ratio_too_low,
-    compute_turnover, is_turnover_too_high, most_recent_rebalance_target_date,
+    compute_turnover, is_turnover_too_high,
+    compute_low_capital_drop_fraction, is_low_capital_drop_too_high,
+    most_recent_rebalance_target_date,
     run, run_multi_portfolio,
     get_ibkr_positions, get_ibkr_account_value, with_retry,
     place_orders_ibkr, log_orders, write_portfolio_snapshot, get_latest_snapshot,
@@ -1646,6 +1648,47 @@ def main():
                         NotificationCategory.WARNING, f"Turnover too high: {name}",
                         f"<pre>{turnover_text}</pre>", notification_cfg,
                         plain_text_fallback=turnover_text,
+                    )
+
+                # --- Low-capital / fractional-share sizing constraint (non-blocking): IBKR has
+                #     no fractional-equity order support, place_orders_ibkr() floors any BUY
+                #     that computes to under 1 share and drops it entirely. When too much of a
+                #     rebalance's intended BUYs get dropped this way, total_value is too small
+                #     relative to top_n and this portfolio's ticker prices for capital to
+                #     actually get deployed, distinct from turnover above (signal noise, not
+                #     capital sizing). Fires in BOTH dry-run and --live (see
+                #     compute_low_capital_drop_fraction()'s own docstring for why). ---
+                drop_fraction, dropped_tickers = compute_low_capital_drop_fraction(orders_result)
+                if is_low_capital_drop_too_high(drop_fraction, cfg.low_capital_drop_warning_pct):
+                    logger.warning(
+                        "[%s] %.1f%% of intended BUYs dropped (floor to 0 shares) exceeds "
+                        "low_capital_drop_warning_pct=%.1f%%: %s",
+                        name, drop_fraction * 100, cfg.low_capital_drop_warning_pct * 100,
+                        ", ".join(dropped_tickers),
+                    )
+                    log_alert(
+                        name, "LOW_CAPITAL_FRACTIONAL_DROP", "WARNING",
+                        f"{drop_fraction:.2%} of intended BUYs dropped for flooring to 0 shares "
+                        f"(tickers: {', '.join(dropped_tickers)}), exceeds "
+                        f"low_capital_drop_warning_pct={cfg.low_capital_drop_warning_pct:.2%}.",
+                        log_path=ALERTS_LOG_PATH,
+                    )
+                    low_capital_text = (
+                        f"Portfolio '{name}' had {drop_fraction:.2%} of its intended BUYs "
+                        f"dropped this rebalance, IBKR has no fractional-equity order support, "
+                        f"so a computed position under 1 share is dropped entirely rather than "
+                        f"ever reaching the broker: {', '.join(dropped_tickers)}.\n\n"
+                        f"This means total_value=${total_value:,.2f} is likely too small "
+                        f"relative to top_n={min(cfg.top_n, len(tickers))} and this portfolio's "
+                        f"ticker prices for real capital to actually get deployed. Concrete "
+                        f"levers: increase total_value, reduce top_n (fewer, larger positions), "
+                        f"or prefer lower-priced tickers. This run is proceeding normally, "
+                        f"nothing was blocked."
+                    )
+                    send_action_email(
+                        NotificationCategory.WARNING, f"Low-capital fractional drop: {name}",
+                        f"<pre>{low_capital_text}</pre>", notification_cfg,
+                        plain_text_fallback=low_capital_text,
                     )
 
                 # --- STANDARD-category notification (filterable). Always sent when a

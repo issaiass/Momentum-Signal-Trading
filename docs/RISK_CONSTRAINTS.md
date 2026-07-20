@@ -79,6 +79,7 @@ warning was added, only `< 3` fires.
 | Constraint | Rule | Why | Config field | Default |
 |---|---|---|---|---|
 | Turnover Limit | `Total_Positions_Changed / Total_Positions` per rebalance, flagged if it exceeds a threshold | High turnover is almost always a sign of an over-sensitive signal. | `max_turnover_pct` | `0.20` |
+| Low-Capital Fractional Drop | Fraction of intended BUYs whose computed shares would floor to 0, flagged if it exceeds a threshold | IBKR has no fractional-equity order support, a dropped BUY is capital that silently never got deployed. | `low_capital_drop_warning_pct` | `0.30` |
 | Skip-Month Guardrail | For `lookback_period > 3` months, exclude the most recent ~21 trading days from the signal | The classic academic "12-1 momentum" construction, avoids short-term reversal decay. | `skip_month_guardrail` | `false` (opt-in) |
 | Volatility-Adjustment (Scaling) | `Pos_Size = Strategy_Weight * (Target_Vol / Asset_Vol)`, never exceed a per-position vol budget | Caps a single position's risk contribution regardless of how strong the momentum signal is. | `position_vol_budget` | `null` (disabled) |
 
@@ -99,6 +100,28 @@ This is a position-COUNT ratio, distinct from the pre-existing `drift_threshold`
 total portfolio value is being traded), not counts of tickers traded. A rebalance can have low
 dollar turnover but high position-count turnover (many small trades) or vice versa (one large
 trade), the two metrics answer different questions.
+
+### Low-Capital Fractional Drop
+
+Non-blocking WARNING, fires in BOTH dry-run and `--live` (unlike Turnover Limit above, which is
+`--live`-meaningful only insofar as it reads the same `orders` dict either mode produces; this
+constraint is specifically designed to catch a too-small capital base during a SAFE dry-run test,
+before you ever commit real money to it).
+
+IBKR's API has no fractional-equity order support at all (confirmed elsewhere in this project,
+not an `ibapi` version issue): `place_orders_ibkr()` floors every BUY to whole shares at
+submission time and drops it entirely (`DROPPED_FRACTIONAL`) if it floors to 0. A portfolio with
+too little `total_value` spread across too many (`top_n`), too expensive tickers can end up with
+most of its intended BUYs silently dropped this way, real capital that never actually gets
+deployed, previously visible only by reading individual dropped-order log lines after the fact.
+
+`compute_low_capital_drop_fraction()`/`is_low_capital_drop_too_high()` (`execution/
+live_signal.py`) check `orders[ticker]["shares"] < 1` for every intended BUY directly (the raw
+value `generate_orders()` computes, identical in dry-run and `--live`), NOT the live-only
+`fill_status` field `place_orders_ibkr()` sets, specifically so this fires during a safe
+`--force-rebalance` test too. Wired as the `LOW_CAPITAL_FRACTIONAL_DROP` alert, naming the
+dropped tickers and suggesting concrete levers: increase `total_value`, reduce `top_n` (fewer,
+larger positions), or prefer lower-priced tickers.
 
 ### Skip-Month Guardrail
 

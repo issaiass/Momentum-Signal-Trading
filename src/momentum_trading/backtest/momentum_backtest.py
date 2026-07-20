@@ -227,6 +227,20 @@ class BacktestConfig:
                                              # on a shared IBKR account, so only the POSITION
                                              # side is compared, not a full "total value"
                                              # reconstruction.
+    low_capital_drop_warning_pct: float = 0.30  # LIVE-ONLY advisory (non-blocking WARNING).
+                                             # IBKR's API has no fractional-equity order support
+                                             # (see place_orders_ibkr()), so any intended BUY
+                                             # whose share count floors to 0 is dropped entirely
+                                             # (status DROPPED_FRACTIONAL) rather than ever
+                                             # reaching the broker. When the fraction of intended
+                                             # BUYs dropped this way on a single rebalance exceeds
+                                             # this threshold, daily_runner.py fires a
+                                             # LOW_CAPITAL_FRACTIONAL_DROP warning: total_value is
+                                             # likely too small relative to top_n and this
+                                             # portfolio's ticker prices for real capital to
+                                             # actually get deployed. e.g. 0.30 = warn if more
+                                             # than 30% of this rebalance's intended BUYs were
+                                             # dropped for flooring to 0 shares.
 
     # --- cash flow simulation ---
     monthly_contribution: float = 0.0       # $ added to cash at each rebalance date (0 = off)
@@ -366,6 +380,10 @@ class BacktestConfig:
         if self.total_value_drift_warning_pct <= 0:
             errors.append(
                 f"total_value_drift_warning_pct ({self.total_value_drift_warning_pct}) must be > 0"
+            )
+        if not (0 < self.low_capital_drop_warning_pct <= 1.0):
+            errors.append(
+                f"low_capital_drop_warning_pct ({self.low_capital_drop_warning_pct}) should be in (0, 1.0]"
             )
         if self.aggregate_drift_threshold < 0:
             errors.append(f"aggregate_drift_threshold ({self.aggregate_drift_threshold}) must be >= 0")

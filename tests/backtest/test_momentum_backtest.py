@@ -92,6 +92,15 @@ class TestBacktestConfigValidation:
         with pytest.raises(ValueError, match="max_turnover_pct"):
             BacktestConfig(max_turnover_pct=1.5)
 
+    def test_low_capital_drop_warning_pct_default(self):
+        assert BacktestConfig().low_capital_drop_warning_pct == 0.30
+
+    def test_low_capital_drop_warning_pct_out_of_range_raises(self):
+        with pytest.raises(ValueError, match="low_capital_drop_warning_pct"):
+            BacktestConfig(low_capital_drop_warning_pct=0.0)
+        with pytest.raises(ValueError, match="low_capital_drop_warning_pct"):
+            BacktestConfig(low_capital_drop_warning_pct=1.5)
+
     def test_use_absolute_momentum_defaults_false(self):
         # Deliberately opt-in, like skip_month_guardrail: enabling it changes what the SAME
         # picks actually resolve to, must never flip on by accident from an old config.yaml.

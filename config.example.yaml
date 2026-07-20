@@ -181,6 +181,17 @@ default_risk:
                                    # ceiling. Has no effect on a total_value: null portfolio
                                    # (already tracks real account value by definition) or in
                                    # dry-run (no real positions to compare).
+  low_capital_drop_warning_pct: 0.30  # non-blocking WARNING, fires in BOTH dry-run and --live.
+                                   # IBKR has no fractional-equity order support at all, a
+                                   # computed BUY under 1 share is dropped entirely rather than
+                                   # ever reaching the broker (DROPPED_FRACTIONAL). e.g. 0.30 =
+                                   # warn if more than 30% of a rebalance's intended BUYs get
+                                   # dropped this way, a sign total_value is too small relative
+                                   # to top_n and this portfolio's ticker prices for real capital
+                                   # to actually get deployed. Distinct from max_turnover_pct
+                                   # above (signal noise), this is about capital sizing. Names
+                                   # the dropped tickers and suggests concrete levers (raise
+                                   # total_value, lower top_n, prefer cheaper tickers).
   use_regime_filter: true         # true = skip new entries when regime_benchmark is below its SMA
   regime_benchmark: SPY           # benchmark ticker the regime filter checks against
   regime_sma_window: 150          # trading days in the regime filter's moving average

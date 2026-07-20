@@ -281,6 +281,20 @@ that tests enforce, don't casually violate these when editing:
   `daily_prices[tickers]`, never the extra ones, getting priced must never make a ticker
   re-selectable as a NEW pick. `None` (default) is byte-identical to this function's behavior
   before this param existed.
+  `run()` also gained an optional `daily_prices` param, fixing a real, confirmed redundant
+  network round-trip: `daily_runner.py`'s "ALWAYS runs" block (stop-loss check + portfolio
+  snapshot, runs every day regardless of rebalance schedule) already fetches prices for
+  `tickers + confirmed_orphaned` BEFORE deciding whether today is a rebalance day; when it is,
+  `run()` was fetching that SAME data a second time internally (identical ticker set once
+  `extra_price_tickers=confirmed_orphaned` is passed, both call sites use
+  `fetch_live_prices()`'s only default `lookback_days=400`), a second multi-minute
+  multi-vendor-fallback fetch every single rebalance day. `daily_runner.py`'s call to `run()`
+  now passes its own already-fetched `daily_prices` straight through; `run()` reuses it only
+  when `set(price_tickers).issubset(daily_prices.columns)` (covers every ticker it would
+  otherwise fetch), falling back to fetching internally exactly as before if not (a narrower
+  or absent `daily_prices`, e.g. every pre-existing test/notebook call site that doesn't pass
+  it). `None` (the default) is byte-identical to this function's behavior before this param
+  existed.
   `reconstruct_dry_run_positions(log_path)` reuses `measure_live_performance()`'s EXISTING FIFO
   `open_positions`/`open_position_avg_cost` computation (filtered to `dry_run=True` rows), not a
   second, separately-maintained FIFO implementation, reshaped into the same

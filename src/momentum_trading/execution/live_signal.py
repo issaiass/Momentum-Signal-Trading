@@ -1968,6 +1968,7 @@ def run(
     portfolio: str = "",
     alerts_log_path: str = ALERTS_LOG_PATH,
     extra_price_tickers: list[str] | None = None,
+    daily_prices: pd.DataFrame | None = None,
 ) -> dict:
     """
     extra_price_tickers : additional tickers to fetch a price for (so generate_orders() can
@@ -1978,6 +1979,17 @@ def run(
     ticker re-selectable as a NEW pick, that's why this widens `daily_prices` (used for pricing)
     but NOT the DataFrame passed into resolve_momentum_scores()/ranking (still `tickers` only).
     None (default) preserves this function's exact pre-existing behavior.
+
+    daily_prices : an already-fetched price DataFrame to reuse instead of calling
+    fetch_live_prices() again. daily_runner.py's "ALWAYS runs" block (stop-loss check +
+    portfolio snapshot) already fetches prices for tickers + confirmed_orphaned, the SAME
+    ticker set this function would otherwise fetch a second time for extra_price_tickers, a
+    confirmed redundant network round-trip on every rebalance day (same 400-day lookback,
+    same tickers once extra_price_tickers is passed). Reused only when it already covers every
+    needed ticker (tickers ∪ extra_price_tickers); if not (e.g. called directly from a test or
+    notebook without pre-fetching, or with a narrower ticker set than expected), falls back to
+    fetching internally exactly as before. `None` (the default) is byte-identical to this
+    function's behavior before this param existed.
     """
     # Lazy import: core/strategy_signals.py imports resolve_momentum_scores()/assign_ranks()
     # FROM this module (core/'s deliberate one-directional exception, see that module's own
@@ -1986,7 +1998,10 @@ def run(
     from ..core.strategy_signals import resolve_strategy_scores, resolve_strategy_picks
 
     price_tickers = tickers if not extra_price_tickers else list(dict.fromkeys(list(tickers) + list(extra_price_tickers)))
-    daily_prices = with_retry(fetch_live_prices, 3, 2.0, price_tickers, fmp_api_key=fmp_api_key, eodhd_api_key=eodhd_api_key)
+    if daily_prices is not None and not daily_prices.empty and set(price_tickers).issubset(daily_prices.columns):
+        pass  # reuse the already-fetched prices, skip the redundant fetch_live_prices() call
+    else:
+        daily_prices = with_retry(fetch_live_prices, 3, 2.0, price_tickers, fmp_api_key=fmp_api_key, eodhd_api_key=eodhd_api_key)
     if daily_prices.empty:
         logger.error("No price data returned; aborting.")
         return {}

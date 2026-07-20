@@ -1613,6 +1613,7 @@ def main():
                         portfolio=name,
                         alerts_log_path=ALERTS_LOG_PATH,
                         extra_price_tickers=confirmed_orphaned,
+                        daily_prices=daily_prices,
                     )
                 finally:
                     _clear_rebalance_in_progress_marker(name)

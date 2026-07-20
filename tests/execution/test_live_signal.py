@@ -552,6 +552,80 @@ class TestRunExtraPriceTickers:
         assert "OLD" not in orders
 
 
+class TestRunReusesPreFetchedDailyPrices:
+    """
+    daily_runner.py's "ALWAYS runs" block already fetches prices for tickers +
+    confirmed_orphaned before deciding whether today is a rebalance day; when it is, run() was
+    previously fetching that SAME data a second time internally, a confirmed redundant network
+    round-trip. The daily_prices param lets the caller pass the already-fetched DataFrame
+    through instead.
+    """
+
+    def _fake_prices(self, tickers, seed=3):
+        dates = pd.bdate_range("2025-01-01", "2026-07-09")
+        rng = np.random.default_rng(seed)
+        data = {t: np.cumprod(1 + rng.normal(0.0005, 0.01, len(dates))) * 100 for t in tickers}
+        return pd.DataFrame(data, index=dates)
+
+    def test_pre_fetched_prices_covering_needed_tickers_skips_the_fetch(self, monkeypatch, tmp_path):
+        fake_prices = self._fake_prices(["SPY", "QQQ", "OLD"])
+        fetch_calls = []
+        monkeypatch.setattr(
+            live_signal, "fetch_live_prices",
+            lambda tickers, **k: fetch_calls.append(list(tickers)) or fake_prices[list(tickers)],
+        )
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False)
+        live_signal.run(
+            tickers=["SPY", "QQQ"], current_holdings={"OLD": 10.0}, total_value=1000.0,
+            cfg=cfg, top_n=2, lookback_period=1.0, dry_run=True,
+            extra_price_tickers=["OLD"], daily_prices=fake_prices,
+        )
+
+        assert fetch_calls == []
+
+    def test_pre_fetched_prices_missing_a_needed_ticker_falls_back_to_fetching(self, monkeypatch, tmp_path):
+        # daily_prices only covers SPY/QQQ, but extra_price_tickers needs OLD too, so the
+        # incomplete pre-fetch must not be trusted, this must fall back exactly as if
+        # daily_prices had never been passed.
+        narrow_prices = self._fake_prices(["SPY", "QQQ"])
+        full_prices = self._fake_prices(["SPY", "QQQ", "OLD"])
+        fetch_calls = []
+        monkeypatch.setattr(
+            live_signal, "fetch_live_prices",
+            lambda tickers, **k: fetch_calls.append(list(tickers)) or full_prices[list(tickers)],
+        )
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False)
+        orders = live_signal.run(
+            tickers=["SPY", "QQQ"], current_holdings={"OLD": 10.0}, total_value=1000.0,
+            cfg=cfg, top_n=2, lookback_period=1.0, dry_run=True,
+            extra_price_tickers=["OLD"], daily_prices=narrow_prices,
+        )
+
+        assert set(fetch_calls[0]) == {"SPY", "QQQ", "OLD"}
+        assert "OLD" in orders  # confirms the fallback fetch actually covered OLD too
+
+    def test_daily_prices_default_none_is_byte_identical_to_before(self, monkeypatch, tmp_path):
+        fake_prices = self._fake_prices(["SPY", "QQQ"])
+        fetch_calls = []
+        monkeypatch.setattr(
+            live_signal, "fetch_live_prices",
+            lambda tickers, **k: fetch_calls.append(list(tickers)) or fake_prices[list(tickers)],
+        )
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False)
+        live_signal.run(
+            tickers=["SPY", "QQQ"], current_holdings={}, total_value=1000.0, cfg=cfg,
+            top_n=2, lookback_period=1.0, dry_run=True,
+        )
+
+        assert fetch_calls == [["SPY", "QQQ"]]
+
+
 class TestRunAbsoluteMomentumFilter:
     """
     cfg.use_absolute_momentum end-to-end through run(), wired right after picks are selected

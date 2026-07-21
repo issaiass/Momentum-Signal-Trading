@@ -878,6 +878,109 @@ class TestRunAbsoluteMomentumFilter:
         assert orders["BIL"]["action"] == "BUY"
 
 
+class TestRunLiquidityFilter:
+    """
+    cfg.use_liquidity_filter end-to-end through run(): wired right after ranks are assigned,
+    before picks are selected, so an illiquid ticker can never be selected into top_n at all,
+    not just flagged after the fact. Epic 3 of the layered risk-management plan.
+    """
+
+    def _ranked_prices(self, seed=11):
+        dates = pd.bdate_range("2024-01-01", "2024-05-15")
+        rng = np.random.default_rng(seed)
+        n = len(dates)
+        # C has the STRONGEST momentum (would be rank 1 every date) but will be given a
+        # trailing dollar volume far below the threshold, must never be selected regardless.
+        a = np.linspace(50, 70, n) * (1 + rng.normal(0, 0.0005, n))
+        b = np.linspace(50, 65, n) * (1 + rng.normal(0, 0.0005, n))
+        c = np.linspace(50, 120, n) * (1 + rng.normal(0, 0.0005, n))
+        return pd.DataFrame({"A": a, "B": b, "C": c}, index=dates)
+
+    def _install_volume(self, monkeypatch, prices, thin_ticker="C", thin_volume=10.0, liquid_volume=100_000.0):
+        def fake_ohlcv(tickers, **k):
+            result = {}
+            for t in tickers:
+                vol = thin_volume if t == thin_ticker else liquid_volume
+                result[t] = pd.DataFrame({
+                    "open": prices[t], "high": prices[t], "low": prices[t], "close": prices[t],
+                    "volume": vol,
+                }, index=prices.index)
+            return result
+        monkeypatch.setattr(live_signal, "fetch_ohlcv_for_tickers", fake_ohlcv)
+
+    def _run_kwargs(self, tmp_path):
+        return dict(
+            log_path=str(tmp_path / "trade_log.csv"),
+            signal_rankings_log_path=str(tmp_path / "signal_rankings_log.csv"),
+        )
+
+    def test_illiquid_top_ranked_ticker_is_never_selected(self, monkeypatch, tmp_path):
+        prices = self._ranked_prices()
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        self._install_volume(monkeypatch, prices)
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False, use_liquidity_filter=True,
+                              min_avg_dollar_volume=1_000_000.0)
+        orders = live_signal.run(
+            tickers=["A", "B", "C"], current_holdings={}, total_value=1000.0, cfg=cfg,
+            top_n=1, lookback_period=1.0, dry_run=True, **self._run_kwargs(tmp_path),
+        )
+
+        # A rises 50->70 (stronger drift than B's 50->65), so once C (illiquid) is excluded,
+        # A is the real next-best liquid ticker, not B.
+        assert "C" not in orders  # never picked despite being the strongest signal
+        assert set(orders.keys()) == {"A"}
+
+    def test_default_disabled_is_byte_identical(self, monkeypatch, tmp_path):
+        prices = self._ranked_prices()
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        self._install_volume(monkeypatch, prices)
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False)  # flag omitted, default False
+        orders = live_signal.run(
+            tickers=["A", "B", "C"], current_holdings={}, total_value=1000.0, cfg=cfg,
+            top_n=1, lookback_period=1.0, dry_run=True, **self._run_kwargs(tmp_path),
+        )
+
+        # C has the strongest momentum and, with the filter OFF, must be picked as before.
+        assert set(orders.keys()) == {"C"}
+
+    def test_filtered_ticker_still_appears_in_full_signal_universe_as_watchlist(self, monkeypatch, tmp_path):
+        prices = self._ranked_prices()
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        self._install_volume(monkeypatch, prices)
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False, use_liquidity_filter=True,
+                              min_avg_dollar_volume=1_000_000.0)
+        orders = live_signal.run(
+            tickers=["A", "B", "C"], current_holdings={}, total_value=1000.0, cfg=cfg,
+            top_n=1, lookback_period=1.0, dry_run=True, **self._run_kwargs(tmp_path),
+        )
+
+        universe = orders.full_signal_universe
+        assert "C" in universe  # not silently invisible
+        assert universe["C"]["selection_status"] == "Watchlist / Reserve"
+        assert universe["C"]["rank"] is None  # NaN-ranked, correctly blank not a stale number
+
+    def test_no_volume_data_available_logs_warning_and_does_not_crash(self, monkeypatch, tmp_path, caplog):
+        prices = self._ranked_prices()
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        monkeypatch.setattr(live_signal, "fetch_ohlcv_for_tickers", lambda tickers, **k: {})
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False, use_liquidity_filter=True)
+        with caplog.at_level("WARNING"):
+            orders = live_signal.run(
+                tickers=["A", "B", "C"], current_holdings={}, total_value=1000.0, cfg=cfg,
+                top_n=1, lookback_period=1.0, dry_run=True, **self._run_kwargs(tmp_path),
+            )
+        assert "liquidity filter skipped" in caplog.text
+        assert set(orders.keys()) == {"C"}  # filter effectively a no-op when no volume at all
+
+
 class TestRunMultiTimeframeComposite:
     """
     cfg.strategy_type == "multi_timeframe_composite" end-to-end through run(), Epic 2 of the

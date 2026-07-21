@@ -88,7 +88,12 @@ README says so on purpose.
   opt-in): since IBKR has no fractional equity order support, every BUY floors to a whole share
   count, leaving a small per-ticker leftover unused, this pools that leftover across the
   rebalance's BUYs and redeploys it as extra whole shares of the single top-ranked pick, see
-  `docs/RISK_CONSTRAINTS.md`'s "Flooring Remainder Redeployment" section. Restart-safe by
+  `docs/RISK_CONSTRAINTS.md`'s "Flooring Remainder Redeployment" section. Liquidity/universe
+  filter (`use_liquidity_filter`, opt-in, LIVE + BACKTEST): excludes a ticker from selection
+  entirely (not just an advisory warning) on any rebalance its trailing average dollar volume
+  falls below a threshold, see `docs/RISK_CONSTRAINTS.md`'s "Liquidity / Universe Filter"
+  section (including a documented caveat: not effective under the `absolute_momentum`
+  `strategy_type`, which selects by score, not rank). Restart-safe by
   construction in `--live` mode (broker-sourced
   holdings, calendar-derived scheduling, persisted local/bind-mounted state, both native Python
   and Docker), plus a non-blocking `MISSED_REBALANCE_DAY` warning if a scheduled rebalance was

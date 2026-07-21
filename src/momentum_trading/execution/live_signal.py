@@ -62,7 +62,7 @@ from ..backtest.momentum_backtest import (
     detect_correlation_spike,
     compute_vol_scalar,
 )
-from ..core.functions_quant_extensions import absolute_momentum_overlay
+from ..core.functions_quant_extensions import absolute_momentum_overlay, liquidity_filter
 
 logger = logging.getLogger("live_signal")
 if not logger.handlers:
@@ -2357,6 +2357,39 @@ def run(
             log_path=alerts_log_path,
         )
     ranks = assign_ranks(scores)
+
+    # --- Liquidity/universe filter (opt-in, cfg.use_liquidity_filter), a PRE-selection
+    #     eligibility filter: zeroes a ticker's rank on any date its trailing average dollar
+    #     volume falls below cfg.min_avg_dollar_volume, so an illiquid name can never be
+    #     selected into top_n at all, not just flagged after the fact (distinct from
+    #     max_pct_of_adv's advisory, post-selection warning below). Volume isn't part of
+    #     fetch_live_prices()'s close-only daily_prices, so it's fetched separately here via
+    #     the EXISTING fetch_ohlcv_for_tickers() (already used for technical indicators, one
+    #     get_stock_prices() call per ticker). A ticker filtered out this way still appears in
+    #     full_signal_universe/the Full Signal Universe table as "Watchlist / Reserve" with a
+    #     blank rank (that code's existing pd.notna() guard already handles a NaN rank
+    #     gracefully, no change needed there), an accurate reflection of "excluded for
+    #     illiquidity," not silently invisible.
+    #
+    #     CAVEAT: this filters RANKS, so it's effective for every strategy_type that selects via
+    #     the cross-sectional nsmallest()-equivalent (resolve_strategy_picks()), which is every
+    #     strategy_type EXCEPT absolute_momentum, whose select_absolute_momentum_picks() selects
+    #     by each ticker's OWN trailing score directly, never consulting rank at all. An
+    #     illiquid ticker with positive absolute momentum is NOT excluded by this filter under
+    #     that one strategy_type today, a known, documented gap, not silently glossed over, see
+    #     docs/RISK_CONSTRAINTS.md's "Liquidity / Universe Filter". ---
+    if cfg.use_liquidity_filter and not ranks.empty:
+        ohlcv = fetch_ohlcv_for_tickers(tickers, fmp_api_key=fmp_api_key, eodhd_api_key=eodhd_api_key)
+        volume_by_ticker = {t: df["volume"] for t, df in ohlcv.items() if "volume" in df.columns}
+        if volume_by_ticker:
+            df_volume = pd.DataFrame(volume_by_ticker)
+            ranks = liquidity_filter(ranks, daily_prices[tickers], df_volume,
+                                      cfg.min_avg_dollar_volume, cfg.liquidity_lookback_days)
+        else:
+            logger.warning("[%s] use_liquidity_filter is set but no volume data could be "
+                            "fetched for any ticker, liquidity filter skipped this rebalance.",
+                            portfolio)
+
     latest_scores = scores.iloc[-1] if not scores.empty else None
     latest_ranks_row = ranks.iloc[-1] if not ranks.empty else None
     # resolve_strategy_picks() (core/strategy_signals.py) dispatches on cfg.strategy_type:

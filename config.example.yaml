@@ -427,6 +427,21 @@ default_risk:
                                        # notebook for ad-hoc backtest-side capacity analysis,
                                        # this field only wires it into the LIVE path.
 
+  # Liquidity / universe filter, LIVE + BACKTEST, a PRE-selection eligibility filter (distinct
+  # from max_pct_of_adv above, a POST-selection advisory warning): zeroes a ticker's RANK on any
+  # date its trailing average dollar volume falls below min_avg_dollar_volume, so it can never
+  # be selected into top_n at all, not just flagged after the fact. Opt-in, false default is
+  # byte-identical to before this existed. CAVEAT: only effective for strategy_types that select
+  # via cross-sectional rank (every one except absolute_momentum, which selects by each ticker's
+  # own trailing score directly, never consulting rank), see docs/RISK_CONSTRAINTS.md's
+  # "Liquidity / Universe Filter" for the full explanation.
+  use_liquidity_filter: false
+  min_avg_dollar_volume: 1000000.0    # trailing avg (price * volume) required to remain
+                                       # selection-eligible, only meaningful when
+                                       # use_liquidity_filter is true
+  liquidity_lookback_days: 63         # trading-day window for the trailing average above
+                                       # (~3 months)
+
   # Backtest-only (research/notebook use, no effect on daily-runner). run_risk_managed_backtest()
   # is the ONLY consumer of every field in this block, none of them are read anywhere in the
   # --live or dry-run execution path, setting these in a portfolio's risk_overrides has zero

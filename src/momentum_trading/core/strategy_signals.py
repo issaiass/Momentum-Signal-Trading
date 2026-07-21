@@ -30,7 +30,7 @@ import pandas as pd
 
 from ..backtest.momentum_backtest import BacktestConfig
 from ..execution.live_signal import resolve_momentum_scores, assign_ranks
-from .functions_quant_extensions import blend_momentum_scores
+from .functions_quant_extensions import blend_momentum_scores, liquidity_filter
 from .fundamentals import get_cached_or_fetch_fundamentals
 
 # strategy_type values whose SCORING is identical to the base per-ticker trailing-return score
@@ -356,7 +356,7 @@ def resolve_strategy_picks(
 
 def generate_strategy_monthly_picks(
     daily_prices: pd.DataFrame, tickers: list[str], cfg: BacktestConfig, lookback_period: float,
-    top_n: int,
+    top_n: int, daily_volume: pd.DataFrame | None = None,
 ) -> pd.Series:
     """
     Backtest-facing counterpart to resolve_strategy_scores(): produces a FULL HISTORICAL
@@ -373,6 +373,16 @@ def generate_strategy_monthly_picks(
     backtest history would silently introduce severe look-ahead bias, this strategy_type is
     LIVE-ONLY by design (docs/MOMENTUM_STRATEGIES.md), a real fix would need a separately-scoped
     paid point-in-time fundamentals vendor, out of scope here.
+
+    daily_volume : optional, backtest-side counterpart to execution/live_signal.py's run()'s
+    live liquidity-filter wiring (see that function's own docstring for the full mechanism and
+    its absolute_momentum caveat). Only consulted when cfg.use_liquidity_filter is True; unlike
+    the fundamentals point-in-time-bias case above, historical volume genuinely exists and
+    applying it here is NOT a look-ahead risk, so a caller that enables the flag WITHOUT
+    supplying daily_volume gets a loud ValueError, not a silent no-op, matching the
+    hybrid_multi_factor precedent above of failing loud rather than guessing. cfg.
+    use_liquidity_filter False (the default) makes this param irrelevant, byte-identical to
+    before it existed.
     """
     if getattr(cfg, "strategy_type", "momentum") == "hybrid_multi_factor":
         raise NotImplementedError(
@@ -382,8 +392,18 @@ def generate_strategy_monthly_picks(
             "source, applying current fundamentals across historical dates would silently "
             "introduce look-ahead bias. See docs/MOMENTUM_STRATEGIES.md."
         )
+    if cfg.use_liquidity_filter and daily_volume is None:
+        raise ValueError(
+            "generate_strategy_monthly_picks(): cfg.use_liquidity_filter is True but "
+            "daily_volume was not provided. Historical volume genuinely exists (unlike "
+            "point-in-time fundamentals), so this fails loud rather than silently skipping "
+            "the requested liquidity constraint. Pass a {ticker: daily volume} DataFrame."
+        )
     scores = resolve_strategy_scores(daily_prices, tickers, cfg, lookback_period).dropna(how="all")
     ranks = assign_ranks(scores)
+    if cfg.use_liquidity_filter and daily_volume is not None:
+        ranks = liquidity_filter(ranks, daily_prices[tickers], daily_volume,
+                                  cfg.min_avg_dollar_volume, cfg.liquidity_lookback_days)
     picks = {}
     for date in ranks.index:
         ranks_row = ranks.loc[date].dropna()

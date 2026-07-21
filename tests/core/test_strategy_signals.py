@@ -392,3 +392,43 @@ class TestGenerateStrategyMonthlyPicks:
         picks = generate_strategy_monthly_picks(prices, ["A", "B", "C"], cfg, cfg.lookback_period, top_n=2)
         for tickers in picks.values:
             assert len(tickers) > 0
+
+    def test_use_liquidity_filter_off_is_byte_identical(self):
+        # daily_volume passed but the flag is off (default), must not change picks at all.
+        prices = _synthetic_prices()
+        volume = pd.DataFrame({t: np.full(len(prices), 10.0) for t in ["A", "B", "C"]}, index=prices.index)
+        cfg = BacktestConfig(holding_period=1, lookback_period=3)
+        without_volume = generate_strategy_monthly_picks(prices, ["A", "B", "C"], cfg, cfg.lookback_period, top_n=2)
+        with_volume = generate_strategy_monthly_picks(prices, ["A", "B", "C"], cfg, cfg.lookback_period,
+                                                        top_n=2, daily_volume=volume)
+        for date in without_volume.index:
+            assert set(without_volume[date]) == set(with_volume[date])
+
+    def test_use_liquidity_filter_on_without_daily_volume_raises(self):
+        prices = _synthetic_prices()
+        cfg = BacktestConfig(holding_period=1, lookback_period=3, use_liquidity_filter=True)
+        with pytest.raises(ValueError, match="daily_volume"):
+            generate_strategy_monthly_picks(prices, ["A", "B", "C"], cfg, cfg.lookback_period, top_n=2)
+
+    def test_illiquid_ticker_never_selected_even_if_top_ranked(self):
+        # C is deliberately given the STRONGEST momentum (would be rank 1 every date) but
+        # trades at a trailing dollar volume far below min_avg_dollar_volume, it must never
+        # appear in monthly_picks despite otherwise being the best signal.
+        dates = pd.bdate_range("2023-01-01", periods=400)
+        rng = np.random.default_rng(7)
+        prices = pd.DataFrame({
+            "A": 100 * np.cumprod(1 + rng.normal(0.0003, 0.01, 400)),
+            "B": 100 * np.cumprod(1 + rng.normal(0.0002, 0.01, 400)),
+            "C": 100 * np.cumprod(1 + rng.normal(0.002, 0.01, 400)),  # strongest drift, illiquid
+        }, index=dates)
+        volume = pd.DataFrame({
+            "A": np.full(400, 100_000.0), "B": np.full(400, 100_000.0),
+            "C": np.full(400, 10.0),  # price ~$100-300 * 10 shares is nowhere near $1M/day
+        }, index=dates)
+        cfg = BacktestConfig(holding_period=1, lookback_period=3, use_liquidity_filter=True,
+                              min_avg_dollar_volume=1_000_000.0)
+        picks = generate_strategy_monthly_picks(prices, ["A", "B", "C"], cfg, cfg.lookback_period,
+                                                  top_n=1, daily_volume=volume)
+        assert not picks.empty
+        for tickers in picks.values:
+            assert "C" not in tickers

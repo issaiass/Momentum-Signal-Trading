@@ -404,6 +404,44 @@ place). This changes the SHARE COUNT actually submitted, not `money_invested`/
 `pct_money_invested`/`rank`/`signal_score`/`stop_loss_price` on the affected order, which
 continue to describe the TARGET allocation model, not the final adjusted share count.
 
+## Liquidity / Universe Filter
+
+`core/functions_quant_extensions.py`'s `liquidity_filter()` existed, fully coded, since before
+this was wired in, but had zero production call sites, only a research-notebook reference. It
+zeroes a ticker's RANK (not its score) on any date its trailing average dollar volume falls
+below `min_avg_dollar_volume`, so `nsmallest()`-based selection naturally skips it, the ticker
+can never be picked into `top_n` at all that rebalance. This is a PRE-selection eligibility
+filter, distinct from `max_pct_of_adv` (a POST-selection advisory warning that never blocks a
+pick, just flags it after the fact).
+
+```yaml
+risk_overrides:
+  use_liquidity_filter: true
+  min_avg_dollar_volume: 1000000.0   # default
+  liquidity_lookback_days: 63        # default, ~3 months
+```
+
+**LIVE + BACKTEST parity**: wired into both `execution/live_signal.py`'s `run()` (volume
+fetched via the existing `fetch_ohlcv_for_tickers()`, one call per ticker) and
+`core/strategy_signals.py`'s `generate_strategy_monthly_picks()` (a new `daily_volume` param,
+historical volume you supply, since a backtest has no live fetch to call). Unlike the
+fundamentals point-in-time-bias case documented elsewhere in this project, historical volume
+genuinely exists and using it here is NOT a look-ahead risk, so enabling `use_liquidity_filter`
+in a backtest WITHOUT passing `daily_volume` raises a loud `ValueError` naming the missing
+requirement, rather than silently skipping the constraint.
+
+**A real, confirmed caveat, not glossed over**: this filter operates on RANKS. Every
+`strategy_type` selects via the shared cross-sectional `nsmallest()`-equivalent
+(`resolve_strategy_picks()`) EXCEPT `absolute_momentum`, whose
+`select_absolute_momentum_picks()` selects by each ticker's OWN trailing score directly, never
+consulting rank at all. An illiquid ticker with positive absolute momentum is **not** excluded
+under that one `strategy_type` today. If you run `absolute_momentum` and need a liquidity
+constraint too, that combination isn't covered by this feature yet.
+
+A ticker excluded by this filter still appears in the rebalance email's "Full Signal Universe"
+table and `logs/signal_rankings_log_<portfolio>.csv` as `"Watchlist / Reserve"` with a blank
+`Momentum Rank`, an accurate reflection of "excluded for illiquidity," not silently invisible.
+
 ## Position Size Hard-Cap [Mandatory tier]
 
 `max_position_weight` (default `0.35`): a flat, single-name cap, identical for every ticker

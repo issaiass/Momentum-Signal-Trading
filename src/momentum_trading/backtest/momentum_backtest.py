@@ -336,6 +336,21 @@ class BacktestConfig:
     # --- capacity / market-impact check ---
     max_pct_of_adv: float = 0.0   # 0 = disabled; e.g. 0.05 = warn if a position exceeds 5% of average daily volume
 
+    # --- liquidity / universe filter, a PRE-selection eligibility filter (distinct from
+    #     max_pct_of_adv above, which is a POST-selection advisory warning): zeroes a ticker's
+    #     RANK on any date its trailing average dollar volume falls below min_avg_dollar_volume,
+    #     so it can never be selected into top_n at all that rebalance, not just flagged after
+    #     the fact. core/functions_quant_extensions.py's liquidity_filter(). Opt-in, False
+    #     default is byte-identical to before this existed. LIVE + BACKTEST (see
+    #     execution/live_signal.py's run() and core/strategy_signals.py's
+    #     generate_strategy_monthly_picks()'s daily_volume param). ---
+    use_liquidity_filter: bool = False
+    min_avg_dollar_volume: float = 1_000_000.0  # trailing avg (price * volume) required to
+                                             # remain selection-eligible, liquidity_filter()'s
+                                             # own default
+    liquidity_lookback_days: int = 63       # trading-day window for the trailing average above
+                                             # (~3 months), liquidity_filter()'s own default
+
     # --- Additional execution safety checks ---
     max_dollar_drawdown: float | None = None       # e.g. 500.0, halt if equity drops this many $ from peak, independent of the % breaker
     max_slippage_tolerance_pct: float | None = None  # e.g. 0.02, alert (not un-fill) if actual fill deviates from expected price by more than this
@@ -457,6 +472,10 @@ class BacktestConfig:
             errors.append(f"liquidity_stress_vol_ratio ({self.liquidity_stress_vol_ratio}) must be > 0")
         if not (0 <= self.max_pct_of_adv <= 1.0):
             errors.append(f"max_pct_of_adv ({self.max_pct_of_adv}) should be in [0, 1.0]")
+        if self.min_avg_dollar_volume <= 0:
+            errors.append(f"min_avg_dollar_volume ({self.min_avg_dollar_volume}) must be > 0")
+        if self.liquidity_lookback_days < 1:
+            errors.append(f"liquidity_lookback_days ({self.liquidity_lookback_days}) must be >= 1")
         if self.max_dollar_drawdown is not None and self.max_dollar_drawdown <= 0:
             errors.append(f"max_dollar_drawdown ({self.max_dollar_drawdown}) must be > 0 or None")
         if self.max_slippage_tolerance_pct is not None and not (0 < self.max_slippage_tolerance_pct <= 1.0):

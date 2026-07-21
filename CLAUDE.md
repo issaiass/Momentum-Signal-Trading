@@ -173,6 +173,17 @@ that tests enforce, don't casually violate these when editing:
   `hybrid_multi_factor` (not a silent wrong number), no point-in-time historical fundamentals
   data source exists anywhere in this project or its free-tier vendors, applying today's
   fundamentals across historical dates would silently look-ahead bias a backtest.
+  `generate_strategy_monthly_picks()` gained an optional `daily_volume: pd.DataFrame | None =
+  None` param, the backtest-side counterpart to `execution/live_signal.py`'s `run()`'s live
+  liquidity-filter wiring (see that file's own bullet for the full mechanism and its
+  `absolute_momentum` caveat, identical here). Applied via
+  `core/functions_quant_extensions.py`'s `liquidity_filter()` right after `ranks =
+  assign_ranks(scores)`, before the per-date picks loop. Unlike the `hybrid_multi_factor`
+  point-in-time-bias case just above, historical volume genuinely exists and isn't a look-ahead
+  risk, so `cfg.use_liquidity_filter=True` without `daily_volume` provided raises a loud
+  `ValueError` (same "fail loud, not a silent wrong number" precedent as
+  `hybrid_multi_factor`'s `NotImplementedError`), rather than silently skipping the requested
+  constraint. `daily_volume=None` (the default) is byte-identical to before this param existed.
 - **`backtest/momentum_backtest.py`**, `BacktestConfig` (validated on construction) and
   `resolve_target_weights()`, the sizing logic shared by *both* the backtest engine and live
   execution, specifically so the two paths can't silently diverge. `lookback_period` is LIVE-ONLY
@@ -523,6 +534,26 @@ that tests enforce, don't casually violate these when editing:
   order are left exactly as already set by `_with_context()`, they describe the TARGET
   allocation model, not the post-redeployment share count, only `shares`/`reason` change. See
   `docs/RISK_CONSTRAINTS.md`'s "Flooring Remainder Redeployment".
+  `use_liquidity_filter`/`min_avg_dollar_volume`/`liquidity_lookback_days` (`BacktestConfig`,
+  opt-in, `False` default byte-identical to before) wire
+  `core/functions_quant_extensions.py`'s `liquidity_filter()` (previously fully coded but zero
+  production call sites, notebook-only) into LIVE selection for the first time: in `run()`,
+  right after `ranks = assign_ranks(scores)`, BEFORE `latest_scores`/`latest_ranks_row` are
+  derived, volume is fetched via the EXISTING `fetch_ohlcv_for_tickers()` (one
+  `get_stock_prices()` call per ticker) and `ranks` (not `scores`) gets NaN'd out for any ticker
+  below `min_avg_dollar_volume`'s trailing average, so `resolve_strategy_picks()`'s
+  `nsmallest()`-based selection naturally excludes it, distinct from `max_pct_of_adv`'s
+  POST-selection advisory-only warning below. No volume fetched at all for any ticker (a vendor
+  outage) logs a `WARNING` and leaves `ranks` untouched rather than crashing or silently
+  filtering everything out. CAVEAT, confirmed by reading `core/strategy_signals.py`'s
+  `select_absolute_momentum_picks()`, not assumed: `strategy_type == "absolute_momentum"`
+  selects by each ticker's OWN trailing score directly, never consulting rank at all, so this
+  filter has NO effect under that one `strategy_type`, documented plainly in
+  `docs/RISK_CONSTRAINTS.md`'s "Liquidity / Universe Filter", not silently glossed over. A
+  filtered ticker's `signal_score` stays valid (only `ranks`, not `scores`, gets touched), so it
+  still surfaces in `full_signal_universe`/the Full Signal Universe table as `"Watchlist /
+  Reserve"` with a blank rank, that code's existing `pd.notna()` guard on the rank already
+  handles this correctly with no changes needed there.
 - **`risk/circuit_breaker.py`**, extracted from `daily_runner.py` with alerting
   dependency-injected (`alert_fn` param) specifically so `risk/` has zero import dependency on
   `interfaces/`, enforced by an AST-based test

@@ -1056,13 +1056,24 @@ def log_signal_rankings(full_signal_universe: dict, orders: dict, dry_run: bool,
     reason/stop_loss_price are blank, shares/money_invested/pct_money_invested are 0, per the
     "watchlist tickers show $0.00/0.00%%, no position exists" design.
 
+    Rows are written in Momentum Rank order (1 = best, ascending), a ticker with no rank (e.g.
+    excluded by the liquidity filter) sorts after every ranked ticker, ordered by signal_score
+    descending among themselves (most attractive first within that group).
+
     No fill-status/"what actually happened" column, matching log_orders()'s own precedent: that's
     a live, post-hoc IBKR polling result, not known at order-generation time, and stays
     EMAIL-only (see build_signal_universe_html()).
     """
     config_hash = _config_hash(cfg) if cfg is not None else ""
     ts = datetime.now().isoformat()
-    for ticker, info in full_signal_universe.items():
+    sorted_universe = sorted(
+        full_signal_universe.items(),
+        key=lambda kv: (
+            kv[1].get("rank") if kv[1].get("rank") is not None else float("inf"),
+            -(kv[1].get("signal_score") or 0),
+        ),
+    )
+    for ticker, info in sorted_universe:
         order = orders.get(ticker)
         if order is not None:
             action = order["action"]

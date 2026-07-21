@@ -517,6 +517,16 @@ that tests enforce, don't casually violate these when editing:
   present in `orders` gets its real action/shares/money/stop-loss columns; one absent (watchlist)
   gets `action="WATCHLIST"` and zeroed/blank money/shares/stop-loss. See
   `docs/SIGNAL_RANKINGS_LOG.md`.
+  Rows are written sorted by `momentum_rank` ascending (1 = best), a ticker with no rank sorts
+  after every ranked ticker, ordered by `signal_score` descending among themselves (Epic 1 of the
+  "Rebalance Reporting Clarity & Selection-Logic Fixes" plan, fixing a real, confirmed gap: this
+  function previously iterated `full_signal_universe.items()` in raw dict/ticker-iteration order,
+  not rank order, confirmed against a real deployed run: `portfolio1`'s 19-ticker log came back
+  AMD(rank 1) through ORCL(rank 19) in exact ascending order, `portfolio2`'s 58-ticker log the
+  same, 1 through 58). `interfaces/notifications.py`'s `build_signal_universe_html()` applies the
+  identical sort key independently (see that file's own bullet below), the two functions don't
+  share a helper, deliberately, matching this codebase's existing pattern of `full_signal_universe`
+  having multiple independent consumers.
   `resolve_ticker_stop_loss_pct(ticker, cfg) -> float | None` is the single source of truth for
   per-ticker stop-loss resolution, `BacktestConfig.ticker_risk_overrides` (`{}` default, zero
   behavior change for a ticker with no entry): returns `None` when
@@ -687,7 +697,11 @@ that tests enforce, don't casually violate these when editing:
   `build_rebalance_summary_html()`'s existing table in the same rebalance email, reading
   `execution/live_signal.py`'s `run()`'s new `OrdersResult.full_signal_universe` attribute (see
   that file's own bullet), reusing `_describe_fill_outcome()` for tickers present in `orders`.
-  See `docs/SIGNAL_RANKINGS_LOG.md`.
+  Rows render sorted by `momentum_rank` ascending (1 = best), unranked tickers trailing ordered
+  by `signal_score` descending, same sort key `execution/live_signal.py`'s `log_signal_rankings()`
+  applies independently (Epic 1, "Rebalance Reporting Clarity & Selection-Logic Fixes" plan),
+  this function previously rendered rows in `full_signal_universe`'s raw dict order, not rank
+  order. See `docs/SIGNAL_RANKINGS_LOG.md`.
 - **`daily_runner.py`**, the actual scheduled entry point (`daily-runner` console script).
   Loads and schema-validates `config.yaml`, loops over every portfolio defined under
   `portfolios:`, idempotent per day, refuses `--live` unless `config.yaml`'s

@@ -1409,6 +1409,21 @@ class TestLogSignalRankings:
         assert result["valid"] is True
         assert result["rows_checked"] == 2
 
+    def test_rows_written_in_momentum_rank_order(self, tmp_path):
+        # Deliberately out-of-order dict insertion (C rank=1 last, A rank=2 first, B unranked),
+        # rows must land in the CSV sorted by rank ascending, unranked trailing by score desc.
+        universe = {
+            "A": {"rank": 2, "signal_score": 0.05, "close_price": 50.0, "selection_status": "Watchlist / Reserve"},
+            "B": {"rank": None, "signal_score": 0.20, "close_price": 30.0, "selection_status": "Watchlist / Reserve"},
+            "C": {"rank": 1, "signal_score": 0.15, "close_price": 100.0, "selection_status": "Top 1 (Selected)"},
+            "D": {"rank": None, "signal_score": 0.02, "close_price": 10.0, "selection_status": "Watchlist / Reserve"},
+        }
+        path = str(tmp_path / "signal_rankings_log.csv")
+        log_signal_rankings(universe, {}, dry_run=True, path=path)
+        import pandas as pd
+        df = pd.read_csv(path)
+        assert list(df["ticker"]) == ["C", "A", "B", "D"]
+
 
 class TestGetTopEtfs:
     """

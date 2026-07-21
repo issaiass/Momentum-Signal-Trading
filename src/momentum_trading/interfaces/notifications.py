@@ -259,13 +259,26 @@ def build_signal_universe_html(full_signal_universe: dict, orders: dict, top_n: 
     core/strategy_signals.py); the other 4 (multi_timeframe_composite, residual_momentum,
     path_dependent_momentum, hybrid_multi_factor) compute a composite/residual/blended score
     instead, not a literal price return, so the header notes this rather than mislabeling it.
+
+    Rows are sorted by Momentum Rank (1 = best, ascending); a ticker with no rank (e.g. excluded
+    by the liquidity filter) sorts after every ranked ticker, ordered by signal_score descending
+    among themselves (most attractive first within that group). This sort is independent of the
+    Action column's value (BUY/SELL/HOLD/WATCHLIST/an EXCLUDED variant), rank/score alone decide
+    row order.
     """
     from ..core.strategy_signals import _BASE_SCORE_STRATEGY_TYPES
     is_base_score = strategy_type in _BASE_SCORE_STRATEGY_TYPES
     score_header = "Lookback Return (%)" if is_base_score else "Lookback Return (%) *"
 
     rows = ""
-    for ticker, info in full_signal_universe.items():
+    sorted_universe = sorted(
+        full_signal_universe.items(),
+        key=lambda kv: (
+            kv[1].get("rank") if kv[1].get("rank") is not None else float("inf"),
+            -(kv[1].get("signal_score") or 0),
+        ),
+    )
+    for ticker, info in sorted_universe:
         rank = info.get("rank")
         score = info.get("signal_score")
         close_price = info.get("close_price")

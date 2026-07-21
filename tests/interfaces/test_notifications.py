@@ -450,6 +450,20 @@ class TestBuildSignalUniverseHtml:
         assert "Rebalance Summary" in combined
         assert "Full Signal Universe" in combined
 
+    def test_rows_render_in_momentum_rank_order(self):
+        # Deliberately out-of-order dict insertion (C rank=1 last, A rank=2 first, B unranked),
+        # rows must render sorted by rank ascending, unranked trailing by score desc.
+        universe = {
+            "A": {"rank": 2, "signal_score": 0.05, "close_price": 50.0, "selection_status": "Watchlist / Reserve"},
+            "B": {"rank": None, "signal_score": 0.20, "close_price": 30.0, "selection_status": "Watchlist / Reserve"},
+            "C": {"rank": 1, "signal_score": 0.15, "close_price": 100.0, "selection_status": "Top 1 (Selected)"},
+            "D": {"rank": None, "signal_score": 0.02, "close_price": 10.0, "selection_status": "Watchlist / Reserve"},
+        }
+        html = build_signal_universe_html(universe, {}, top_n=1, strategy_type="momentum")
+        import re
+        tickers_in_order = re.findall(r"<tr><td style='padding:4px 8px;'>(\w+)</td>", html)
+        assert tickers_in_order == ["C", "A", "B", "D"]
+
 
 class TestBuildComparisonBarChart:
     def test_returns_png_bytes_for_valid_window_data(self):

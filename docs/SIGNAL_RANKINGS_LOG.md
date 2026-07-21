@@ -39,6 +39,11 @@ money_invested, pct_money_invested, shares, stop_loss_price, reason, dry_run, co
 row_hash
 ```
 
+**Row order**: sorted by `momentum_rank` ascending (1 = strongest first), same order in the CSV
+and the matching "Full Signal Universe" email table. A ticker with no rank (e.g. excluded by the
+liquidity filter, see `docs/RISK_CONSTRAINTS.md`'s "Liquidity / Universe Filter") sorts after
+every ranked ticker, ordered by `signal_score` descending among themselves.
+
 - **timestamp**, ISO 8601, when this rebalance ran.
 - **ticker**.
 - **action**, `BUY`/`SELL`/`HOLD` (from the real order decision) or `WATCHLIST` (ranked, not

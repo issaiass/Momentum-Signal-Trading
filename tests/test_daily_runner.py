@@ -1132,6 +1132,37 @@ class TestStopLossCheck:
         assert flagged == []
         assert read_recent_alerts(portfolio="p1", log_path=str(tmp_path / "data" / "alerts_log.csv")) == []
 
+    def test_per_ticker_disabled_override_is_never_flagged(self, tmp_path):
+        # A drawdown deep enough to trigger the portfolio-wide 10% stop must be ignored
+        # entirely for a ticker with ticker_risk_overrides[...]['enabled'] = False.
+        cfg = BacktestConfig(stop_loss_pct=0.10,
+                              ticker_risk_overrides={"XLK": {"enabled": False}})
+        flagged = check_and_handle_stop_losses(
+            tickers=["XLK"],
+            current_positions={"XLK": {"shares": 10, "avg_entry_price": 100.0}},
+            latest_prices={"XLK": 50.0}, cfg=cfg, dry_run=True, ibkr_port=7497,
+            log_path=str(tmp_path / "out.csv"), portfolio="p1",
+        )
+        assert flagged == []
+        assert read_recent_alerts(portfolio="p1", log_path=str(tmp_path / "data" / "alerts_log.csv")) == []
+
+    def test_per_ticker_custom_pct_triggers_at_its_own_threshold(self, tmp_path):
+        # Portfolio default is a loose 30% (would NOT trigger at -15%), but this ticker has a
+        # tighter 10% override, so it must trigger while a sibling ticker at the same drawdown,
+        # with no override, does not.
+        cfg = BacktestConfig(stop_loss_pct=0.30,
+                              ticker_risk_overrides={"AMD": {"stop_loss_pct": 0.10}})
+        flagged = check_and_handle_stop_losses(
+            tickers=["AMD", "MSFT"],
+            current_positions={
+                "AMD": {"shares": 10, "avg_entry_price": 100.0},
+                "MSFT": {"shares": 10, "avg_entry_price": 100.0},
+            },
+            latest_prices={"AMD": 85.0, "MSFT": 85.0}, cfg=cfg, dry_run=True, ibkr_port=7497,
+            log_path=str(tmp_path / "out.csv"), portfolio="p1",
+        )
+        assert flagged == ["AMD"]
+
 
 class TestAlertsReportEmailCommand:
     """

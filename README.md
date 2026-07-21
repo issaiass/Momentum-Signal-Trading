@@ -79,7 +79,12 @@ README says so on purpose.
   Python-side `auto_execute_stop_loss` check (which only ever runs when this app is actually
   invoked), with a broker-truth-based cancel-before-sell mechanism so this app's own rebalance
   and the broker's own triggered stop can never both try to sell the same shares, see
-  `docs/RISK_CONSTRAINTS.md`'s "Broker-Side Protective Stop" section. Restart-safe by
+  `docs/RISK_CONSTRAINTS.md`'s "Broker-Side Protective Stop" section. Per-ticker stop-loss
+  override (`ticker_risk_overrides`, `{}` default = no change): independently enable/disable the
+  stop-loss check for any single ticker, or give it its own width instead of the portfolio-wide
+  `stop_loss_pct`, honored everywhere `stop_loss_pct` is consulted (the daily drawdown check,
+  reporting, and the broker-side bracket above), see `docs/RISK_CONSTRAINTS.md`'s "Per-Ticker
+  Stop-Loss Override" section. Restart-safe by
   construction in `--live` mode (broker-sourced
   holdings, calendar-derived scheduling, persisted local/bind-mounted state, both native Python
   and Docker), plus a non-blocking `MISSED_REBALANCE_DAY` warning if a scheduled rebalance was

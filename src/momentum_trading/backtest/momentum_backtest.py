@@ -189,6 +189,15 @@ class BacktestConfig:
                                              # See backtest/momentum_backtest.py's
                                              # _apply_volatility_budget_caps().
     stop_loss_pct: float = 0.12             # per-position stop from entry price
+    ticker_risk_overrides: dict = field(default_factory=dict)  # {ticker: {'enabled': bool,
+        # 'stop_loss_pct': float}}, per-ticker override of the portfolio-wide stop_loss_pct
+        # above. A ticker with no entry here uses stop_loss_pct unchanged (byte-identical
+        # default). 'enabled': false disables the stop-loss check entirely for that ticker
+        # (never flagged/sold, no broker-side bracket attached even if attach_broker_stop_loss
+        # is on for the rest of the portfolio); 'enabled': true (or omitted) with a
+        # 'stop_loss_pct' key uses that ticker-specific width instead of the portfolio
+        # default. See execution/live_signal.py's resolve_ticker_stop_loss_pct() and
+        # docs/RISK_CONSTRAINTS.md's "Per-Ticker Stop-Loss Override".
     use_regime_filter: bool = True
     regime_benchmark: str = "SPY"
     regime_sma_window: int = 200
@@ -371,6 +380,29 @@ class BacktestConfig:
             errors.append(f"max_position_weight ({self.max_position_weight}) should be in (0, 1.0]")
         if not (0 < self.stop_loss_pct < 1.0):
             errors.append(f"stop_loss_pct ({self.stop_loss_pct}) should be in (0, 1.0)")
+        if not isinstance(self.ticker_risk_overrides, dict):
+            errors.append(f"ticker_risk_overrides ({self.ticker_risk_overrides!r}) must be a dict")
+        else:
+            for ticker, override in self.ticker_risk_overrides.items():
+                if not isinstance(ticker, str) or not isinstance(override, dict):
+                    errors.append(
+                        f"ticker_risk_overrides[{ticker!r}] must be a {{'enabled': bool, "
+                        f"'stop_loss_pct': float}} dict keyed by ticker string"
+                    )
+                    continue
+                extra_keys = set(override) - {"enabled", "stop_loss_pct"}
+                if extra_keys:
+                    errors.append(
+                        f"ticker_risk_overrides[{ticker!r}] has unknown key(s) {sorted(extra_keys)}, "
+                        f"only 'enabled'/'stop_loss_pct' are allowed"
+                    )
+                if "enabled" in override and not isinstance(override["enabled"], bool):
+                    errors.append(f"ticker_risk_overrides[{ticker!r}]['enabled'] must be a bool")
+                if "stop_loss_pct" in override and not (0 < override["stop_loss_pct"] < 1.0):
+                    errors.append(
+                        f"ticker_risk_overrides[{ticker!r}]['stop_loss_pct'] "
+                        f"({override['stop_loss_pct']}) should be in (0, 1.0)"
+                    )
         if self.drift_threshold < 0:
             errors.append(f"drift_threshold ({self.drift_threshold}) must be >= 0")
         if self.min_trade_size < 0:

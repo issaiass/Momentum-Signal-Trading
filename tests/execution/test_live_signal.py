@@ -30,6 +30,7 @@ from momentum_trading.execution.live_signal import (
     compute_required_lookback_days,
     _realized_weighted_portfolio_vol, apply_absolute_momentum_filter,
     compute_stop_loss_price, log_signal_rankings, SIGNAL_RANKINGS_LOG_HEADER, OrdersResult,
+    resolve_ticker_stop_loss_pct,
 )
 from momentum_trading.core.audit_log import read_recent_alerts
 
@@ -1378,6 +1379,56 @@ class TestApplyAbsoluteMomentumFilter:
         assert result == ["A", "B"]
 
 
+class TestResolveTickerStopLossPct:
+    """
+    Per-ticker, per-portfolio stop-loss override (BacktestConfig.ticker_risk_overrides),
+    docs/RISK_CONSTRAINTS.md's "Per-Ticker Stop-Loss Override".
+    """
+    def test_no_override_falls_back_to_portfolio_default(self):
+        cfg = BacktestConfig(stop_loss_pct=0.12)
+        assert resolve_ticker_stop_loss_pct("AAPL", cfg) == pytest.approx(0.12)
+
+    def test_disabled_ticker_returns_none(self):
+        cfg = BacktestConfig(stop_loss_pct=0.12, ticker_risk_overrides={"AAPL": {"enabled": False}})
+        assert resolve_ticker_stop_loss_pct("AAPL", cfg) is None
+
+    def test_disabled_ticker_does_not_affect_other_tickers(self):
+        cfg = BacktestConfig(stop_loss_pct=0.12, ticker_risk_overrides={"AAPL": {"enabled": False}})
+        assert resolve_ticker_stop_loss_pct("MSFT", cfg) == pytest.approx(0.12)
+
+    def test_custom_pct_overrides_portfolio_default(self):
+        cfg = BacktestConfig(stop_loss_pct=0.12,
+                              ticker_risk_overrides={"AMD": {"enabled": True, "stop_loss_pct": 0.08}})
+        assert resolve_ticker_stop_loss_pct("AMD", cfg) == pytest.approx(0.08)
+
+    def test_custom_pct_without_explicit_enabled_still_applies(self):
+        # 'enabled' defaults to True when the key carries a 'stop_loss_pct' but omits it.
+        cfg = BacktestConfig(stop_loss_pct=0.12, ticker_risk_overrides={"AMD": {"stop_loss_pct": 0.08}})
+        assert resolve_ticker_stop_loss_pct("AMD", cfg) == pytest.approx(0.08)
+
+
+class TestTickerRiskOverridesValidation:
+    """BacktestConfig.__post_init__ validation for ticker_risk_overrides."""
+    def test_valid_overrides_construct_cleanly(self):
+        BacktestConfig(ticker_risk_overrides={"AAPL": {"enabled": False}, "AMD": {"stop_loss_pct": 0.08}})
+
+    def test_non_dict_rejected(self):
+        with pytest.raises(ValueError):
+            BacktestConfig(ticker_risk_overrides=["AAPL"])
+
+    def test_unknown_key_rejected(self):
+        with pytest.raises(ValueError):
+            BacktestConfig(ticker_risk_overrides={"AAPL": {"stop_loss_pct": 0.08, "typo_field": 1}})
+
+    def test_non_bool_enabled_rejected(self):
+        with pytest.raises(ValueError):
+            BacktestConfig(ticker_risk_overrides={"AAPL": {"enabled": "false"}})
+
+    def test_out_of_range_stop_loss_pct_rejected(self):
+        with pytest.raises(ValueError):
+            BacktestConfig(ticker_risk_overrides={"AAPL": {"stop_loss_pct": 1.5}})
+
+
 class TestComputeStopLossPrice:
     """
     Fixed-from-entry stop-loss price reporting (docs/RISK_CONSTRAINTS.md's "Stop-Loss Width"),
@@ -1408,6 +1459,20 @@ class TestComputeStopLossPrice:
         cfg = BacktestConfig(stop_loss_pct=0.10)
         assert compute_stop_loss_price("BUY", cfg, None) is None
         assert compute_stop_loss_price("BUY", cfg, 0.0) is None
+
+    def test_ticker_disabled_override_returns_none_even_with_a_price(self):
+        cfg = BacktestConfig(stop_loss_pct=0.10, ticker_risk_overrides={"AAPL": {"enabled": False}})
+        assert compute_stop_loss_price("BUY", cfg, 100.0, ticker="AAPL") is None
+
+    def test_ticker_custom_pct_override_is_used(self):
+        cfg = BacktestConfig(stop_loss_pct=0.10,
+                              ticker_risk_overrides={"AMD": {"stop_loss_pct": 0.25}})
+        assert compute_stop_loss_price("BUY", cfg, 100.0, ticker="AMD") == pytest.approx(75.0)
+
+    def test_no_ticker_param_falls_back_to_portfolio_default(self):
+        # Regression: omitting ticker (every pre-existing call site) must stay byte-identical.
+        cfg = BacktestConfig(stop_loss_pct=0.10, ticker_risk_overrides={"AMD": {"stop_loss_pct": 0.25}})
+        assert compute_stop_loss_price("BUY", cfg, 100.0) == pytest.approx(90.0)
 
 
 class TestGenerateOrders:
@@ -2525,6 +2590,36 @@ class TestBrokerStopLossBracket:
 
         assert len(captured) == 1
         assert captured[0]["transmit"] is True
+
+    def test_per_ticker_disabled_override_skips_the_bracket(self, monkeypatch, tmp_path):
+        # generate_orders() stashes the RESOLVED per-ticker stop_loss_pct (None when disabled
+        # via ticker_risk_overrides) onto each order; place_orders_ibkr() must honor that even
+        # when attach_broker_stop_loss is on for the rest of the portfolio.
+        import momentum_trading.execution.live_signal as ls
+        captured = []
+        self._install_fake_ibkr_capturing_orders(monkeypatch, captured)
+
+        orders = {"BUY1": {"action": "BUY", "shares": 5, "stop_loss_pct": None}}
+        ls.place_orders_ibkr(orders, port=9999, expected_prices={"BUY1": 100.0},
+                              alerts_log_path=str(tmp_path / "alerts_log.csv"),
+                              attach_broker_stop_loss=True, stop_loss_pct=0.12)
+
+        assert len(captured) == 1  # no child STP attached
+        assert captured[0]["transmit"] is True  # plain, unprotected BUY
+
+    def test_per_ticker_custom_pct_override_is_used_for_the_bracket(self, monkeypatch, tmp_path):
+        import momentum_trading.execution.live_signal as ls
+        captured = []
+        self._install_fake_ibkr_capturing_orders(monkeypatch, captured)
+
+        orders = {"BUY1": {"action": "BUY", "shares": 5, "stop_loss_pct": 0.25}}
+        ls.place_orders_ibkr(orders, port=9999, expected_prices={"BUY1": 100.0},
+                              alerts_log_path=str(tmp_path / "alerts_log.csv"),
+                              attach_broker_stop_loss=True, stop_loss_pct=0.12)
+
+        assert len(captured) == 2
+        # 100 * (1 - 0.25) = 75.0, the ticker's OWN override, not the portfolio-wide 0.12.
+        assert captured[1]["auxPrice"] == pytest.approx(75.0, abs=0.01)
 
     def test_missing_reference_price_falls_back_to_plain_unprotected_buy(self, monkeypatch, tmp_path, caplog):
         import momentum_trading.execution.live_signal as ls

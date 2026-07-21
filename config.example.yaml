@@ -251,6 +251,20 @@ default_risk:
                                    # with this on (it's the only mechanism for max_holding_days,
                                    # and reacts to a stop_loss_pct changed mid-position). See
                                    # docs/RISK_CONSTRAINTS.md's "Broker-Side Protective Stop".
+  ticker_risk_overrides: {}       # per-ticker override of stop_loss_pct above, {} (default) =
+                                   # every ticker uses the portfolio-wide stop_loss_pct, no
+                                   # per-ticker behavior change. Keyed by ticker, each entry may
+                                   # set 'enabled' (bool) and/or 'stop_loss_pct' (float in
+                                   # (0, 1.0)), 'enabled: false' disables the stop-loss check
+                                   # entirely for that ticker (never flagged/sold, no broker-side
+                                   # bracket attached even if attach_broker_stop_loss is on for
+                                   # the rest of the portfolio); a 'stop_loss_pct' without
+                                   # 'enabled: false' uses that ticker-specific width instead of
+                                   # the portfolio default. Example:
+                                   #   ticker_risk_overrides:
+                                   #     AAPL: {enabled: false}       # never stop-loss-checked
+                                   #     AMD: {stop_loss_pct: 0.08}   # tighter than the portfolio default
+                                   # See docs/RISK_CONSTRAINTS.md's "Per-Ticker Stop-Loss Override".
   use_correlation_penalty: false  # true = downweight sizing for positions correlated with other
                                    # current picks (distinct from use_correlation_spike_regime below)
   correlation_lookback_days: 63   # LIVE + BACKTEST, only meaningful when use_correlation_penalty

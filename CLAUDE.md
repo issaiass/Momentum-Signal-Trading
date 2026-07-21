@@ -492,6 +492,23 @@ that tests enforce, don't casually violate these when editing:
   present in `orders` gets its real action/shares/money/stop-loss columns; one absent (watchlist)
   gets `action="WATCHLIST"` and zeroed/blank money/shares/stop-loss. See
   `docs/SIGNAL_RANKINGS_LOG.md`.
+  `resolve_ticker_stop_loss_pct(ticker, cfg) -> float | None` is the single source of truth for
+  per-ticker stop-loss resolution, `BacktestConfig.ticker_risk_overrides` (`{}` default, zero
+  behavior change for a ticker with no entry): returns `None` when
+  `ticker_risk_overrides[ticker]['enabled']` is explicitly `False` (stop-loss check disabled
+  entirely for that ticker, never flagged/sold, no broker-side bracket attached regardless of
+  `attach_broker_stop_loss`), else the ticker's own `stop_loss_pct` override if given, else the
+  portfolio's own `cfg.stop_loss_pct` unchanged. Wired into THREE places, all previously reading
+  `cfg.stop_loss_pct` as one flat portfolio-wide scalar: `daily_runner.py`'s
+  `check_and_handle_stop_losses()` (the daily drawdown check), `compute_stop_loss_price()` (now
+  takes an optional `ticker` param, `None` default is byte-identical to before this existed,
+  returns `None` immediately for a disabled ticker regardless of action), and
+  `place_orders_ibkr()`'s broker-side bracket (`generate_orders()` now stashes the RESOLVED
+  per-ticker width onto each order as `order["stop_loss_pct"]`, `place_orders_ibkr()` reads
+  `order.get("stop_loss_pct", stop_loss_pct)`, its own scalar param becomes the fallback for an
+  order that doesn't carry the key, e.g. `check_and_handle_stop_losses()`'s hand-built
+  `exit_orders`, which are always `SELL` and never reach the bracket-attach branch anyway). See
+  `docs/RISK_CONSTRAINTS.md`'s "Per-Ticker Stop-Loss Override".
 - **`risk/circuit_breaker.py`**, extracted from `daily_runner.py` with alerting
   dependency-injected (`alert_fn` param) specifically so `risk/` has zero import dependency on
   `interfaces/`, enforced by an AST-based test

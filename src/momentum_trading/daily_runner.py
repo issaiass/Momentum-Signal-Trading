@@ -36,6 +36,7 @@ from .execution.live_signal import (
     place_orders_ibkr, log_orders, write_portfolio_snapshot, get_latest_snapshot,
     derive_entry_date, measure_live_performance, fetch_ohlcv_for_tickers,
     build_position_performance, reconstruct_dry_run_positions, derive_own_live_positions,
+    resolve_ticker_stop_loss_pct,
 )
 from .core.smtp_auth import authenticate as authenticate_smtp, smtp_ready, connect as smtp_connect, send_with_retry
 from .core.audit_log import log_alert, read_recent_alerts, ALERTS_LOG_PATH
@@ -475,8 +476,11 @@ def check_and_handle_stop_losses(
         shares = pos.get("shares", 0)
         if not entry_price or shares <= 0 or ticker not in latest_prices:
             continue
+        ticker_stop_loss_pct = resolve_ticker_stop_loss_pct(ticker, cfg)
+        if ticker_stop_loss_pct is None:
+            continue  # stop-loss disabled for this ticker (ticker_risk_overrides), never checked
         drawdown = (latest_prices[ticker] - entry_price) / entry_price
-        if drawdown <= -cfg.stop_loss_pct:
+        if drawdown <= -ticker_stop_loss_pct:
             logger.warning("STOP-LOSS TRIGGERED: %s down %.1f%% from entry ($%.2f -> $%.2f)",
                             ticker, drawdown * 100, entry_price, latest_prices[ticker])
             log_alert(portfolio, "STOP_LOSS_TRIGGERED", "CRITICAL",

@@ -340,6 +340,38 @@ based on today's close for a new `BUY`, the real entry-price-derived value for a
 already-open position, live mode only), see `docs/SIGNAL_RANKINGS_LOG.md`. Still the same fixed
 mechanism described above, not trailing, this only changes visibility, not behavior.
 
+## Per-Ticker Stop-Loss Override
+
+`stop_loss_pct` above is the portfolio-wide default, applied to every ticker equally. Some
+tickers may genuinely warrant a different treatment, a defensive/hedge position you never want
+auto-exited on a routine pullback, or a single-name position you want protected more tightly
+than the rest of the portfolio. `ticker_risk_overrides` (`BacktestConfig`, `{}` default, zero
+behavior change for any ticker without an entry) lets you set this per ticker, per portfolio:
+
+```yaml
+risk_overrides:
+  stop_loss_pct: 0.12             # portfolio-wide default, unchanged
+  ticker_risk_overrides:
+    AAPL:
+      enabled: false               # AAPL is never stop-loss-checked, held through any drawdown
+    AMD:
+      stop_loss_pct: 0.08          # tighter than the portfolio default, AMD alone
+```
+
+| Key | Type | Effect |
+|---|---|---|
+| `enabled: false` | bool | Disables the stop-loss check ENTIRELY for this ticker: never flagged, never auto-sold, no broker-side bracket attached even if `attach_broker_stop_loss: true` for the rest of the portfolio. |
+| `stop_loss_pct: <float>` | float in `(0, 1.0)` | This ticker uses its OWN width instead of the portfolio's `stop_loss_pct`. Can be combined with `enabled: true` (or omitted, defaults to enabled) to make the intent explicit. |
+
+A ticker with **no entry** in `ticker_risk_overrides` behaves exactly as before this feature
+existed, using the portfolio's own `stop_loss_pct`. This applies uniformly across every place
+`stop_loss_pct` is consulted: `check_and_handle_stop_losses()`'s daily drawdown check (the
+"ALWAYS runs" block, before any rebalance-day logic), `compute_stop_loss_price()`'s reporting
+(the Full Signal Universe table/log's `Stop-Loss Price` column), and `place_orders_ibkr()`'s
+`attach_broker_stop_loss` bracket, resolved once via `execution/live_signal.py`'s
+`resolve_ticker_stop_loss_pct(ticker, cfg)`, the single source of truth for "what stop-loss
+width, if any, applies to this ticker right now."
+
 ## Position Size Hard-Cap [Mandatory tier]
 
 `max_position_weight` (default `0.35`): a flat, single-name cap, identical for every ticker

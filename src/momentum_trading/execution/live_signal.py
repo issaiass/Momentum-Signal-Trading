@@ -668,13 +668,39 @@ def compute_aggregate_drift(target_dollar: dict, current_value: dict, total_valu
     return raw_trades / total_value
 
 
+def resolve_ticker_stop_loss_pct(ticker: str, cfg: BacktestConfig) -> float | None:
+    """
+    Resolves the EFFECTIVE stop-loss width for one ticker, honoring cfg.ticker_risk_overrides
+    (see BacktestConfig's own field docstring) over the portfolio-wide cfg.stop_loss_pct.
+
+    Returns None when the stop-loss check is disabled entirely for this ticker
+    ('enabled': false in its override), the caller must treat None as "never check this
+    ticker's drawdown," not as "0% stop." Returns the ticker-specific 'stop_loss_pct' when one
+    is given, otherwise the portfolio's own cfg.stop_loss_pct. A ticker with no override entry
+    at all resolves to cfg.stop_loss_pct, byte-identical to this codebase's behavior before
+    per-ticker overrides existed.
+    """
+    override = cfg.ticker_risk_overrides.get(ticker, {})
+    if override.get("enabled", True) is False:
+        return None
+    return override.get("stop_loss_pct", cfg.stop_loss_pct)
+
+
 def compute_stop_loss_price(action: str, cfg: BacktestConfig, latest_price: float | None,
-                             avg_entry_price: float | None = None) -> float | None:
+                             avg_entry_price: float | None = None,
+                             ticker: str | None = None) -> float | None:
     """
     Fixed-from-entry stop-loss price (stop_loss_pct below a reference price), NOT a trailing
     stop, see docs/RISK_CONSTRAINTS.md's "Stop-Loss Width" for why: stop_loss_pct never ratchets
     up as a position gains in either the backtest or live path, this function surfaces that
     EXISTING mechanism for reporting, it doesn't add trailing behavior.
+
+    ticker : optional, resolves cfg.ticker_risk_overrides via resolve_ticker_stop_loss_pct()
+    when given; None (the default, e.g. a caller that predates per-ticker overrides) falls back
+    to the portfolio-wide cfg.stop_loss_pct directly, byte-identical to before this param
+    existed. When the resolved width is None (disabled for this ticker), returns None
+    immediately regardless of action, surfaced as "N/A" wherever this is displayed, the same
+    as every other "not meaningful" case below.
 
     BUY: latest_price * (1 - stop_loss_pct), an ESTIMATE based on today's close, since the real
     fill price isn't known yet and may differ once the order actually executes.
@@ -685,12 +711,15 @@ def compute_stop_loss_price(action: str, cfg: BacktestConfig, latest_price: floa
     SELL, or a ticker with no live price at all: None, not meaningful, the position is being
     closed or was never priced.
     """
+    stop_loss_pct = resolve_ticker_stop_loss_pct(ticker, cfg) if ticker is not None else cfg.stop_loss_pct
+    if stop_loss_pct is None:
+        return None
     if latest_price is None or latest_price <= 0:
         return None
     if action == "BUY":
-        return latest_price * (1 - cfg.stop_loss_pct)
+        return latest_price * (1 - stop_loss_pct)
     if action == "HOLD" and avg_entry_price:
-        return avg_entry_price * (1 - cfg.stop_loss_pct)
+        return avg_entry_price * (1 - stop_loss_pct)
     return None
 
 
@@ -742,8 +771,9 @@ def generate_orders(
         order["signal_score"] = ctx.get("signal_score")
         order["money_invested"] = tgt_dollar
         order["pct_money_invested"] = (tgt_dollar / capital_this_rebalance) if capital_this_rebalance > 0 else 0.0
+        order["stop_loss_pct"] = resolve_ticker_stop_loss_pct(ticker, cfg)
         order["stop_loss_price"] = compute_stop_loss_price(
-            order["action"], cfg, price, current_avg_entry_prices.get(ticker),
+            order["action"], cfg, price, current_avg_entry_prices.get(ticker), ticker=ticker,
         )
         return order
 
@@ -1957,8 +1987,22 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
             # reference price to compute the stop's absolute trigger price (an STP's auxPrice
             # is an absolute price, not a percentage, so it can't be computed post-fill without
             # knowing the fill price in advance).
+            #
+            # order.get("stop_loss_pct", stop_loss_pct): generate_orders() now stashes the
+            # per-ticker RESOLVED width (resolve_ticker_stop_loss_pct(), honoring
+            # BacktestConfig.ticker_risk_overrides) onto each order; this function's own
+            # stop_loss_pct param is the fallback for an order that doesn't carry the key (e.g.
+            # check_and_handle_stop_losses()'s hand-built exit_orders, which are always SELL and
+            # never reach this branch anyway). A ticker with stop-loss DISABLED resolves to
+            # None here (either explicitly on the order, or via the fallback if the whole
+            # portfolio's stop_loss_pct were ever None, which BacktestConfig's own validation
+            # doesn't currently allow, kept as a defensive None-check regardless), correctly
+            # skipping the bracket for that ticker even when attach_broker_stop_loss is on for
+            # the rest of the portfolio.
+            effective_stop_loss_pct = order.get("stop_loss_pct", stop_loss_pct)
             attach_stop = (
-                attach_broker_stop_loss and order["action"] == "BUY" and stop_loss_pct is not None
+                attach_broker_stop_loss and order["action"] == "BUY"
+                and effective_stop_loss_pct is not None
             )
             stop_ref_price = (expected_prices or {}).get(ticker)
             if attach_stop and not (stop_ref_price and stop_ref_price > 0):
@@ -1993,7 +2037,7 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
                                                # protective stop must reliably execute during a
                                                # fast decline, a limit leg can be skipped over
                                                # in a gap, defeating the purpose.
-                stop_order.auxPrice = round(stop_ref_price * (1 - stop_loss_pct), 2)
+                stop_order.auxPrice = round(stop_ref_price * (1 - effective_stop_loss_pct), 2)
                 stop_order.totalQuantity = shares
                 stop_order.parentId = parent_oid
                 stop_order.transmit = True  # transmits the whole bracket atomically

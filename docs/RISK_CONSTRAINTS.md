@@ -442,6 +442,64 @@ A ticker excluded by this filter still appears in the rebalance email's "Full Si
 table and `logs/signal_rankings_log_<portfolio>.csv` as `"Watchlist / Reserve"` with a blank
 `Momentum Rank`, an accurate reflection of "excluded for illiquidity," not silently invisible.
 
+## Regime Filter: Volatility Dimension
+
+The pre-existing regime filter (see "Absolute Momentum (Macro)" above) only ever looked at ONE
+dimension: `regime_benchmark`'s price relative to its own `regime_sma_window`-day SMA, a pure
+trend check. A market can be bullish by that measure and still be violently, dangerously
+volatile (a classic "melt-up before the crash" pattern), and the SMA-only filter would never
+throttle exposure for that. `regime_vol_threshold` (default `None`, opt-in) blends in a second,
+genuinely different dimension: the benchmark's own trailing realized volatility.
+
+```yaml
+risk_overrides:
+  regime_vol_threshold: 0.25         # e.g. throttle if SPY's realized vol exceeds 25% annualized
+  regime_vol_lookback_days: 21       # default, ~1 month
+```
+
+`None` (the default) is byte-identical to the pre-existing SMA-only behavior, this is purely
+additive, not a replacement.
+
+**Blended formula, identical in both live and backtest** (same "live and backtest must not
+diverge" principle every other regime/vol mechanism in this codebase already follows):
+
+```
+bearish_by_sma = benchmark below its regime_sma_window-day SMA
+high_vol        = benchmark's trailing realized_vol (regime_vol_lookback_days window,
+                   annualized) exceeds regime_vol_threshold
+regime_scalar   = min_gross_exposure if (bearish_by_sma or high_vol) else 1.0
+```
+
+Still ONE scalar, composed multiplicatively with `vol_scalar` exactly as before
+(`gross_exposure = min(max_gross_exposure, regime_scalar * vol_scalar)`), a smooth exposure
+throttle, not a new hard binary gate. The two dimensions are OR'd together: either one alone is
+enough to push the book defensive, neither silently overrides the other.
+
+- **Backtest**: `run_risk_managed_backtest()` (`backtest/momentum_backtest.py`) precomputes a
+  `regime_high_vol` boolean series (the benchmark's rolling realized vol vs. the threshold,
+  reindexed to the price panel) alongside the pre-existing `regime_bullish` series, evaluated
+  per rebalance date inside the same loop that already reads `regime_bullish`.
+- **Live**: `execution/live_signal.py`'s `compute_target_weights()` computes the benchmark's
+  trailing realized vol directly from `daily_prices` (same "trailing data, not a simulated
+  ledger" pattern the portfolio-level Volatility Scaling section above already uses).
+
+**`MARKET_VOLATILITY_REGIME_DEFENSIVE`** (WARNING, logged via `log_alert()` live /
+`log_file.write()` in the backtest) fires only when volatility ALONE, not the SMA trend, is what
+pushed `regime_scalar` defensive, i.e. `high_vol` is true while `bearish_by_sma` is false. A
+purely trend-driven defensive scalar (the pre-existing case) does not get this alert, it's
+already visible via the existing "Regime filter: ... below its SMA" log line, this alert exists
+specifically to surface the NEW case that previously had no signal at all.
+
+**Real verification example** (live paper-account run, 2026-07-21, deliberately using an
+unrealistically low `regime_vol_threshold: 0.001` to force the condition): SPY was confirmed
+above its 150D SMA (bullish by trend) with a trailing realized vol of `11.95%` over the default
+21-day lookback, far exceeding the `0.10%` threshold. The regime filter logged `Regime filter:
+SPY is above its 150D SMA, realized_vol=11.95% (threshold=0.10%) -> scalar=0.20`, the
+`MARKET_VOLATILITY_REGIME_DEFENSIVE` alert fired (`SPY realized vol 11.95% exceeds threshold
+0.10%; reducing exposure to 20%`), `Gross exposure: 20.0%` propagated all the way through to
+real order sizing, and real IBKR paper orders were placed at that throttled size (`BUY 5 EFA`,
+`BUY 7 EEM`), not the 100% exposure an SMA-only check would have allowed.
+
 ## Position Size Hard-Cap [Mandatory tier]
 
 `max_position_weight` (default `0.35`): a flat, single-name cap, identical for every ticker

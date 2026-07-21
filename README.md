@@ -93,7 +93,13 @@ README says so on purpose.
   entirely (not just an advisory warning) on any rebalance its trailing average dollar volume
   falls below a threshold, see `docs/RISK_CONSTRAINTS.md`'s "Liquidity / Universe Filter"
   section (including a documented caveat: not effective under the `absolute_momentum`
-  `strategy_type`, which selects by score, not rank). Restart-safe by
+  `strategy_type`, which selects by score, not rank). Regime filter volatility dimension
+  (`regime_vol_threshold`, opt-in, `None` default byte-identical to before, LIVE + BACKTEST):
+  blends the regime benchmark's own trailing realized volatility into the existing SMA-trend
+  regime scalar, so a bullish-but-suddenly-volatile market also gets throttled, not just a
+  bearish one, with a dedicated `MARKET_VOLATILITY_REGIME_DEFENSIVE` alert when volatility alone
+  is what triggered it, see `docs/RISK_CONSTRAINTS.md`'s "Regime Filter: Volatility Dimension"
+  section. Restart-safe by
   construction in `--live` mode (broker-sourced
   holdings, calendar-derived scheduling, persisted local/bind-mounted state, both native Python
   and Docker), plus a non-blocking `MISSED_REBALANCE_DAY` warning if a scheduled rebalance was

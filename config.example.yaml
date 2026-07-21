@@ -195,6 +195,17 @@ default_risk:
   use_regime_filter: true         # true = skip new entries when regime_benchmark is below its SMA
   regime_benchmark: SPY           # benchmark ticker the regime filter checks against
   regime_sma_window: 150          # trading days in the regime filter's moving average
+  regime_vol_threshold: null      # null (default) = disabled, preserves the SMA-only regime
+                                   # filter exactly. When set (e.g. 0.25), a second dimension
+                                   # blends into the SAME regime_scalar: regime_benchmark's own
+                                   # trailing realized volatility (annualized, over
+                                   # regime_vol_lookback_days below) exceeding this threshold also
+                                   # pushes exposure defensive, even when the SMA trend is still
+                                   # bullish. LIVE + BACKTEST, identical formula in both. See
+                                   # docs/RISK_CONSTRAINTS.md's "Regime Filter: Volatility
+                                   # Dimension".
+  regime_vol_lookback_days: 21    # trailing trading days for the volatility dimension above
+                                   # (~1 month), only meaningful when regime_vol_threshold is set
   target_portfolio_vol: 0.15      # the "Volatility Scaling" constraint (Mandatory tier,
                                    # docs/RISK_CONSTRAINTS.md): annualized vol target for the
                                    # WHOLE book, distinct from position_vol_budget below (which

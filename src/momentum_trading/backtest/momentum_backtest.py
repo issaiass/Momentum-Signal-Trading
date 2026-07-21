@@ -201,6 +201,19 @@ class BacktestConfig:
     use_regime_filter: bool = True
     regime_benchmark: str = "SPY"
     regime_sma_window: int = 200
+    # --- second regime dimension, blended into the SAME regime_scalar as the SMA trend
+    #     check above (opt-in, None preserves today's SMA-only behavior exactly). When set,
+    #     the regime benchmark's own trailing realized volatility (regime_vol_lookback_days
+    #     window, annualized) is compared against this threshold; exceeding it pushes
+    #     regime_scalar defensive (min_gross_exposure) even when the SMA trend is still
+    #     bullish, so a bullish-but-suddenly-volatile market is also throttled, not just a
+    #     bearish one. Still a smooth multiplicative throttle composed with vol_scalar
+    #     exactly as before, not a new hard binary gate. See
+    #     execution/live_signal.py's compute_target_weights() and
+    #     run_risk_managed_backtest()'s identical live/backtest-parity implementation, and
+    #     docs/RISK_CONSTRAINTS.md's "Regime Filter: Volatility Dimension" section. ---
+    regime_vol_threshold: float | None = None
+    regime_vol_lookback_days: int = 21
 
     # --- execution realism ---
     base_slippage_bps: float = 2.0          # baseline slippage in basis points
@@ -493,6 +506,10 @@ class BacktestConfig:
             )
         if self.strategy_type not in ALLOWED_STRATEGY_TYPES:
             errors.append(f"strategy_type ({self.strategy_type!r}) must be one of {ALLOWED_STRATEGY_TYPES}")
+        if self.regime_vol_threshold is not None and self.regime_vol_threshold <= 0:
+            errors.append(f"regime_vol_threshold ({self.regime_vol_threshold}) must be > 0 or None")
+        if self.regime_vol_lookback_days < 2:
+            errors.append(f"regime_vol_lookback_days ({self.regime_vol_lookback_days}) must be >= 2")
 
         if errors:
             raise ValueError("Invalid BacktestConfig:\n  - " + "\n  - ".join(errors))
@@ -945,10 +962,23 @@ def run_risk_managed_backtest(
 
     # Precompute regime signal (benchmark above its long SMA), on close prices
     regime_bullish = None
+    regime_high_vol = None
     if config.use_regime_filter:
         bench = prices[config.regime_benchmark]
         sma = bench.rolling(config.regime_sma_window, min_periods=config.regime_sma_window // 2).mean()
         regime_bullish = (bench >= sma).reindex(prices.index).fillna(False)
+
+        # Second regime dimension (opt-in): benchmark's own trailing realized volatility.
+        # See BacktestConfig.regime_vol_threshold's docstring for why this is blended into
+        # the SAME regime_scalar rather than a separate gate.
+        if config.regime_vol_threshold is not None:
+            bench_returns = bench.pct_change()
+            realized_bench_vol = (
+                bench_returns.rolling(config.regime_vol_lookback_days,
+                                       min_periods=config.regime_vol_lookback_days).std()
+                * np.sqrt(252)
+            )
+            regime_high_vol = (realized_bench_vol > config.regime_vol_threshold).reindex(prices.index).fillna(False)
 
     trading_days = _trading_days(prices, config.exchange)
     rebalance_dates = _rebalance_dates(monthly_picks, trading_days)
@@ -1097,7 +1127,17 @@ def run_risk_managed_backtest(
                     # --- regime filter: scale down gross exposure in a downtrend ---
                     if config.use_regime_filter and regime_bullish is not None:
                         bullish = bool(regime_bullish.loc[today]) if today in regime_bullish.index else True
-                        regime_scalar = 1.0 if bullish else config.min_gross_exposure
+                        high_vol = bool(regime_high_vol.loc[today]) if (
+                            regime_high_vol is not None and today in regime_high_vol.index
+                        ) else False
+                        regime_scalar = config.min_gross_exposure if (not bullish or high_vol) else 1.0
+                        if high_vol and bullish:
+                            log_file.write(
+                                f"{today.strftime('%Y-%m-%d')} MARKET VOLATILITY REGIME DEFENSIVE: "
+                                f"{config.regime_benchmark} realized vol exceeds "
+                                f"{config.regime_vol_threshold:.0%} threshold, reducing exposure to "
+                                f"{config.min_gross_exposure:.0%} despite bullish trend\n"
+                            )
                     else:
                         regime_scalar = 1.0
 

@@ -2373,6 +2373,103 @@ class TestVolTargetingScaling:
         assert gross_exposure < vol_scalar
 
 
+class TestRegimeVolatilityDimension:
+    """
+    regime_vol_threshold (Epic 4 of the layered risk-management plan): a second, opt-in
+    dimension blended into the SAME regime_scalar as the existing SMA-trend check, so a
+    bullish-but-suddenly-volatile market also gets throttled, not just a bearish one. None
+    (the default) must be byte-identical to the pre-existing SMA-only behavior.
+    """
+
+    def _bullish_high_vol_prices(self, n=80, seed=21):
+        # Benchmark trending UP (bullish by SMA) but with large day-to-day noise (high
+        # realized vol), so the SMA-trend check alone would say "bullish", only the vol
+        # dimension should push regime_scalar defensive.
+        rng = np.random.default_rng(seed)
+        dates = pd.bdate_range("2024-01-01", periods=n)
+        bench = 100 * np.cumprod(1 + rng.normal(0.01, 0.06, n))  # strong up-drift, high noise
+        a = 50 * np.cumprod(1 + rng.normal(0.0005, 0.001, n))
+        b = 30 * np.cumprod(1 + rng.normal(0.0005, 0.001, n))
+        return pd.DataFrame({"A": a, "B": b, "SPY": bench}, index=dates)
+
+    def _calm_bullish_prices(self, n=80, seed=22):
+        rng = np.random.default_rng(seed)
+        dates = pd.bdate_range("2024-01-01", periods=n)
+        bench = 100 * np.cumprod(1 + rng.normal(0.001, 0.002, n))  # calm, low vol
+        a = 50 * np.cumprod(1 + rng.normal(0.0005, 0.001, n))
+        b = 30 * np.cumprod(1 + rng.normal(0.0005, 0.001, n))
+        return pd.DataFrame({"A": a, "B": b, "SPY": bench}, index=dates)
+
+    def test_none_default_is_byte_identical_to_sma_only(self, tmp_path):
+        prices = self._bullish_high_vol_prices()
+        alerts_path = str(tmp_path / "alerts_log.csv")
+        cfg_no_vol = BacktestConfig(use_regime_filter=True, regime_benchmark="SPY",
+                                     regime_sma_window=20, regime_vol_threshold=None,
+                                     use_correlation_spike_regime=False,
+                                     min_gross_exposure=0.2, max_gross_exposure=1.0)
+        _, exposure_no_vol = compute_target_weights(["A", "B"], prices, cfg_no_vol,
+                                                      portfolio="p1", alerts_log_path=alerts_path)
+        # A very high threshold should also be a no-op (never exceeded).
+        cfg_high_threshold = BacktestConfig(use_regime_filter=True, regime_benchmark="SPY",
+                                             regime_sma_window=20, regime_vol_threshold=50.0,
+                                             use_correlation_spike_regime=False,
+                                             min_gross_exposure=0.2, max_gross_exposure=1.0)
+        _, exposure_high_threshold = compute_target_weights(
+            ["A", "B"], prices, cfg_high_threshold, portfolio="p2", alerts_log_path=alerts_path)
+        assert exposure_no_vol == pytest.approx(exposure_high_threshold)
+        assert read_recent_alerts(portfolio="p1", log_path=alerts_path) == []
+        assert read_recent_alerts(portfolio="p2", log_path=alerts_path) == []
+
+    def test_high_vol_throttles_exposure_despite_bullish_sma_trend(self, tmp_path):
+        prices = self._bullish_high_vol_prices()
+        alerts_path = str(tmp_path / "alerts_log.csv")
+        cfg = BacktestConfig(use_regime_filter=True, regime_benchmark="SPY",
+                              regime_sma_window=20, regime_vol_threshold=0.30,
+                              regime_vol_lookback_days=21, use_correlation_spike_regime=False,
+                              min_gross_exposure=0.2, max_gross_exposure=1.0,
+                              target_portfolio_vol=10.0)  # effectively disable vol_scalar throttling
+        _, gross_exposure = compute_target_weights(["A", "B"], prices, cfg,
+                                                     portfolio="p1", alerts_log_path=alerts_path)
+        assert gross_exposure == pytest.approx(cfg.min_gross_exposure, rel=0.05)
+
+        rows = read_recent_alerts(portfolio="p1", log_path=alerts_path)
+        assert len(rows) == 1
+        assert rows[0]["alert_type"] == "MARKET_VOLATILITY_REGIME_DEFENSIVE"
+        assert rows[0]["severity"] == "WARNING"
+
+    def test_calm_bullish_market_stays_at_full_exposure(self, tmp_path):
+        prices = self._calm_bullish_prices()
+        alerts_path = str(tmp_path / "alerts_log.csv")
+        cfg = BacktestConfig(use_regime_filter=True, regime_benchmark="SPY",
+                              regime_sma_window=20, regime_vol_threshold=0.30,
+                              regime_vol_lookback_days=21, use_correlation_spike_regime=False,
+                              min_gross_exposure=0.2, max_gross_exposure=1.0,
+                              target_portfolio_vol=10.0)
+        _, gross_exposure = compute_target_weights(["A", "B"], prices, cfg,
+                                                     portfolio="p1", alerts_log_path=alerts_path)
+        assert gross_exposure == pytest.approx(cfg.max_gross_exposure)
+        assert read_recent_alerts(portfolio="p1", log_path=alerts_path) == []
+
+    def test_bearish_sma_still_wins_even_with_low_vol(self, tmp_path):
+        # Bearish trend alone (vol threshold never exceeded) must still throttle, confirming
+        # the two dimensions are OR'd together, neither silently overrides the other.
+        prices = self._calm_bullish_prices()
+        bench = pd.Series(np.linspace(120, 80, len(prices)), index=prices.index, name="SPY")
+        prices = prices.copy()
+        prices["SPY"] = bench
+        alerts_path = str(tmp_path / "alerts_log.csv")
+        cfg = BacktestConfig(use_regime_filter=True, regime_benchmark="SPY",
+                              regime_sma_window=10, regime_vol_threshold=0.30,
+                              regime_vol_lookback_days=21, use_correlation_spike_regime=False,
+                              min_gross_exposure=0.2, max_gross_exposure=1.0,
+                              target_portfolio_vol=10.0)
+        _, gross_exposure = compute_target_weights(["A", "B"], prices, cfg,
+                                                     portfolio="p1", alerts_log_path=alerts_path)
+        assert gross_exposure == pytest.approx(cfg.min_gross_exposure, rel=0.05)
+        # Bearish-by-SMA path, not the volatility path, so no MARKET_VOLATILITY_REGIME_DEFENSIVE alert.
+        assert read_recent_alerts(portfolio="p1", log_path=alerts_path) == []
+
+
 class TestCorrelationSpikeScaling:
     """
     use_correlation_spike_regime's live-trading equivalent,

@@ -204,6 +204,28 @@ class TestBacktestConfigValidation:
         with pytest.raises(ValueError, match="initial_capital"):
             BacktestConfig(initial_capital=-100)
 
+    def test_regime_vol_threshold_defaults_none(self):
+        # None preserves the pre-existing SMA-only regime filter behavior exactly, this
+        # is an opt-in second dimension (Epic 4 of the layered risk-management plan).
+        assert BacktestConfig().regime_vol_threshold is None
+
+    def test_regime_vol_threshold_zero_or_negative_raises(self):
+        with pytest.raises(ValueError, match="regime_vol_threshold"):
+            BacktestConfig(regime_vol_threshold=0.0)
+        with pytest.raises(ValueError, match="regime_vol_threshold"):
+            BacktestConfig(regime_vol_threshold=-0.1)
+
+    def test_regime_vol_threshold_positive_is_accepted(self):
+        cfg = BacktestConfig(regime_vol_threshold=0.25)
+        assert cfg.regime_vol_threshold == 0.25
+
+    def test_regime_vol_lookback_days_default(self):
+        assert BacktestConfig().regime_vol_lookback_days == 21
+
+    def test_regime_vol_lookback_days_too_short_raises(self):
+        with pytest.raises(ValueError, match="regime_vol_lookback_days"):
+            BacktestConfig(regime_vol_lookback_days=1)
+
     def test_run_custom_backtest_rejects_invalid_override(self, synthetic_monthly_picks, synthetic_daily_prices):
         # The run_custom_backtest() wrapper builds a BacktestConfig internally
         # from **kwargs, this confirms validation actually fires through that
@@ -648,6 +670,27 @@ class TestCrashProtection:
                                   initial_capital=1000.0, use_correlation_spike_regime=True,
                                   use_regime_filter=False)
         assert not df.empty
+
+    def test_regime_vol_threshold_run_succeeds(self, synthetic_monthly_picks, synthetic_daily_prices):
+        # Integration smoke test: confirms regime_vol_threshold wires into the actual
+        # rebalance loop (Epic 4) without crashing, on top of TestRegimeVolatilityDimension's
+        # unit-level compute_target_weights() coverage on the live-signal side.
+        df = run_custom_backtest(synthetic_monthly_picks, synthetic_daily_prices,
+                                  initial_capital=1000.0, use_regime_filter=True,
+                                  regime_benchmark="SPY", regime_vol_threshold=0.001,
+                                  regime_vol_lookback_days=21)
+        assert not df.empty
+
+    def test_regime_vol_threshold_none_default_matches_sma_only_run(self, synthetic_monthly_picks, synthetic_daily_prices):
+        # Byte-identical-behavior regression: a run with regime_vol_threshold=None must
+        # produce the exact same equity curve as before this field existed.
+        df_default = run_custom_backtest(synthetic_monthly_picks, synthetic_daily_prices,
+                                          initial_capital=1000.0, use_regime_filter=True,
+                                          regime_benchmark="SPY", regime_vol_threshold=None)
+        df_explicit_none = run_custom_backtest(synthetic_monthly_picks, synthetic_daily_prices,
+                                                initial_capital=1000.0, use_regime_filter=True,
+                                                regime_benchmark="SPY")
+        pd.testing.assert_frame_equal(df_default, df_explicit_none)
 
     def test_liquidity_stress_multiplier_validates(self):
         # The multiplier scales slippage UP under stress; a value <1.0 would

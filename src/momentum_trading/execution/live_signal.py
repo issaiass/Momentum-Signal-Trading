@@ -612,10 +612,39 @@ def compute_target_weights(
         bench = daily_prices[cfg.regime_benchmark]
         sma = bench.rolling(cfg.regime_sma_window, min_periods=cfg.regime_sma_window // 2).mean()
         bullish = bool(bench.iloc[-1] >= sma.iloc[-1]) if pd.notna(sma.iloc[-1]) else True
-        regime_scalar = 1.0 if bullish else cfg.min_gross_exposure
-        logger.info("Regime filter: %s is %s its %dD SMA -> scalar=%.2f",
+
+        # Second regime dimension (opt-in): benchmark's own trailing realized volatility,
+        # blended into the SAME regime_scalar rather than a separate gate, see
+        # BacktestConfig.regime_vol_threshold's docstring and run_risk_managed_backtest()'s
+        # identical live/backtest-parity implementation.
+        high_vol = False
+        realized_bench_vol = None
+        if cfg.regime_vol_threshold is not None:
+            bench_returns = bench.pct_change().dropna()
+            if len(bench_returns) >= cfg.regime_vol_lookback_days:
+                realized_bench_vol = float(
+                    bench_returns.tail(cfg.regime_vol_lookback_days).std() * np.sqrt(252)
+                )
+                high_vol = realized_bench_vol > cfg.regime_vol_threshold
+
+        regime_scalar = cfg.min_gross_exposure if (not bullish or high_vol) else 1.0
+        logger.info("Regime filter: %s is %s its %dD SMA%s -> scalar=%.2f",
                     cfg.regime_benchmark, "above" if bullish else "below",
-                    cfg.regime_sma_window, regime_scalar)
+                    cfg.regime_sma_window,
+                    f", realized_vol={realized_bench_vol:.2%} (threshold={cfg.regime_vol_threshold:.2%})"
+                    if realized_bench_vol is not None else "",
+                    regime_scalar)
+        if high_vol and bullish:
+            logger.warning(
+                "MARKET VOLATILITY REGIME DEFENSIVE: %s realized vol %.2f%% exceeds threshold "
+                "%.2f%%, reducing exposure to %.0f%% despite bullish trend",
+                cfg.regime_benchmark, realized_bench_vol * 100, cfg.regime_vol_threshold * 100,
+                cfg.min_gross_exposure * 100,
+            )
+            log_alert(portfolio, "MARKET_VOLATILITY_REGIME_DEFENSIVE", "WARNING",
+                      f"{cfg.regime_benchmark} realized vol {realized_bench_vol:.2%} exceeds "
+                      f"threshold {cfg.regime_vol_threshold:.2%}; reducing exposure to "
+                      f"{cfg.min_gross_exposure:.0%}", log_path=alerts_log_path)
 
     # --- Correlation-spike defensive scaling, live-trading
     #     equivalent of the backtest's use_correlation_spike_regime (same placement,

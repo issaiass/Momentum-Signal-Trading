@@ -278,6 +278,20 @@ that tests enforce, don't casually violate these when editing:
   `strategy_type` too, wired into `resolve_target_weights()` alongside the existing
   `inverse_vol`/`score_proportional` branches, same position-cap/correlation-penalty pipeline
   applied afterward regardless of which of the three is chosen.
+  `regime_vol_threshold: float | None = None` (opt-in, `None` byte-identical to before) +
+  `regime_vol_lookback_days: int = 21` blend a second dimension into the existing SMA-only
+  regime filter's `regime_scalar`: the regime benchmark's own trailing realized volatility
+  (annualized) exceeding this threshold also pushes exposure defensive, even when the SMA trend
+  is still bullish, so a bullish-but-suddenly-volatile market gets throttled too, not just a
+  bearish one. `run_risk_managed_backtest()` precomputes a `regime_high_vol` boolean series
+  (benchmark's rolling realized vol vs. threshold, reindexed to the price panel) alongside the
+  pre-existing `regime_bullish` series; the per-date loop ORs the two
+  (`regime_scalar = min_gross_exposure if (not bullish or high_vol) else 1.0`), still ONE scalar
+  composed multiplicatively with `vol_scalar` exactly as before, not a new hard gate.
+  `execution/live_signal.py`'s `compute_target_weights()` gets the identical formula (see that
+  bullet below), same "live and backtest must not diverge" principle every other regime/vol
+  mechanism here follows. See `docs/RISK_CONSTRAINTS.md`'s "Regime Filter: Volatility
+  Dimension".
 - **`execution/live_signal.py`**, live signal/order generation, IBKR integration (`ibapi`
   `EClient`/`EWrapper`, not a third-party wrapper), multi-portfolio orchestration, FIFO P&L,
   hash-chained audit log. `fetch_ohlcv_for_tickers()` is distinct from `fetch_live_prices()`,
@@ -554,6 +568,22 @@ that tests enforce, don't casually violate these when editing:
   still surfaces in `full_signal_universe`/the Full Signal Universe table as `"Watchlist /
   Reserve"` with a blank rank, that code's existing `pd.notna()` guard on the rank already
   handles this correctly with no changes needed there.
+  `compute_target_weights()`'s regime filter block now also blends in `cfg.regime_vol_threshold`
+  (see `BacktestConfig`'s own bullet above for the shared formula and backtest-parity
+  implementation): when set, the regime benchmark's trailing realized volatility
+  (`bench.pct_change().tail(regime_vol_lookback_days).std() * sqrt(252)`) exceeding the
+  threshold ORs into the same `regime_scalar` the SMA-trend check already computes, `None`
+  (default) is byte-identical to before. A new `MARKET_VOLATILITY_REGIME_DEFENSIVE` `WARNING`
+  (`log_alert()`, same triple-step pattern as `CORRELATION_SPIKE_DETECTED`) fires ONLY when
+  volatility alone, not the SMA trend, is what pushed the scalar defensive (`high_vol and
+  bullish`), so it's distinguishable from the pre-existing SMA-only "Regime filter: ... below
+  its SMA" log line rather than double-reporting the same bearish case. Confirmed end-to-end
+  against a real IBKR paper account (2026-07-21): with `regime_vol_threshold: 0.001` (forced far
+  below any real value) and SPY genuinely above its 150D SMA, the filter logged `realized_vol=
+  11.95% (threshold=0.10%) -> scalar=0.20`, the alert fired, `Gross exposure: 20.0%` propagated
+  through to real order sizing, and real paper `BUY 5 EFA`/`BUY 7 EEM` orders were placed at
+  that throttled size rather than the 100% an SMA-only check would have allowed. See
+  `docs/RISK_CONSTRAINTS.md`'s "Regime Filter: Volatility Dimension".
 - **`risk/circuit_breaker.py`**, extracted from `daily_runner.py` with alerting
   dependency-injected (`alert_fn` param) specifically so `risk/` has zero import dependency on
   `interfaces/`, enforced by an AST-based test

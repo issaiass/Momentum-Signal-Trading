@@ -257,6 +257,16 @@ class BacktestConfig:
     # --- share granularity ---
     allow_fractional_shares: bool = False    # True = size positions to 4dp fractional shares
                                               # (only if your broker/tickers actually support it)
+    redeploy_flooring_remainder: bool = False  # LIVE-facing sizing, but exercised by
+        # generate_orders() regardless of --live/dry-run. Opt-in, False (default) is
+        # byte-identical to before this field existed. IBKR has no fractional equity order
+        # support, so every BUY's target dollar amount is floored to a whole share count,
+        # leaving a small leftover per ticker (e.g. a $500 target on a $270 stock floors to 1
+        # share = $270, $230 of that ticker's OWN allocation goes unused). When True, this
+        # rebalance's pooled flooring remainder across every BUY is redeployed into EXTRA whole
+        # shares of the single TOP-RANKED BUY ticker this rebalance (not spread across the
+        # basket), only meaningful when allow_fractional_shares is False (nothing to pool
+        # otherwise). See docs/RISK_CONSTRAINTS.md's "Flooring Remainder Redeployment".
 
     # --- Live order execution, cash-aware buy sizing ---
     auto_reduce_buys_on_insufficient_cash: bool = False   # LIVE ONLY. place_orders_ibkr()

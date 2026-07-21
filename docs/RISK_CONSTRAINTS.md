@@ -372,6 +372,38 @@ existed, using the portfolio's own `stop_loss_pct`. This applies uniformly acros
 `resolve_ticker_stop_loss_pct(ticker, cfg)`, the single source of truth for "what stop-loss
 width, if any, applies to this ticker right now."
 
+## Flooring Remainder Redeployment
+
+IBKR has no fractional equity/ETF order support at all (see `README.md`'s Known Gaps), so
+`generate_orders()` floors every BUY's target dollar amount to a whole share count. That
+flooring always leaves a small leftover per ticker unused, e.g. a $500 target on a $270 stock
+floors to 1 share (`$270`), leaving `$230` of that ticker's own allocation never deployed.
+`redeploy_flooring_remainder` (`BacktestConfig`, `false` default, zero behavior change when
+off) closes this: when `true`, this rebalance's leftover is pooled across EVERY BUY and
+redeployed as extra whole shares of the single TOP-RANKED BUY ticker (the strongest signal this
+rebalance), not spread thinly across the basket.
+
+```yaml
+risk_overrides:
+  redeploy_flooring_remainder: true
+```
+
+Worked example, two BUYs this rebalance, `A` ranked #1, `B` ranked #2:
+
+| Ticker | Target | Price | Floored shares | Spent | Leftover |
+|---|---|---|---|---|---|
+| A (rank 1) | $500 | $270 | 1 | $270 | $230 |
+| B (rank 2) | $500 | $130 | 3 | $390 | $110 |
+
+Pooled leftover: `$230 + $110 = $340`. Redeployed into `A` (top-ranked): `floor($340 / $270) =
+1` extra share, `A` ends up with 2 shares total, `B` unchanged at 3. If the pooled leftover
+can't afford even one more share of the top pick, or there are no BUYs at all this rebalance, this
+is a safe no-op, no different from today. Only meaningful when `allow_fractional_shares` is
+`false` (there's nothing to pool when shares are never floored to whole numbers in the first
+place). This changes the SHARE COUNT actually submitted, not `money_invested`/
+`pct_money_invested`/`rank`/`signal_score`/`stop_loss_price` on the affected order, which
+continue to describe the TARGET allocation model, not the final adjusted share count.
+
 ## Position Size Hard-Cap [Mandatory tier]
 
 `max_position_weight` (default `0.35`): a flat, single-name cap, identical for every ticker

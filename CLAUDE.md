@@ -509,6 +509,20 @@ that tests enforce, don't casually violate these when editing:
   order that doesn't carry the key, e.g. `check_and_handle_stop_losses()`'s hand-built
   `exit_orders`, which are always `SELL` and never reach the bracket-attach branch anyway). See
   `docs/RISK_CONSTRAINTS.md`'s "Per-Ticker Stop-Loss Override".
+  `redeploy_flooring_remainder` (`BacktestConfig`, `False` default, byte-identical behavior when
+  off): `generate_orders()`'s main per-ticker loop is unchanged, a new block runs AFTER it
+  (before `return orders`), pools the whole-share-flooring leftover across every BUY this
+  rebalance (`abs(drift_dollar) - floored_shares * price` per BUY, recomputed from the SAME
+  `target_dollar`/`current_value` dicts already in scope) and redeploys it as extra whole shares
+  of the single BUY ticker with the lowest `rank` in `signal_context` (falls back to the first
+  BUY ticker if none carry rank info, e.g. a `custom_weights`-sized rebalance with no ranking
+  step at all, rather than silently dropping the remainder). No-op (byte-identical to before)
+  when there are no BUYs this rebalance, `allow_fractional_shares` is `True` (nothing to pool),
+  or the pooled remainder can't afford even one more share of the top pick.
+  `money_invested`/`pct_money_invested`/`rank`/`signal_score`/`stop_loss_price` on the affected
+  order are left exactly as already set by `_with_context()`, they describe the TARGET
+  allocation model, not the post-redeployment share count, only `shares`/`reason` change. See
+  `docs/RISK_CONSTRAINTS.md`'s "Flooring Remainder Redeployment".
 - **`risk/circuit_breaker.py`**, extracted from `daily_runner.py` with alerting
   dependency-injected (`alert_fn` param) specifically so `risk/` has zero import dependency on
   `interfaces/`, enforced by an AST-based test

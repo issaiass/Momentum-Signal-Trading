@@ -296,6 +296,15 @@ default_risk:
                                     # "Troubleshooting: IBKR order placement". Set true if you
                                     # still want precise backtest sizing; live orders are
                                     # unaffected either way.
+  redeploy_flooring_remainder: false  # opt-in, only meaningful when allow_fractional_shares is
+                                    # false (nothing to pool otherwise). Every BUY's target
+                                    # dollar amount floors to a whole share count, leaving a
+                                    # small per-ticker leftover unused (e.g. a $500 target on a
+                                    # $270 stock floors to 1 share = $270, $230 unused). true =
+                                    # pool this rebalance's leftover across every BUY and
+                                    # redeploy it as extra whole shares of the single TOP-RANKED
+                                    # BUY ticker (not spread across the basket). See
+                                    # docs/RISK_CONSTRAINTS.md's "Flooring Remainder Redeployment".
 
   # LIVE ONLY. place_orders_ibkr() always submits SELLs first and waits for them
   # to clear before submitting BUYs (not configurable, there's no valid reason to skip

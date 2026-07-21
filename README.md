@@ -84,7 +84,11 @@ README says so on purpose.
   stop-loss check for any single ticker, or give it its own width instead of the portfolio-wide
   `stop_loss_pct`, honored everywhere `stop_loss_pct` is consulted (the daily drawdown check,
   reporting, and the broker-side bracket above), see `docs/RISK_CONSTRAINTS.md`'s "Per-Ticker
-  Stop-Loss Override" section. Restart-safe by
+  Stop-Loss Override" section. Flooring remainder redeployment (`redeploy_flooring_remainder`,
+  opt-in): since IBKR has no fractional equity order support, every BUY floors to a whole share
+  count, leaving a small per-ticker leftover unused, this pools that leftover across the
+  rebalance's BUYs and redeploys it as extra whole shares of the single top-ranked pick, see
+  `docs/RISK_CONSTRAINTS.md`'s "Flooring Remainder Redeployment" section. Restart-safe by
   construction in `--live` mode (broker-sourced
   holdings, calendar-derived scheduling, persisted local/bind-mounted state, both native Python
   and Docker), plus a non-blocking `MISSED_REBALANCE_DAY` warning if a scheduled rebalance was

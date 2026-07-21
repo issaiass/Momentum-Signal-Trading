@@ -1650,6 +1650,101 @@ class TestGenerateOrders:
         assert total_invested == pytest.approx(1000.0 * 0.8)
 
 
+class TestFlooringRemainderRedeployment:
+    """
+    cfg.redeploy_flooring_remainder (opt-in): pools the whole-share-flooring leftover across
+    this rebalance's BUYs and redeploys it as extra whole shares of the single top-ranked BUY
+    ticker. docs/RISK_CONSTRAINTS.md's "Flooring Remainder Redeployment".
+    """
+
+    def _cfg(self, **kwargs):
+        return BacktestConfig(drift_threshold=0.0, min_trade_size=1.0,
+                               redeploy_flooring_remainder=True, **kwargs)
+
+    def test_default_off_is_byte_identical_to_before(self):
+        cfg = BacktestConfig(drift_threshold=0.0, min_trade_size=1.0)  # flag omitted, default False
+        orders = generate_orders(
+            current_holdings={}, target_weights={"A": 0.5, "B": 0.5}, gross_exposure=1.0,
+            total_value=1000.0, latest_prices={"A": 270.0, "B": 130.0}, cfg=cfg,
+            signal_context={"A": {"rank": 1, "signal_score": 0.2}, "B": {"rank": 2, "signal_score": 0.1}},
+        )
+        assert orders["A"]["shares"] == 1  # no extra share, unchanged flooring behavior
+        assert orders["B"]["shares"] == 3
+
+    def test_explicit_false_is_also_byte_identical(self):
+        cfg = BacktestConfig(drift_threshold=0.0, min_trade_size=1.0, redeploy_flooring_remainder=False)
+        orders = generate_orders(
+            current_holdings={}, target_weights={"A": 0.5, "B": 0.5}, gross_exposure=1.0,
+            total_value=1000.0, latest_prices={"A": 270.0, "B": 130.0}, cfg=cfg,
+            signal_context={"A": {"rank": 1, "signal_score": 0.2}, "B": {"rank": 2, "signal_score": 0.1}},
+        )
+        assert orders["A"]["shares"] == 1
+        assert orders["B"]["shares"] == 3
+
+    def test_pooled_remainder_lands_on_top_ranked_pick(self):
+        # A: target $500 @ $270 -> floors to 1 share ($270), remainder $230
+        # B: target $500 @ $130 -> floors to 3 shares ($390), remainder $110
+        # Pooled = $340, top-ranked (rank 1) is A, extra_shares = floor(340/270) = 1
+        cfg = self._cfg()
+        orders = generate_orders(
+            current_holdings={}, target_weights={"A": 0.5, "B": 0.5}, gross_exposure=1.0,
+            total_value=1000.0, latest_prices={"A": 270.0, "B": 130.0}, cfg=cfg,
+            signal_context={"A": {"rank": 1, "signal_score": 0.2}, "B": {"rank": 2, "signal_score": 0.1}},
+        )
+        assert orders["A"]["shares"] == 2  # 1 original + 1 redeployed
+        assert orders["B"]["shares"] == 3  # unchanged
+        assert "extra share" in orders["A"]["reason"]
+
+    def test_remainder_too_small_for_even_one_extra_share_is_a_noop(self):
+        cfg = self._cfg()
+        orders = generate_orders(
+            current_holdings={}, target_weights={"A": 1.0}, gross_exposure=1.0,
+            total_value=100.0, latest_prices={"A": 99.0}, cfg=cfg,
+            signal_context={"A": {"rank": 1, "signal_score": 0.2}},
+        )
+        # target $100 @ $99 -> floors to 1 share ($99), remainder $1, can't afford another $99 share
+        assert orders["A"]["shares"] == 1
+        assert "extra share" not in orders["A"]["reason"]
+
+    def test_zero_buys_this_rebalance_is_a_safe_noop(self):
+        cfg = self._cfg()
+        orders = generate_orders(
+            current_holdings={"A": 10.0}, target_weights={}, gross_exposure=1.0,
+            total_value=1000.0, latest_prices={"A": 100.0}, cfg=cfg,
+        )
+        assert orders["A"]["action"] == "SELL"  # no BUY at all this rebalance, nothing to redeploy into
+
+    def test_allow_fractional_shares_disables_redeployment(self):
+        # Nothing to pool when shares are never floored to whole numbers in the first place.
+        cfg = BacktestConfig(drift_threshold=0.0, min_trade_size=1.0,
+                              redeploy_flooring_remainder=True, allow_fractional_shares=True)
+        orders = generate_orders(
+            current_holdings={}, target_weights={"A": 0.5, "B": 0.5}, gross_exposure=1.0,
+            total_value=1000.0, latest_prices={"A": 270.0, "B": 130.0}, cfg=cfg,
+            signal_context={"A": {"rank": 1, "signal_score": 0.2}, "B": {"rank": 2, "signal_score": 0.1}},
+        )
+        # generate_orders() truncates fractional shares to 4dp (np.floor(x * 10_000) / 10_000),
+        # matching that precision here rather than comparing against the untruncated division.
+        assert orders["A"]["shares"] == pytest.approx(1.8518, abs=1e-4)
+        assert orders["B"]["shares"] == pytest.approx(3.8461, abs=1e-4)
+
+    def test_falls_back_to_first_buy_when_no_rank_info_available(self):
+        # e.g. custom_weights sizing, no signal_context provided at all. Which ticker absorbs
+        # the remainder is arbitrary here (no rank to break the tie), and the resulting total
+        # share count depends on which one it lands on (a cheaper ticker affords more extra
+        # shares from the same pooled dollar remainder), so this only asserts it doesn't crash
+        # and DOES redeploy something, not an exact total.
+        cfg = self._cfg()
+        orders = generate_orders(
+            current_holdings={}, target_weights={"A": 0.5, "B": 0.5}, gross_exposure=1.0,
+            total_value=1000.0, latest_prices={"A": 270.0, "B": 130.0}, cfg=cfg,
+        )
+        baseline_total = 1 + 3  # A floors to 1 share, B floors to 3, before any redeployment
+        total_shares = orders["A"]["shares"] + orders["B"]["shares"]
+        assert total_shares > baseline_total
+        assert "extra share" in orders["A"]["reason"] or "extra share" in orders["B"]["reason"]
+
+
 class TestMeasureLivePerformance:
     """
     measure_live_performance() computes REAL money math (FIFO realized/

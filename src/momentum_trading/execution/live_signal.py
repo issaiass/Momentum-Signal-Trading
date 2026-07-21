@@ -804,6 +804,30 @@ def generate_orders(
             action = "BUY" if drift_dollar > 0 else "SELL"
             orders[t] = _with_context({"action": action, "shares": shares, "reason": f"drift ${drift_dollar:,.2f}"}, t, tgt_dollar, price)
 
+    # --- Flooring remainder redeployment (opt-in, cfg.redeploy_flooring_remainder), only
+    #     meaningful when whole-share flooring actually happened (not allow_fractional_shares).
+    #     Every BUY's intended drift dollar amount floors to a whole share count, leaving a
+    #     small per-ticker leftover unused; pool that leftover across this rebalance's BUYs and
+    #     redeploy it as extra whole shares of the single TOP-RANKED BUY ticker (not spread
+    #     across the basket). No-op if there are no BUYs this rebalance, or the pooled remainder
+    #     doesn't cover even one more share of the top pick. ---
+    if cfg.redeploy_flooring_remainder and not cfg.allow_fractional_shares:
+        buy_tickers = [t for t, o in orders.items() if o["action"] == "BUY"]
+        if buy_tickers:
+            pooled_remainder = 0.0
+            for t in buy_tickers:
+                price = latest_prices[t]
+                drift_dollar = target_dollar.get(t, 0.0) - current_value.get(t, 0.0)
+                pooled_remainder += abs(drift_dollar) - orders[t]["shares"] * price
+            ranked = [(t, signal_context.get(t, {}).get("rank")) for t in buy_tickers]
+            ranked_with_rank = [(t, r) for t, r in ranked if r is not None]
+            top_ticker = min(ranked_with_rank, key=lambda tr: tr[1])[0] if ranked_with_rank else buy_tickers[0]
+            top_price = latest_prices[top_ticker]
+            extra_shares = int(pooled_remainder // top_price)
+            if extra_shares >= 1:
+                orders[top_ticker]["shares"] += extra_shares
+                orders[top_ticker]["reason"] += f" + {extra_shares} extra share(s) from flooring remainder"
+
     return orders
 
 

@@ -333,6 +333,13 @@ checked every day this app runs) and/or `attach_broker_stop_loss: true` (a real 
 BUY time, protects the position even when this app isn't running), independent of which width you
 pick, see "Broker-Side Protective Stop" above.
 
+**This fixed-from-entry stop-loss price is now visible per-ticker**, not just computable by
+hand: the rebalance email's second "Full Signal Universe" table and its sibling
+`logs/signal_rankings_log_<portfolio>.csv` both show a `Stop-Loss Price` column (an estimate
+based on today's close for a new `BUY`, the real entry-price-derived value for a `HOLD` on an
+already-open position, live mode only), see `docs/SIGNAL_RANKINGS_LOG.md`. Still the same fixed
+mechanism described above, not trailing, this only changes visibility, not behavior.
+
 ## Position Size Hard-Cap [Mandatory tier]
 
 `max_position_weight` (default `0.35`): a flat, single-name cap, identical for every ticker

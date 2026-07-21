@@ -54,7 +54,7 @@ import pandas_market_calendars as mcal
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ..core import functions as fn
-from ..core.audit_log import log_alert, ALERTS_LOG_PATH
+from ..core.audit_log import log_alert, ALERTS_LOG_PATH, append_hash_chained_row
 from ..core.paths import data_dir, logs_dir
 from ..backtest.momentum_backtest import (
     BacktestConfig,
@@ -77,6 +77,7 @@ logger.setLevel(logging.INFO)
 logger.propagate = False
 
 TRADE_LOG_PATH = str(logs_dir() / "live_trades_log.csv")
+SIGNAL_RANKINGS_LOG_PATH = str(logs_dir() / "signal_rankings_log.csv")
 
 # IBKR_HOST: docker-compose.yml already sets this to host.docker.internal (Mac/Windows Docker
 # Desktop) so the container can reach TWS/Gateway running on the host machine. Inside a container,
@@ -667,6 +668,32 @@ def compute_aggregate_drift(target_dollar: dict, current_value: dict, total_valu
     return raw_trades / total_value
 
 
+def compute_stop_loss_price(action: str, cfg: BacktestConfig, latest_price: float | None,
+                             avg_entry_price: float | None = None) -> float | None:
+    """
+    Fixed-from-entry stop-loss price (stop_loss_pct below a reference price), NOT a trailing
+    stop, see docs/RISK_CONSTRAINTS.md's "Stop-Loss Width" for why: stop_loss_pct never ratchets
+    up as a position gains in either the backtest or live path, this function surfaces that
+    EXISTING mechanism for reporting, it doesn't add trailing behavior.
+
+    BUY: latest_price * (1 - stop_loss_pct), an ESTIMATE based on today's close, since the real
+    fill price isn't known yet and may differ once the order actually executes.
+    HOLD on an already-open position: avg_entry_price * (1 - stop_loss_pct) when avg_entry_price
+    is provided (a REAL reference, sourced from the broker's own FIFO cost basis), None when it
+    isn't (dry-run, or a caller that didn't pass current_avg_entry_prices to generate_orders()/
+    run(), matching the existing documented "position-performance fields are live-only" pattern).
+    SELL, or a ticker with no live price at all: None, not meaningful, the position is being
+    closed or was never priced.
+    """
+    if latest_price is None or latest_price <= 0:
+        return None
+    if action == "BUY":
+        return latest_price * (1 - cfg.stop_loss_pct)
+    if action == "HOLD" and avg_entry_price:
+        return avg_entry_price * (1 - cfg.stop_loss_pct)
+    return None
+
+
 def generate_orders(
     current_holdings: dict,      # {ticker: shares}, pulled from broker, NOT local memory
     target_weights: dict,        # {ticker: weight}, from compute_target_weights()
@@ -675,11 +702,12 @@ def generate_orders(
     latest_prices: dict,         # {ticker: price}
     cfg: BacktestConfig,
     signal_context: dict | None = None,  # optional {ticker: {'rank': int, 'signal_score': float}}
+    current_avg_entry_prices: dict | None = None,  # optional {ticker: avg_entry_price}, live-only
 ) -> dict:
     """
     Returns {ticker: {'action': 'BUY'|'SELL'|'HOLD', 'shares': int, 'reason': str,
                        'rank': int|None, 'signal_score': float|None, 'money_invested': float,
-                       'pct_money_invested': float}}
+                       'pct_money_invested': float, 'stop_loss_price': float|None}}
     Applies the same drift_threshold / min_trade_size filtering as the backtest,
     so live turnover matches the cost assumptions the backtest validated against.
 
@@ -697,19 +725,26 @@ def generate_orders(
     every order (BUY/SELL/HOLD, every HOLD reason including "no live price available") via
     _with_context() below, so the rebalance summary email/log can show "how much of this
     period's capital is allocated here" for every row, not just the ones that traded.
+
+    stop_loss_price (see compute_stop_loss_price()) is set the same uniform way, None default
+    (unchanged behavior) when current_avg_entry_prices isn't passed.
     """
     signal_context = signal_context or {}
+    current_avg_entry_prices = current_avg_entry_prices or {}
     current_value = {t: s * latest_prices.get(t, 0.0) for t, s in current_holdings.items()}
     target_dollar = {t: total_value * gross_exposure * w for t, w in target_weights.items()}
     capital_this_rebalance = total_value * gross_exposure
     all_tickers = set(current_holdings) | set(target_dollar)
 
-    def _with_context(order: dict, ticker: str, tgt_dollar: float) -> dict:
+    def _with_context(order: dict, ticker: str, tgt_dollar: float, price: float | None = None) -> dict:
         ctx = signal_context.get(ticker, {})
         order["rank"] = ctx.get("rank")
         order["signal_score"] = ctx.get("signal_score")
         order["money_invested"] = tgt_dollar
         order["pct_money_invested"] = (tgt_dollar / capital_this_rebalance) if capital_this_rebalance > 0 else 0.0
+        order["stop_loss_price"] = compute_stop_loss_price(
+            order["action"], cfg, price, current_avg_entry_prices.get(ticker),
+        )
         return order
 
     orders = {}
@@ -717,7 +752,7 @@ def generate_orders(
         tgt_dollar = target_dollar.get(t, 0.0)
         price = latest_prices.get(t)
         if price is None or price <= 0:
-            orders[t] = _with_context({"action": "HOLD", "shares": 0, "reason": "no live price available"}, t, tgt_dollar)
+            orders[t] = _with_context({"action": "HOLD", "shares": 0, "reason": "no live price available"}, t, tgt_dollar, price)
             continue
 
         c_dollar = current_value.get(t, 0.0)
@@ -725,19 +760,19 @@ def generate_orders(
         is_continuing = (t in current_value) and (t in target_dollar)
 
         if abs(drift_dollar) < cfg.min_trade_size:
-            orders[t] = _with_context({"action": "HOLD", "shares": 0, "reason": f"below min_trade_size (${abs(drift_dollar):.2f})"}, t, tgt_dollar)
+            orders[t] = _with_context({"action": "HOLD", "shares": 0, "reason": f"below min_trade_size (${abs(drift_dollar):.2f})"}, t, tgt_dollar, price)
             continue
         if is_continuing and total_value > 0 and abs(drift_dollar) / total_value < cfg.drift_threshold:
-            orders[t] = _with_context({"action": "HOLD", "shares": 0, "reason": f"within drift_threshold ({abs(drift_dollar)/total_value:.1%})"}, t, tgt_dollar)
+            orders[t] = _with_context({"action": "HOLD", "shares": 0, "reason": f"within drift_threshold ({abs(drift_dollar)/total_value:.1%})"}, t, tgt_dollar, price)
             continue
 
         shares = abs(drift_dollar) / price
         shares = (np.floor(shares * 10_000) / 10_000) if cfg.allow_fractional_shares else int(shares)
         if shares <= 0:
-            orders[t] = _with_context({"action": "HOLD", "shares": 0, "reason": "drift too small for 1 share"}, t, tgt_dollar)
+            orders[t] = _with_context({"action": "HOLD", "shares": 0, "reason": "drift too small for 1 share"}, t, tgt_dollar, price)
         else:
             action = "BUY" if drift_dollar > 0 else "SELL"
-            orders[t] = _with_context({"action": action, "shares": shares, "reason": f"drift ${drift_dollar:,.2f}"}, t, tgt_dollar)
+            orders[t] = _with_context({"action": action, "shares": shares, "reason": f"drift ${drift_dollar:,.2f}"}, t, tgt_dollar, price)
 
     return orders
 
@@ -902,6 +937,60 @@ def log_orders(orders: dict, latest_prices: dict, dry_run: bool, path: str = TRA
             writer.writerow(row_fields + [row_hash])
             prev_hash = row_hash
     logger.info("Logged %d order decisions to %s (config_hash=%s)", len(orders), path, config_hash)
+
+
+SIGNAL_RANKINGS_LOG_HEADER = [
+    "timestamp", "ticker", "action", "momentum_rank", "signal_score", "close_price",
+    "selection_status", "money_invested", "pct_money_invested", "shares", "stop_loss_price",
+    "reason", "dry_run", "config_hash", "row_hash",
+]
+
+
+def log_signal_rankings(full_signal_universe: dict, orders: dict, dry_run: bool,
+                         path: str = SIGNAL_RANKINGS_LOG_PATH, cfg=None) -> None:
+    """
+    One row per ticker in the FULL ranked universe (every configured ticker with a valid
+    momentum score this rebalance), not just the top_n actually selected/traded, distinct from
+    log_orders()'s trade log, which stays scoped to real BUY/SELL/HOLD decisions only (see
+    docs/SIGNAL_RANKINGS_LOG.md for why these are kept as two separate logs rather than merged).
+    Reuses core/audit_log.py's append_hash_chained_row() directly (same hash-chain convention as
+    the trade log and alert log, verify_log_integrity() works unchanged against this file too),
+    explicitly avoiding a fourth bespoke hash-chain implementation.
+
+    For a ticker present in `orders` (selected this rebalance, whether traded or held), action/
+    reason/shares/money_invested/pct_money_invested/stop_loss_price come from that order dict.
+    For a ticker NOT in `orders` (ranked but not selected, "watchlist"), action is "WATCHLIST",
+    reason/stop_loss_price are blank, shares/money_invested/pct_money_invested are 0, per the
+    "watchlist tickers show $0.00/0.00%%, no position exists" design.
+
+    No fill-status/"what actually happened" column, matching log_orders()'s own precedent: that's
+    a live, post-hoc IBKR polling result, not known at order-generation time, and stays
+    EMAIL-only (see build_signal_universe_html()).
+    """
+    config_hash = _config_hash(cfg) if cfg is not None else ""
+    ts = datetime.now().isoformat()
+    for ticker, info in full_signal_universe.items():
+        order = orders.get(ticker)
+        if order is not None:
+            action = order["action"]
+            reason = order.get("reason", "")
+            shares = order.get("shares", 0)
+            money_invested = order.get("money_invested", 0.0)
+            pct_money_invested = order.get("pct_money_invested", 0.0)
+            stop_loss_price = order.get("stop_loss_price")
+        else:
+            action, reason, shares = "WATCHLIST", "", 0
+            money_invested, pct_money_invested, stop_loss_price = 0.0, 0.0, None
+        row_fields = [
+            ts, ticker, action, info.get("rank", ""), info.get("signal_score", ""),
+            info.get("close_price", ""), info.get("selection_status", ""),
+            money_invested, pct_money_invested, shares,
+            stop_loss_price if stop_loss_price is not None else "",
+            reason, dry_run, config_hash,
+        ]
+        append_hash_chained_row(path, SIGNAL_RANKINGS_LOG_HEADER, row_fields)
+    logger.info("Logged %d signal-universe rankings to %s (config_hash=%s)",
+                len(full_signal_universe), path, config_hash)
 
 
 # --------------------------------------------------------------------------- #
@@ -2060,6 +2149,21 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
 # --------------------------------------------------------------------------- #
 # MAIN
 # --------------------------------------------------------------------------- #
+class OrdersResult(dict):
+    """
+    A plain {ticker: order} dict (byte-identical to run()'s pre-existing return value in every
+    respect: .items()/.values()/len()/bool()/`in`/equality with a plain dict all work exactly the
+    same, every existing caller doing `orders_result = run(...)` needs zero changes), PLUS a
+    non-iterated `.full_signal_universe` attribute carrying the full ranked universe (selected
+    AND watchlist tickers, see run()'s own docstring), for callers that want to build the second
+    "Full Signal Universe" email table (see interfaces/notifications.py's
+    build_signal_universe_html()) or otherwise inspect ranking data beyond what made it into an
+    actual order decision. Deliberately NOT a second return value (`orders, universe = run(...)`)
+    since that would be a breaking signature change for every existing call site/test/notebook.
+    """
+    full_signal_universe: dict = {}
+
+
 def run(
     tickers: list[str],
     current_holdings: dict,
@@ -2077,8 +2181,21 @@ def run(
     alerts_log_path: str = ALERTS_LOG_PATH,
     extra_price_tickers: list[str] | None = None,
     daily_prices: pd.DataFrame | None = None,
-) -> dict:
+    current_avg_entry_prices: dict | None = None,
+    signal_rankings_log_path: str = SIGNAL_RANKINGS_LOG_PATH,
+) -> OrdersResult:
     """
+    current_avg_entry_prices : optional {ticker: avg_entry_price}, sourced from the broker's own
+    FIFO cost basis (daily_runner.py's current_positions, live-only, {} in dry-run). Backs the
+    Stop-Loss Price column/log field for an already-HELD position, see
+    compute_stop_loss_price()'s own docstring. None (default) is byte-identical to this
+    function's behavior before this param existed (stop_loss_price is None for every HOLD).
+
+    signal_rankings_log_path : where log_signal_rankings() writes the full ranked-universe log
+    (selected + watchlist tickers), a sibling to log_path's trade log, kept as a SEPARATE file so
+    the trade log stays a clean "decisions actually made" audit trail, see
+    docs/SIGNAL_RANKINGS_LOG.md.
+
     extra_price_tickers : additional tickers to fetch a price for (so generate_orders() can
     evaluate them for exit) WITHOUT adding them to the momentum ranking/selection universe.
     Backs the orphaned-ticker reconciliation in daily_runner.py, a ticker currently held but no
@@ -2116,7 +2233,7 @@ def run(
         )
     if daily_prices.empty:
         logger.error("No price data returned; aborting.")
-        return {}
+        return OrdersResult()
 
     # resolve_strategy_scores() (core/strategy_signals.py) scopes to `tickers` internally,
     # NEVER the wider extra_price_tickers-fetched universe, getting priced must never make a
@@ -2200,6 +2317,30 @@ def run(
 
     latest_prices = daily_prices.iloc[-1].to_dict()
 
+    # --- Full ranked universe (selected top_n picks AND ranked-but-not-selected "watchlist"
+    #     tickers), distinct from signal_context above which stays scoped to picks only (that
+    #     narrower dict still feeds generate_orders()'s trade log/Table 1, unchanged). Every
+    #     ticker with a valid (non-NaN) score this rebalance gets an entry here, even one never
+    #     selected, so it isn't invisible everywhere the way it was before this existed. See
+    #     docs/SIGNAL_RANKINGS_LOG.md. ---
+    full_signal_universe: dict = {}
+    if latest_ranks_row is not None and latest_scores is not None:
+        for t in tickers:
+            if t not in latest_scores.index or pd.isna(latest_scores[t]):
+                continue
+            if cfg.strategy_type == "absolute_momentum":
+                # No top_n cutoff in this strategy_type, every ticker with a positive OWN
+                # trailing score is held instead, see core/strategy_signals.py.
+                status = "Selected (Absolute Momentum)" if t in picks else "Watchlist / Reserve"
+            else:
+                status = f"Top {top_n} (Selected)" if t in picks else "Watchlist / Reserve"
+            full_signal_universe[t] = {
+                "rank": int(latest_ranks_row[t]) if t in latest_ranks_row.index and pd.notna(latest_ranks_row[t]) else None,
+                "signal_score": float(latest_scores[t]),
+                "close_price": latest_prices.get(t),
+                "selection_status": status,
+            }
+
     # --- Aggregate-drift skip, bypass the ENTIRE rebalance if
     #     total portfolio drift is trivial, even if some individual tickers exceed
     #     drift_threshold. Same formula/semantics as the backtest's
@@ -2215,10 +2356,13 @@ def run(
             log_alert(portfolio, "AGGREGATE_DRIFT_SKIP", "INFO",
                       f"Aggregate drift {aggregate_drift:.2%} < threshold {cfg.aggregate_drift_threshold:.2%}",
                       log_path=alerts_log_path)
-            return {}
+            skip_result = OrdersResult()
+            skip_result.full_signal_universe = full_signal_universe
+            return skip_result
 
     orders = generate_orders(current_holdings, weights, gross_exposure, total_value, latest_prices, cfg,
-                              signal_context=signal_context)
+                              signal_context=signal_context,
+                              current_avg_entry_prices=current_avg_entry_prices)
 
     for ticker, order in orders.items():
         logger.info("%-6s %-4s shares=%-8.4f (%s)", ticker, order["action"], order["shares"], order["reason"])
@@ -2251,6 +2395,7 @@ def run(
             logger.warning("Capacity check skipped due to error (non-fatal): %s", e)
 
     log_orders(orders, latest_prices, dry_run, path=log_path, cfg=cfg)
+    log_signal_rankings(full_signal_universe, orders, dry_run, path=signal_rankings_log_path, cfg=cfg)
 
     if not dry_run:
         logger.warning("LIVE MODE: placing real orders via IBKR on port %d", ibkr_port)
@@ -2272,7 +2417,9 @@ def run(
     else:
         logger.info("DRY RUN: no orders sent to broker. Use --live to actually trade.")
 
-    return orders
+    result = OrdersResult(orders)
+    result.full_signal_universe = full_signal_universe
+    return result
 
 
 if __name__ == "__main__":

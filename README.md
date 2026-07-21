@@ -107,7 +107,12 @@ README says so on purpose.
   CPI), per-ticker position performance since entry (`--live` mode only), strategy
   performance indicators since inception (Total Return, CAGR, Max Drawdown, Std Dev, Sharpe,
   Sortino), and trailing-window benchmark comparison charts (1/3/6-month/YTD/1-year for the
-  monthly report, 1-day/1/2/3-week for the daily report)
+  monthly report, 1-day/1/2/3-week for the daily report). Every rebalance email that produces
+  orders also includes a "Full Signal Universe" second table, and a matching
+  `logs/signal_rankings_log_<portfolio>.csv`, covering the FULL ranked universe (Momentum Rank,
+  Lookback Return, Current Close Price, Selection Status, Stop-Loss Price) for every configured
+  ticker, not just the `top_n` actually selected, "Watchlist / Reserve" tickers included, see
+  `docs/SIGNAL_RANKINGS_LOG.md`
 - Dockerized, self-scheduling deployment (`docker compose up -d`, internal cron, no manual
   triggering needed for normal operation)
 - 566-test pytest suite covering code mechanics, order sizing, config validation, audit-log
@@ -162,11 +167,13 @@ momentum-trading/
 │   │                                 from the trade log and email command log
 │   ├── RISK_CONSTRAINTS.md         long-term/short-term momentum risk constraints,
 │   │                                 advisory warnings and opt-in config toggles
-│   └── MOMENTUM_STRATEGIES.md      selectable `strategy_type` field: 11 momentum variants
-│                                     (Dual, Volatility-Scaled, Residual, Absolute,
-│                                     Rank & Sign, Hybrid Multi-Factor, Path-Dependent,
-│                                     Correlation-Weighted, Multi-Timeframe Composite), how
-│                                     presets compose, per-strategy best-parameter tables
+│   ├── MOMENTUM_STRATEGIES.md      selectable `strategy_type` field: 11 momentum variants
+│   │                                 (Dual, Volatility-Scaled, Residual, Absolute,
+│   │                                 Rank & Sign, Hybrid Multi-Factor, Path-Dependent,
+│   │                                 Correlation-Weighted, Multi-Timeframe Composite), how
+│   │                                 presets compose, per-strategy best-parameter tables
+│   └── SIGNAL_RANKINGS_LOG.md      full ranked-universe log schema (selected + watchlist
+│                                     tickers every rebalance), how it differs from the trade log
 │
 ├── notebooks/
 │   ├── research/                  strategy design, signal research, backtesting
@@ -522,6 +529,7 @@ and multi-portfolio/Docker specifics live in `docs/RUNNING.md` and `docs/DEPLOYM
 | Configure/understand email notifications and monthly reports | `docs/EMAIL_REPORTING.md` |
 | Configure/understand email-commanded remote actions (PAUSE/RESUME/etc.) | `docs/EMAIL_COMMANDS.md` |
 | Understand the alert log (what's recorded, how it differs from the trade/email-command logs) | `docs/ALERT_LOG.md` |
+| Understand the signal rankings log / "Full Signal Universe" email table (rank, lookback return, selection status, stop-loss price for every ranked ticker) | `docs/SIGNAL_RANKINGS_LOG.md` |
 | Understand the long-term/short-term momentum risk constraints (turnover, skip-month, vol budget) | `docs/RISK_CONSTRAINTS.md` |
 | Choose/understand a selectable momentum `strategy_type` (Dual, Residual, Absolute, Hybrid Multi-Factor, etc.), per-strategy best-parameter presets | `docs/MOMENTUM_STRATEGIES.md` |
 

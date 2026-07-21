@@ -16,7 +16,7 @@ import pytest
 from momentum_trading.interfaces.notifications import (
     NotificationCategory, should_send, send_action_email,
     build_rebalance_summary_html, build_monthly_report_html, build_daily_report_html,
-    build_comparison_bar_chart,
+    build_comparison_bar_chart, build_signal_universe_html,
 )
 
 
@@ -395,6 +395,60 @@ class TestHTMLGeneration:
             "portfolio1", snap, {"error": "no data"}, position_performance={},
         )
         assert "Position Performance" not in html
+
+
+class TestBuildSignalUniverseHtml:
+    """
+    The second rebalance-email table (Table 2): the FULL ranked universe, selected AND
+    watchlist tickers, distinct from build_rebalance_summary_html()'s Table 1 which stays
+    scoped to `orders` (real decisions) only.
+    """
+
+    def _universe(self):
+        return {
+            "A": {"rank": 1, "signal_score": 0.15, "close_price": 100.0, "selection_status": "Top 1 (Selected)"},
+            "B": {"rank": 2, "signal_score": 0.05, "close_price": 50.0, "selection_status": "Watchlist / Reserve"},
+        }
+
+    def _orders(self):
+        return {
+            "A": {"action": "BUY", "shares": 5, "reason": "drift $500.00", "money_invested": 500.0,
+                  "pct_money_invested": 1.0, "stop_loss_price": 90.0},
+        }
+
+    def test_every_universe_ticker_renders(self):
+        html = build_signal_universe_html(self._universe(), self._orders(), top_n=1, strategy_type="momentum")
+        assert "A" in html and "B" in html
+
+    def test_watchlist_row_shows_zeroed_money_and_na_stop_loss(self):
+        html = build_signal_universe_html(self._universe(), self._orders(), top_n=1, strategy_type="momentum")
+        assert "WATCHLIST" in html
+        assert "Watchlist / Reserve" in html
+        # B's row: $0.00 money invested, 0.0% share, N/A stop-loss (not present in orders at all).
+        assert html.count("$0.00") >= 1
+
+    def test_selected_row_shows_real_values(self):
+        html = build_signal_universe_html(self._universe(), self._orders(), top_n=1, strategy_type="momentum")
+        assert "$500.00" in html
+        assert "$90.00 (estimated)" in html  # BUY stop-loss price is always an estimate
+        assert "Top 1 (Selected)" in html
+
+    def test_lookback_return_header_unqualified_for_base_score_strategy(self):
+        html = build_signal_universe_html(self._universe(), self._orders(), top_n=1, strategy_type="momentum")
+        assert "Lookback Return (%)" in html
+        assert "composite/residual/blended" not in html
+
+    def test_lookback_return_header_footnoted_for_composite_strategy(self):
+        html = build_signal_universe_html(self._universe(), self._orders(), top_n=1, strategy_type="residual_momentum")
+        assert "composite/residual/blended" in html
+
+    def test_both_tables_can_render_in_one_email_body(self):
+        orders = self._orders()
+        table1 = build_rebalance_summary_html("portfolio1", orders)
+        table2 = build_signal_universe_html(self._universe(), orders, top_n=1, strategy_type="momentum")
+        combined = table1 + table2
+        assert "Rebalance Summary" in combined
+        assert "Full Signal Universe" in combined
 
 
 class TestBuildComparisonBarChart:

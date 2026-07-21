@@ -440,6 +440,41 @@ that tests enforce, don't casually violate these when editing:
   (`cashQty` only works for forex/CASH pairs, confirmed empirically, see `README.md`'s Known
   Gaps), the actual order submitted to `place_orders_ibkr()` is still sized in whole shares
   regardless of this.
+  `run()` now returns an `OrdersResult` (a `dict` subclass, byte-identical to a plain
+  `{ticker: order}` dict for every existing caller, `.items()`/`.values()`/`len()`/`bool()`/`in`/
+  equality all work unchanged) with an added `.full_signal_universe` attribute: `{ticker:
+  {'rank', 'signal_score', 'close_price', 'selection_status'}}` for EVERY configured ticker with
+  a valid score this rebalance, not just the `top_n` actually selected. Built right after `picks`
+  (post absolute-momentum-swap) is finalized, using the SAME `latest_ranks_row`/`latest_scores`
+  the existing (still `picks`-scoped, unchanged) `signal_context` dict already reads, that
+  narrowing to `picks` was a reporting-scope choice, not a data-availability one; every
+  `strategy_type` already computes ranks/scores for the full universe via the generic
+  `assign_ranks(resolve_strategy_scores(...))` pipeline. `selection_status` is
+  `f"Top {top_n} (Selected)"` (or `"Selected (Absolute Momentum)"` when `cfg.strategy_type ==
+  "absolute_momentum"`, which has no `top_n` cutoff) for a ticker in `picks`, else `"Watchlist /
+  Reserve"`. Deliberately NOT a second return value (`orders, universe = run(...)`), that would
+  break every existing call site's unpacking; deliberately NOT merged into `signal_context`/the
+  trade log either, per an explicit design decision to keep that log's "decisions actually made"
+  meaning uncontaminated by tickers nothing was ever decided about.
+  `compute_stop_loss_price(action, cfg, latest_price, avg_entry_price=None)` surfaces the
+  EXISTING fixed-from-entry `stop_loss_pct` mechanism (see `docs/RISK_CONSTRAINTS.md`'s
+  "Stop-Loss Width", still not trailing) for reporting: an ESTIMATE
+  (`latest_price * (1 - stop_loss_pct)`) for a `BUY` (the real fill price isn't known yet), the
+  REAL value (`avg_entry_price * (1 - stop_loss_pct)`) for a `HOLD` on an already-open position
+  when `avg_entry_price` is provided, `None` for `SELL`/no-position/no-price. Wired into
+  `generate_orders()` via a new optional `current_avg_entry_prices: dict | None = None` param
+  (`None` default is byte-identical to before), and `run()`'s own new same-named param, which
+  `daily_runner.py` populates from its existing `current_positions` dict (live-only, `{}` in
+  dry-run, matching the established "position-performance fields are live-only" pattern already
+  documented for `build_position_performance()`), no new broker call.
+  `log_signal_rankings(full_signal_universe, orders, dry_run, path, cfg=None)` writes one
+  hash-chained row per full-universe ticker to `logs/signal_rankings_log_<portfolio>.csv` (a new
+  `signal_rankings_log_path` param on `run()`, built by `daily_runner.py` next to `trade_log_path`
+  the same way), reusing `core/audit_log.py`'s `append_hash_chained_row()` directly (same
+  precedent as the alert log, avoiding a fourth bespoke hash-chain implementation). A ticker
+  present in `orders` gets its real action/shares/money/stop-loss columns; one absent (watchlist)
+  gets `action="WATCHLIST"` and zeroed/blank money/shares/stop-loss. See
+  `docs/SIGNAL_RANKINGS_LOG.md`.
 - **`risk/circuit_breaker.py`**, extracted from `daily_runner.py` with alerting
   dependency-injected (`alert_fn` param) specifically so `risk/` has zero import dependency on
   `interfaces/`, enforced by an AST-based test
@@ -538,6 +573,12 @@ that tests enforce, don't casually violate these when editing:
   consistent with every other portfolio email. Does NOT fire on a non-rebalance day (the daily
   snapshot/stop-loss block runs regardless but was never gated by `orders_result` and stays
   silent by design, this isn't a new daily-cron email).
+  `notifications.py`'s `build_signal_universe_html(full_signal_universe, orders, top_n,
+  strategy_type, dry_run=False)` builds the second "Full Signal Universe" table appended below
+  `build_rebalance_summary_html()`'s existing table in the same rebalance email, reading
+  `execution/live_signal.py`'s `run()`'s new `OrdersResult.full_signal_universe` attribute (see
+  that file's own bullet), reusing `_describe_fill_outcome()` for tickers present in `orders`.
+  See `docs/SIGNAL_RANKINGS_LOG.md`.
 - **`daily_runner.py`**, the actual scheduled entry point (`daily-runner` console script).
   Loads and schema-validates `config.yaml`, loops over every portfolio defined under
   `portfolios:`, idempotent per day, refuses `--live` unless `config.yaml`'s
@@ -693,6 +734,9 @@ explicitly rejected, since an env var toggle would let real-money trading get en
   warnings and opt-in config toggles), and why they're deliberately invisible to `risk_monitor.py`
 - `docs/MOMENTUM_STRATEGIES.md`, the selectable `strategy_type` field, all 11 momentum variants,
   how presets compose with explicit config values, and per-strategy best-parameter tables
+- `docs/SIGNAL_RANKINGS_LOG.md`, the full ranked-universe log/email table (Momentum Rank,
+  Lookback Return, Selection Status, Stop-Loss Price for every configured ticker, not just the
+  ones selected), and why it's a separate file/table from the trade log
 
 ## Constraints for documentation
 - Do not use "—" to comment, document the code or add this marks on files.

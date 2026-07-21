@@ -125,6 +125,26 @@ each order after a `--live` call to `place_orders_ibkr()`:
 - **Dry-run** (`"Dry-run) no order sent"`, the rebalance ran without `--live`, so nothing was
   ever sent to a broker; passed through as `build_rebalance_summary_html(..., dry_run=True)`
 
+**STANDARD (Full Signal Universe, second table)**, appended directly below the table above in
+the SAME rebalance email whenever there's at least one order, built by
+`build_signal_universe_html()` from `execution/live_signal.py`'s `run()`'s new
+`OrdersResult.full_signal_universe` attribute. Covers every configured ticker with a valid
+momentum score this rebalance, not just the ones the first table shows (which stays scoped to
+real BUY/SELL/HOLD decisions only): Ticker / Action (or `"WATCHLIST"` for a ranked-but-not-
+selected ticker) / **Momentum Rank** / **Lookback Return (%)** / **Current Close Price** /
+**Selection Status** (`"Top N (Selected)"`, `"Selected (Absolute Momentum)"`, or `"Watchlist /
+Reserve"`) / Money Invest / % Money Invest / Shares / **Stop-Loss Price** / Reason / What
+Actually Happened. A watchlist row shows `$0.00`/`0.00%` money and `"N/A"` for its stop-loss
+price, since no position was ever opened for it. "Lookback Return (%)" is footnoted "(composite
+score)" for the 4 `strategy_type`s whose score isn't a literal price return
+(`multi_timeframe_composite`/`residual_momentum`/`path_dependent_momentum`/
+`hybrid_multi_factor`), see `docs/SIGNAL_RANKINGS_LOG.md`. Stop-Loss Price is fixed-from-entry,
+NOT trailing (see `docs/RISK_CONSTRAINTS.md`'s "Stop-Loss Width"): an estimate based on today's
+close for a `BUY`, the real entry-price-derived value for a `HOLD` on an already-open position
+(live mode only), and `"N/A"` for `SELL`/watchlist. The same data is also persisted every
+rebalance to `logs/signal_rankings_log_<portfolio>.csv`, a sibling to the trade log kept
+deliberately separate, see that doc for the full schema.
+
 **STANDARD (no-change confirmation)**, sent instead of the table above whenever a rebalance
 (scheduled or `--force-rebalance`) ran to completion but produced zero orders (e.g. every
 computed drift was below `min_trade_size`, or `AGGREGATE_DRIFT_SKIP` fired), subject

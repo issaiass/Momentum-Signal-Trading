@@ -51,7 +51,7 @@ from .risk.circuit_breaker import (
 )
 from .interfaces.notifications import (
     NotificationCategory, send_action_email, send_standard_action,
-    build_rebalance_summary_html, build_no_action_summary_html,
+    build_rebalance_summary_html, build_no_action_summary_html, build_signal_universe_html,
     send_monthly_report, send_daily_report,
 )
 from .interfaces.email_commands import (
@@ -1101,6 +1101,7 @@ def main():
             cfg = spec["cfg"]
             tickers = spec["tickers"]
             trade_log_path = str(logs_dir() / f"live_trades_log_{name}.csv")
+            signal_rankings_log_path = str(logs_dir() / f"signal_rankings_log_{name}.csv")
 
             # --- Stale rebalance-in-progress marker (non-blocking WARNING): a marker written
             #     immediately before a PREVIOUS run()'s rebalance, still present now, means that
@@ -1619,6 +1620,10 @@ def main():
                         alerts_log_path=ALERTS_LOG_PATH,
                         extra_price_tickers=confirmed_orphaned,
                         daily_prices=daily_prices,
+                        current_avg_entry_prices={
+                            t: pos["avg_entry_price"] for t, pos in current_positions.items()
+                        },
+                        signal_rankings_log_path=signal_rankings_log_path,
                     )
                 finally:
                     _clear_rebalance_in_progress_marker(name)
@@ -1703,9 +1708,15 @@ def main():
                 #     day (e.g. AGGREGATE_DRIFT_SKIP) still gets a confirmation instead of
                 #     silence indistinguishable from a failed/skipped run. ---
                 if orders_result:
+                    rebalance_html = build_rebalance_summary_html(name, orders_result, dry_run=not args.live)
+                    if orders_result.full_signal_universe:
+                        rebalance_html += build_signal_universe_html(
+                            orders_result.full_signal_universe, orders_result, top_n=min(cfg.top_n, len(tickers)),
+                            strategy_type=cfg.strategy_type, dry_run=not args.live,
+                        )
                     send_standard_action(
                         f"Rebalance executed: {name}",
-                        build_rebalance_summary_html(name, orders_result, dry_run=not args.live),
+                        rebalance_html,
                         notification_cfg,
                     )
                 else:

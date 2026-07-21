@@ -29,6 +29,7 @@ from momentum_trading.execution.live_signal import (
     build_position_performance, resolve_momentum_scores, calculate_period_returns,
     compute_required_lookback_days,
     _realized_weighted_portfolio_vol, apply_absolute_momentum_filter,
+    compute_stop_loss_price, log_signal_rankings, SIGNAL_RANKINGS_LOG_HEADER, OrdersResult,
 )
 from momentum_trading.core.audit_log import read_recent_alerts
 
@@ -1146,6 +1147,165 @@ class TestRunHybridMultiFactorStrategy:
         assert set(orders.keys()) == {"B"}
 
 
+class TestFullSignalUniverse:
+    """
+    run()'s OrdersResult.full_signal_universe: every configured ticker with a valid momentum
+    score this rebalance, not just the top_n actually selected, the gap that made a
+    ranked-but-not-selected ("watchlist") ticker invisible everywhere before this existed
+    (signal_context, feeding the trade log/Table 1, stays scoped to picks only, unchanged).
+    """
+
+    def _ranked_prices(self, seed=21):
+        dates = pd.bdate_range("2024-01-01", "2024-05-15")
+        rng = np.random.default_rng(seed)
+        n = len(dates)
+        # Clear, unambiguous rank order: A > B > C > D by trailing trend strength.
+        a = np.linspace(50, 100, n) * (1 + rng.normal(0, 0.0005, n))
+        b = np.linspace(50, 85, n) * (1 + rng.normal(0, 0.0005, n))
+        c = np.linspace(50, 70, n) * (1 + rng.normal(0, 0.0005, n))
+        d = np.linspace(50, 55, n) * (1 + rng.normal(0, 0.0005, n))
+        return pd.DataFrame({"A": a, "B": b, "C": c, "D": d}, index=dates)
+
+    def test_every_ticker_appears_not_just_top_n_picks(self, monkeypatch, tmp_path):
+        prices = self._ranked_prices()
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False)
+        orders = live_signal.run(
+            tickers=["A", "B", "C", "D"], current_holdings={}, total_value=1000.0, cfg=cfg,
+            top_n=2, lookback_period=1.0, dry_run=True,
+            log_path=str(tmp_path / "trade_log.csv"),
+            signal_rankings_log_path=str(tmp_path / "signal_rankings_log.csv"),
+        )
+
+        # Only A/B are actually selected/traded (top_n=2)...
+        assert set(orders.keys()) == {"A", "B"}
+        # ...but the full ranked universe covers every configured ticker, including C/D which
+        # never appear in `orders` at all.
+        assert set(orders.full_signal_universe.keys()) == {"A", "B", "C", "D"}
+
+    def test_selection_status_labels_top_n_vs_watchlist(self, monkeypatch, tmp_path):
+        prices = self._ranked_prices()
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False)
+        orders = live_signal.run(
+            tickers=["A", "B", "C", "D"], current_holdings={}, total_value=1000.0, cfg=cfg,
+            top_n=2, lookback_period=1.0, dry_run=True,
+            log_path=str(tmp_path / "trade_log.csv"),
+            signal_rankings_log_path=str(tmp_path / "signal_rankings_log.csv"),
+        )
+        universe = orders.full_signal_universe
+
+        assert universe["A"]["selection_status"] == "Top 2 (Selected)"
+        assert universe["B"]["selection_status"] == "Top 2 (Selected)"
+        assert universe["C"]["selection_status"] == "Watchlist / Reserve"
+        assert universe["D"]["selection_status"] == "Watchlist / Reserve"
+        assert universe["A"]["rank"] == 1
+        assert universe["D"]["rank"] == 4
+
+    def test_watchlist_ticker_not_in_orders_gets_zero_money_and_no_stop_loss(self, monkeypatch, tmp_path):
+        prices = self._ranked_prices()
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False)
+        orders = live_signal.run(
+            tickers=["A", "B", "C", "D"], current_holdings={}, total_value=1000.0, cfg=cfg,
+            top_n=2, lookback_period=1.0, dry_run=True,
+            log_path=str(tmp_path / "trade_log.csv"),
+            signal_rankings_log_path=str(tmp_path / "signal_rankings_log.csv"),
+        )
+
+        # D is watchlist-only, never in `orders`, callers building the email/log must treat
+        # this as $0.00/0.00%/no stop-loss, not KeyError.
+        assert "D" not in orders
+        assert "D" in orders.full_signal_universe
+
+    def test_absolute_momentum_labels_selected_differently_no_top_n_cutoff(self, monkeypatch, tmp_path):
+        dates = pd.bdate_range("2024-01-01", "2024-05-15")
+        rng = np.random.default_rng(31)
+        n = len(dates)
+        a = np.linspace(50, 100, n) * (1 + rng.normal(0, 0.0005, n))  # positive trend
+        b = np.linspace(100, 50, n) * (1 + rng.normal(0, 0.0005, n))  # negative trend
+        bil = np.full(n, 100.0) * (1 + rng.normal(0, 0.0001, n))
+        prices = pd.DataFrame({"A": a, "B": b, "BIL": bil}, index=dates)
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False,
+                              strategy_type="absolute_momentum", defensive_ticker="BIL")
+        orders = live_signal.run(
+            tickers=["A", "B"], current_holdings={}, total_value=1000.0, cfg=cfg,
+            top_n=2, lookback_period=1.0, dry_run=True, extra_price_tickers=["BIL"],
+            log_path=str(tmp_path / "trade_log.csv"),
+            signal_rankings_log_path=str(tmp_path / "signal_rankings_log.csv"),
+        )
+        universe = orders.full_signal_universe
+
+        assert universe["A"]["selection_status"] == "Selected (Absolute Momentum)"
+        assert universe["B"]["selection_status"] == "Watchlist / Reserve"
+
+
+class TestLogSignalRankings:
+    """
+    log_signal_rankings() writes one hash-chained row per full_signal_universe ticker, a
+    SEPARATE log from the trade log (log_orders()), reusing core/audit_log.py's
+    append_hash_chained_row() directly (same convention verify_log_integrity() already accepts).
+    """
+
+    def _universe(self):
+        return {
+            "A": {"rank": 1, "signal_score": 0.15, "close_price": 100.0, "selection_status": "Top 1 (Selected)"},
+            "B": {"rank": 2, "signal_score": 0.05, "close_price": 50.0, "selection_status": "Watchlist / Reserve"},
+        }
+
+    def _orders(self):
+        return {
+            "A": {"action": "BUY", "shares": 5, "reason": "drift $500.00", "money_invested": 500.0,
+                  "pct_money_invested": 1.0, "stop_loss_price": 90.0},
+        }
+
+    def test_writes_expected_schema(self, tmp_path):
+        path = str(tmp_path / "signal_rankings_log.csv")
+        log_signal_rankings(self._universe(), self._orders(), dry_run=True, path=path)
+        import pandas as pd
+        df = pd.read_csv(path)
+        assert list(df.columns) == SIGNAL_RANKINGS_LOG_HEADER
+        assert len(df) == 2
+
+    def test_selected_ticker_carries_real_order_fields(self, tmp_path):
+        path = str(tmp_path / "signal_rankings_log.csv")
+        log_signal_rankings(self._universe(), self._orders(), dry_run=True, path=path)
+        import pandas as pd
+        df = pd.read_csv(path)
+        row = df[df["ticker"] == "A"].iloc[0]
+        assert row["action"] == "BUY"
+        assert row["shares"] == 5
+        assert row["money_invested"] == pytest.approx(500.0)
+        assert row["stop_loss_price"] == pytest.approx(90.0)
+
+    def test_watchlist_ticker_gets_zeroed_action_and_money(self, tmp_path):
+        path = str(tmp_path / "signal_rankings_log.csv")
+        log_signal_rankings(self._universe(), self._orders(), dry_run=True, path=path)
+        import pandas as pd
+        df = pd.read_csv(path)
+        row = df[df["ticker"] == "B"].iloc[0]
+        assert row["action"] == "WATCHLIST"
+        assert row["shares"] == 0
+        assert row["money_invested"] == pytest.approx(0.0)
+        assert pd.isna(row["stop_loss_price"])
+
+    def test_hash_chain_verifies_clean(self, tmp_path):
+        path = str(tmp_path / "signal_rankings_log.csv")
+        log_signal_rankings(self._universe(), self._orders(), dry_run=True, path=path)
+        result = live_signal.verify_log_integrity(path)
+        assert result["valid"] is True
+        assert result["rows_checked"] == 2
+
+
 class TestGetTopEtfs:
     """
     get_top_etfs() is where BacktestConfig.top_n actually takes effect, it's
@@ -1216,6 +1376,38 @@ class TestApplyAbsoluteMomentumFilter:
         picks = ["A", "B"]
         result = apply_absolute_momentum_filter(picks, None, defensive_ticker="BIL")
         assert result == ["A", "B"]
+
+
+class TestComputeStopLossPrice:
+    """
+    Fixed-from-entry stop-loss price reporting (docs/RISK_CONSTRAINTS.md's "Stop-Loss Width"),
+    NOT a trailing stop, these tests confirm each of the three real cases and the "no price"
+    guard, matching the function's own docstring exactly.
+    """
+    def test_buy_uses_latest_price_as_estimate(self):
+        cfg = BacktestConfig(stop_loss_pct=0.10)
+        assert compute_stop_loss_price("BUY", cfg, 100.0) == pytest.approx(90.0)
+
+    def test_hold_with_avg_entry_price_uses_real_entry(self):
+        cfg = BacktestConfig(stop_loss_pct=0.20)
+        # latest_price is deliberately different from avg_entry_price, the stop must be
+        # computed from the REAL entry, not today's close, unlike the BUY estimate above.
+        assert compute_stop_loss_price("HOLD", cfg, 150.0, avg_entry_price=100.0) == pytest.approx(80.0)
+
+    def test_hold_without_avg_entry_price_is_none(self):
+        # dry-run, or any caller that didn't pass current_avg_entry_prices, matching the
+        # documented "position-performance fields are live-only" pattern.
+        cfg = BacktestConfig(stop_loss_pct=0.10)
+        assert compute_stop_loss_price("HOLD", cfg, 100.0) is None
+
+    def test_sell_is_none(self):
+        cfg = BacktestConfig(stop_loss_pct=0.10)
+        assert compute_stop_loss_price("SELL", cfg, 100.0, avg_entry_price=90.0) is None
+
+    def test_no_price_is_none(self):
+        cfg = BacktestConfig(stop_loss_pct=0.10)
+        assert compute_stop_loss_price("BUY", cfg, None) is None
+        assert compute_stop_loss_price("BUY", cfg, 0.0) is None
 
 
 class TestGenerateOrders:
@@ -1327,6 +1519,45 @@ class TestGenerateOrders:
         assert orders["GHOST"]["reason"] == "no live price available"
         assert orders["GHOST"]["money_invested"] == pytest.approx(500.0)
         assert orders["GHOST"]["pct_money_invested"] == pytest.approx(0.5)
+
+    def test_buy_order_carries_estimated_stop_loss_price(self):
+        cfg = BacktestConfig(drift_threshold=0.0, min_trade_size=1.0, stop_loss_pct=0.10)
+        orders = generate_orders(
+            current_holdings={}, target_weights={"XLK": 1.0}, gross_exposure=1.0,
+            total_value=1000.0, latest_prices={"XLK": 220.0}, cfg=cfg,
+        )
+        assert orders["XLK"]["action"] == "BUY"
+        assert orders["XLK"]["stop_loss_price"] == pytest.approx(198.0)  # 220 * (1 - 0.10)
+
+    def test_hold_on_open_position_uses_real_entry_price_when_provided(self):
+        cfg = BacktestConfig(drift_threshold=0.5, min_trade_size=1.0, stop_loss_pct=0.20)
+        orders = generate_orders(
+            current_holdings={"SPY": 1.0}, target_weights={"SPY": 1.0}, gross_exposure=1.0,
+            total_value=500.0, latest_prices={"SPY": 500.0}, cfg=cfg,
+            current_avg_entry_prices={"SPY": 400.0},
+        )
+        assert orders["SPY"]["action"] == "HOLD"
+        assert orders["SPY"]["stop_loss_price"] == pytest.approx(320.0)  # 400 * (1 - 0.20)
+
+    def test_hold_without_avg_entry_prices_has_no_stop_loss_price(self):
+        # Default behavior (no current_avg_entry_prices passed), byte-identical to before this
+        # param existed: stop_loss_price is None for a HOLD on an already-open position.
+        cfg = BacktestConfig(drift_threshold=0.5, min_trade_size=1.0, stop_loss_pct=0.20)
+        orders = generate_orders(
+            current_holdings={"SPY": 1.0}, target_weights={"SPY": 1.0}, gross_exposure=1.0,
+            total_value=500.0, latest_prices={"SPY": 500.0}, cfg=cfg,
+        )
+        assert orders["SPY"]["action"] == "HOLD"
+        assert orders["SPY"]["stop_loss_price"] is None
+
+    def test_sell_order_has_no_stop_loss_price(self):
+        cfg = BacktestConfig(drift_threshold=0.0, min_trade_size=1.0, stop_loss_pct=0.10)
+        orders = generate_orders(
+            current_holdings={"SPY": 5.0}, target_weights={}, gross_exposure=1.0,
+            total_value=1000.0, latest_prices={"SPY": 500.0}, cfg=cfg,
+        )
+        assert orders["SPY"]["action"] == "SELL"
+        assert orders["SPY"]["stop_loss_price"] is None
 
     def test_sold_out_ticker_has_zero_money_invested(self):
         # A ticker held but no longer in the target universe at all (full exit) correctly

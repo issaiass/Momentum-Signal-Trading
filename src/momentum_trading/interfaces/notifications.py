@@ -237,6 +237,106 @@ def build_rebalance_summary_html(portfolio_name: str, orders: dict, dry_run: boo
     """
 
 
+def build_signal_universe_html(full_signal_universe: dict, orders: dict, top_n: int,
+                                strategy_type: str, dry_run: bool = False) -> str:
+    """
+    Second table for the rebalance email, below build_rebalance_summary_html()'s existing
+    table (Table 1, unchanged): the FULL ranked universe (every configured ticker with a valid
+    momentum score this rebalance), not just the tickers actually selected/traded. Table 1 stays
+    the clean "decisions actually made" summary; this table is the exhaustive audit view,
+    including "Watchlist / Reserve" tickers that were ranked but never selected, which are
+    otherwise invisible everywhere (never appear in `orders` at all).
+
+    full_signal_universe : {ticker: {'rank', 'signal_score', 'close_price', 'selection_status'}},
+    execution/live_signal.py's run()'s new OrdersResult.full_signal_universe attribute.
+    orders : the SAME dict Table 1 was built from; a ticker present here (selected, whether
+    traded or held) gets its real action/shares/money-invested/stop-loss-price/fill-outcome
+    columns from its order; a ticker absent here ("watchlist") gets zeroed money/shares, no
+    stop-loss price, and "N/A (not traded)" in place of a fill outcome.
+
+    "Lookback Return (%)" is signal_score expressed as a percentage for the 7 strategy_types
+    whose score IS literally the trailing lookback_period return (_BASE_SCORE_STRATEGY_TYPES,
+    core/strategy_signals.py); the other 4 (multi_timeframe_composite, residual_momentum,
+    path_dependent_momentum, hybrid_multi_factor) compute a composite/residual/blended score
+    instead, not a literal price return, so the header notes this rather than mislabeling it.
+    """
+    from ..core.strategy_signals import _BASE_SCORE_STRATEGY_TYPES
+    is_base_score = strategy_type in _BASE_SCORE_STRATEGY_TYPES
+    score_header = "Lookback Return (%)" if is_base_score else "Lookback Return (%) *"
+
+    rows = ""
+    for ticker, info in full_signal_universe.items():
+        rank = info.get("rank")
+        score = info.get("signal_score")
+        close_price = info.get("close_price")
+        status = info.get("selection_status", "")
+        order = orders.get(ticker)
+
+        if order is not None:
+            action = order["action"]
+            action_color = {"BUY": "#27ae60", "SELL": "#c0392b", "HOLD": "#7f8c8d"}.get(action, "#333")
+            money_invested = order.get("money_invested", 0.0)
+            pct_money_invested = order.get("pct_money_invested", 0.0)
+            shares = order.get("shares", 0)
+            reason = order.get("reason", "")
+            outcome_text, outcome_color = _describe_fill_outcome(order, dry_run)
+            stop_loss_price = order.get("stop_loss_price")
+            if stop_loss_price is None:
+                stop_loss_text = "N/A"
+            elif action == "BUY":
+                stop_loss_text = f"${stop_loss_price:,.2f} (estimated)"
+            else:
+                stop_loss_text = f"${stop_loss_price:,.2f}"
+        else:
+            action, action_color = "WATCHLIST", "#7f8c8d"
+            money_invested, pct_money_invested, shares = 0.0, 0.0, 0
+            reason = "Not selected this rebalance"
+            outcome_text, outcome_color = "N/A (not traded)", "#7f8c8d"
+            stop_loss_text = "N/A"
+
+        score_text = f"{score:.2%}" if score is not None else ""
+        close_price_text = f"${close_price:,.2f}" if close_price else ""
+        rows += (
+            f"<tr><td style='padding:4px 8px;'>{ticker}</td>"
+            f"<td style='padding:4px 8px; color:{action_color}; font-weight:bold;'>{action}</td>"
+            f"<td style='padding:4px 8px;'>{rank if rank is not None else ''}</td>"
+            f"<td style='padding:4px 8px;'>{score_text}</td>"
+            f"<td style='padding:4px 8px;'>{close_price_text}</td>"
+            f"<td style='padding:4px 8px;'>{status}</td>"
+            f"<td style='padding:4px 8px;'>${money_invested:,.2f}</td>"
+            f"<td style='padding:4px 8px;'>{pct_money_invested:.1%}</td>"
+            f"<td style='padding:4px 8px;'>{shares}</td>"
+            f"<td style='padding:4px 8px;'>{stop_loss_text}</td>"
+            f"<td style='padding:4px 8px;'>{reason}</td>"
+            f"<td style='padding:4px 8px; color:{outcome_color};'>{outcome_text}</td></tr>"
+        )
+
+    footnote = (
+        "<p style='font-size:0.85em; color:#7f8c8d;'>* This strategy_type's score is a "
+        "composite/residual/blended value, not a literal trailing price return.</p>"
+        if not is_base_score else ""
+    )
+    return f"""
+    <h3>Full Signal Universe (Top {top_n} Selected + Watchlist / Reserve)</h3>
+    <table style="border-collapse: collapse; width: 100%;">
+      <tr style="background:#f4f4f4;"><th style='padding:4px 8px; text-align:left;'>Ticker</th>
+          <th style='padding:4px 8px; text-align:left;'>Action</th>
+          <th style='padding:4px 8px; text-align:left;'>Momentum Rank</th>
+          <th style='padding:4px 8px; text-align:left;'>{score_header}</th>
+          <th style='padding:4px 8px; text-align:left;'>Current Close Price</th>
+          <th style='padding:4px 8px; text-align:left;'>Selection Status</th>
+          <th style='padding:4px 8px; text-align:left;'>Money Invest</th>
+          <th style='padding:4px 8px; text-align:left;'>% Money Invest</th>
+          <th style='padding:4px 8px; text-align:left;'>Shares</th>
+          <th style='padding:4px 8px; text-align:left;'>Stop-Loss Price</th>
+          <th style='padding:4px 8px; text-align:left;'>Reason</th>
+          <th style='padding:4px 8px; text-align:left;'>What Actually Happened</th></tr>
+      {rows}
+    </table>
+    {footnote}
+    """
+
+
 def build_no_action_summary_html(portfolio_name: str) -> str:
     """
     Standard-category HTML notice for a rebalance day (or --force-rebalance) that ran to

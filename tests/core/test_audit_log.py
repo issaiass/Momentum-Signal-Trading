@@ -99,6 +99,31 @@ class TestLogAlert:
         assert rows[0] == ALERTS_LOG_HEADER
         assert len(rows) == 3
 
+    def test_explicit_sender_is_used_as_is(self, tmp_path):
+        path = str(tmp_path / "alerts_log.csv")
+        log_alert("portfolio1", "STOP_LOSS_TRIGGERED", "CRITICAL", "msg1", log_path=path,
+                   sender="explicit@example.com")
+        with open(path) as f:
+            rows = list(csv.reader(f))
+        assert rows[0] == ALERTS_LOG_HEADER
+        assert rows[1][ALERTS_LOG_HEADER.index("sender")] == "explicit@example.com"
+
+    def test_default_sender_resolves_from_smtp_user_env_var(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SMTP_USER", "bot@gmail.com")
+        path = str(tmp_path / "alerts_log.csv")
+        log_alert("portfolio1", "STOP_LOSS_TRIGGERED", "CRITICAL", "msg1", log_path=path)
+        with open(path) as f:
+            rows = list(csv.reader(f))
+        assert rows[1][ALERTS_LOG_HEADER.index("sender")] == "bot@gmail.com"
+
+    def test_default_sender_blank_when_smtp_user_unset(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("SMTP_USER", raising=False)
+        path = str(tmp_path / "alerts_log.csv")
+        log_alert("portfolio1", "STOP_LOSS_TRIGGERED", "CRITICAL", "msg1", log_path=path)
+        with open(path) as f:
+            rows = list(csv.reader(f))
+        assert rows[1][ALERTS_LOG_HEADER.index("sender")] == ""
+
 
 class TestReadRecentAlerts:
     """

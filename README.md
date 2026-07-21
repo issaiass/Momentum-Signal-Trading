@@ -89,7 +89,9 @@ README says so on purpose.
   warning for fixed-capital portfolios, and an opt-in `persist_dry_run_state` flag for a
   no-IBKR-required persistent paper ledger, see `docs/RUNNING.md`'s "Restart and Resume Behavior"
 - Hash-chained, tamper-evident audit logs for trades, email commands, and alerts, three
-  separate logs, kept deliberately apart
+  separate logs, kept deliberately apart. The alert log records which outbound email account
+  (`SMTP_USER`) would notify each alert, self-resolving from the environment, no call site
+  changes needed, see `docs/ALERT_LOG.md`
 - Categorized email notifications (CRITICAL/STANDARD/PERIODIC/DAILY/WARNING) and pydantic-
   validated, fail-safe email-commanded remote actions (pause/resume/liquidate/adjust risk
   params/report), the rebalance summary email includes a "What Actually Happened" column

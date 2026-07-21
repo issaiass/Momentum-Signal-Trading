@@ -96,6 +96,13 @@ that tests enforce, don't casually violate these when editing:
   fetch is never cached, so a transient outage or a since-added API key doesn't block retrying.
   `core/macro_data.py` needs its own `FRED_API_KEY` (free, `fred.stlouisfed.org`), unset means
   the whole macro section is silently omitted, not an error.
+  `core/audit_log.py`'s `log_alert()` gained an optional `sender` param (default `None`, resolves
+  internally to `os.environ.get("SMTP_USER", "")`), recording which outbound email account this
+  alert would/did notify from, self-configuring so none of its ~27 existing call sites needed to
+  change. `ALERTS_LOG_HEADER` gained a matching `sender` column (appended before `row_hash`,
+  same "grow at the end" schema-evolution precedent as the trade log's own additions), see
+  `docs/ALERT_LOG.md`'s schema section for the full caveat (records the configured account, not
+  proof of actual delivery).
 - **`core/strategy_signals.py`** (NEW module, selectable-momentum-strategy plan), dispatches on
   `BacktestConfig.strategy_type` (`config.yaml`'s per-portfolio `default_risk`/`risk_overrides`,
   one of 11 allowed values, `ALLOWED_STRATEGY_TYPES` in `backtest/momentum_backtest.py`, see

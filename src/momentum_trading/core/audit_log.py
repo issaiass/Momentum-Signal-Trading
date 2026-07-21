@@ -65,12 +65,12 @@ def append_hash_chained_row(log_path: str, header: list[str], fields: list) -> s
     return row_hash
 
 
-ALERTS_LOG_HEADER = ["timestamp", "portfolio", "alert_type", "severity", "message", "row_hash"]
+ALERTS_LOG_HEADER = ["timestamp", "portfolio", "alert_type", "severity", "message", "sender", "row_hash"]
 ALERTS_LOG_PATH = str(logs_dir() / "alerts_log.csv")
 
 
 def log_alert(portfolio: str, alert_type: str, severity: str, message: str,
-              log_path: str = ALERTS_LOG_PATH) -> None:
+              log_path: str = ALERTS_LOG_PATH, sender: str | None = None) -> None:
     """
     Persistent, tamper-evident, queryable record of every
     alert/warning-worthy event, stop-loss/time-stop triggers, circuit-breaker
@@ -84,10 +84,28 @@ def log_alert(portfolio: str, alert_type: str, severity: str, message: str,
     severity : one of "CRITICAL", "WARNING", "INFO", matches the existing
     NotificationCategory tiers where applicable, not a new taxonomy.
 
+    sender : the outbound email account this alert would be/was notified from. Defaults
+    to None, which resolves internally to os.environ.get("SMTP_USER", ""), the same
+    pattern every other real SMTP call site in this project already uses (daily_runner.py,
+    notifications.py, email_diagnostics.py, risk_monitor.py). This means none of this
+    function's ~27 existing call sites need to pass anything new, the column
+    self-populates from whatever SMTP_USER is configured for this run (blank "" if
+    unset). This records the CONFIGURED sending account, not proof any specific alert
+    was actually emailed, some severities/call sites never trigger an email at all.
+
+    NOTE on schema evolution: this adds a 'sender' column (ALERTS_LOG_HEADER). If you
+    have an existing logs/alerts_log.csv from before this change, its header/rows won't
+    have this column (6 fields, not 7); appending new-schema rows to that file will
+    misalign columns. Archive/rename it before your first run after upgrading, so a
+    fresh file with the new header gets created, same remediation as log_orders()'s own
+    schema-evolution note.
+
     This is purely additive alongside the existing logger.warning()/logger.error()
     and email-alert calls at each call site, it does not replace or change either.
     """
-    fields = [datetime.now().isoformat(), portfolio, alert_type, severity, message]
+    if sender is None:
+        sender = os.environ.get("SMTP_USER", "")
+    fields = [datetime.now().isoformat(), portfolio, alert_type, severity, message, sender]
     append_hash_chained_row(log_path, ALERTS_LOG_HEADER, fields)
 
 

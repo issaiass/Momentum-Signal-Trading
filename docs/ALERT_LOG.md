@@ -33,7 +33,7 @@ the pseudo-portfolio name `"ALL"` rather than any single real portfolio.
 ## Schema
 
 ```
-timestamp, portfolio, alert_type, severity, message, row_hash
+timestamp, portfolio, alert_type, severity, message, sender, row_hash
 ```
 
 - **timestamp**, ISO 8601, when the alert fired.
@@ -43,12 +43,25 @@ timestamp, portfolio, alert_type, severity, message, row_hash
   tiers where applicable (not a new taxonomy to learn).
 - **message**, human-readable detail (the same information already in the paired console log
   line).
+- **sender**, the outbound email account this alert would be/was notified from. Self-resolves
+  from the `SMTP_USER` environment variable (blank `""` if unset), the same env var every real
+  SMTP call site in this project already reads (`daily_runner.py`, `notifications.py`,
+  `email_diagnostics.py`, `risk_monitor.py`). This records the CONFIGURED sending account for
+  this run, not proof any specific alert was actually emailed, some severities (e.g. `INFO`)
+  never trigger an email at all, and it says nothing about delivery success.
 - **row_hash**, tamper-evident hash chain, same convention as the trade log and email command
   log (each row's hash covers the previous row's hash plus this row's other fields, seeded with
   `"GENESIS"`). A plain CSV can still be freely rewritten by a script with direct file access,
   this makes tampering *detectable* (recomputed hashes won't match), not impossible. Verify with
   `verify_log_integrity()` (`execution/live_signal.py`), which works unchanged against this log
   since it shares the exact same convention.
+
+**Schema evolution note**: `sender` was added after this log's initial release. A pre-existing
+`logs/alerts_log.csv` written before this change has 6-field rows (no `sender`); appending
+new 7-field rows to that same file misaligns the header against older data. Archive/rename any
+pre-existing file before your first run after upgrading, so a fresh file with the new header is
+created, same remediation `log_orders()`'s own schema-evolution note already documents for the
+trade log.
 
 ## Every `alert_type`
 

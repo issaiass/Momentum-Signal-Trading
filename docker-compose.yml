@@ -14,11 +14,27 @@ services:
       # default for every cadence; that's config.yaml's holding_period instead. See
       # docs/DEPLOYMENT.md's "Choosing a rebalance cadence" section.
       - DAILY_RUNNER_CRON=${DAILY_RUNNER_CRON:-35 9 * * 1-5}
+      # RISK_MONITOR_CRON default (hourly 9am-4pm ET) is a generic catch-all. Recommended,
+      # regime-specific alternatives (docs/DEPLOYMENT.md's "Recommended risk_monitor.py timing",
+      # docs/RISK_CONSTRAINTS.md's "Stop-Loss Width"): short-term/weekly portfolios check twice
+      # daily (10:00 AM + 3:30 PM ET, skips the open's first-30-min noise, captures the day's
+      # near-final trend before close); long-term/monthly portfolios check once, at the close
+      # (RISK_MONITOR_CRON=45 15 * * 1-5, 3:45pm ET, closing prices set the official daily trend,
+      # avoids reacting to intraday whipsaws). This ONE value applies to EVERY portfolio listed
+      # in RISK_MONITOR_PORTFOLIOS below, it cannot give two portfolios two different schedules,
+      # nor give one portfolio two different times in a day, mixing regimes in one container
+      # needs a host-level cron/Task Scheduler `docker exec` workaround instead, see that
+      # DEPLOYMENT.md section for the copy-pasteable recipe.
       - RISK_MONITOR_CRON=${RISK_MONITOR_CRON:-0 9-16 * * 1-5}
       # Space-separated portfolio names to independently risk-monitor, one
       # cron entry each, must match names under config.yaml's portfolios: key.
       # Defaults to just "portfolio1"; add more (e.g. "portfolio1 portfolio2") if
       # config.yaml defines additional portfolios you want automated oversight for.
+      # Note: momentum/stop-loss strategy parameters (holding_period, lookback_period,
+      # stop_loss_pct, etc.) are NOT set here or anywhere in this file, they're per-portfolio
+      # fields in config.yaml's default_risk/risk_overrides, see config.example.yaml's comments
+      # and docs/RISK_CONSTRAINTS.md's "Recommended Config Presets"/"Stop-Loss Width" sections
+      # for the recommended values per short-term/long-term regime.
       - RISK_MONITOR_PORTFOLIOS=${RISK_MONITOR_PORTFOLIOS:-portfolio1}
       - FMP_API_KEY=${FMP_API_KEY:-}
       - EODHD_API_KEY=${EODHD_API_KEY:-}

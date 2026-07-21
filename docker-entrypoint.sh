@@ -8,6 +8,28 @@ set -e
 # schedule this replaced (daily-runner 9:35am ET weekdays, risk_monitor hourly
 # 9am-4pm ET weekdays).
 DAILY_RUNNER_CRON="${DAILY_RUNNER_CRON:-35 9 * * 1-5}"
+# RISK_MONITOR_CRON's shipped default (hourly, 9am-4pm ET) is a generic catch-all. Recommended,
+# regime-specific alternatives, both chosen to avoid known noisy windows (see
+# docs/DEPLOYMENT.md's "Recommended risk_monitor.py timing", docs/RISK_CONSTRAINTS.md's
+# "Stop-Loss Width" for the matching stop_loss_pct guidance):
+#   Short-term/weekly portfolios (config.yaml holding_period < 1): check twice daily,
+#     10:00 AM + 3:30 PM ET, skips the open's first-30-min "shakeout" noise, the 3:30 check
+#     captures the day's near-final trend ahead of the close.
+#   Long-term/monthly portfolios (holding_period >= 1): check once, at the close,
+#     RISK_MONITOR_CRON="45 15 * * 1-5" (3:45pm ET), closing prices set the official daily
+#     trend, checking only there avoids reacting to intraday whipsaws that reverse before the
+#     bell.
+# This single value applies to EVERY portfolio in RISK_MONITOR_PORTFOLIOS below (see the loop
+# that generates one crontab line per name, all sharing this same schedule) -- it cannot give
+# two portfolios two different schedules, nor give one portfolio two different times in a day
+# (cron's comma syntax, e.g. "0,30 10,15 * * 1-5", fires at the CROSS-PRODUCT of both fields:
+# 10:00, 10:30, 15:00, 15:30, not just the two times you actually want). A container mixing a
+# short-term and a long-term portfolio needs a host-level cron/Task Scheduler `docker exec`
+# workaround for the one that doesn't match this container's own schedule, see
+# docs/DEPLOYMENT.md's "Recommended risk_monitor.py timing" section for the copy-pasteable
+# recipe (drop that portfolio from RISK_MONITOR_PORTFOLIOS below, add the extra check(s) as a
+# separate host-level `docker exec momentum-signal python -m momentum_trading.risk.risk_monitor
+# --portfolio <name>` cron/Task Scheduler entry instead).
 RISK_MONITOR_CRON="${RISK_MONITOR_CRON:-0 9-16 * * 1-5}"
 
 # Space-separated portfolio names to independently risk-monitor, one cron
@@ -24,6 +46,17 @@ RISK_MONITOR_CRON="${RISK_MONITOR_CRON:-0 9-16 * * 1-5}"
 # ever covers a single portfolio):
 #   RISK_MONITOR_PORTFOLIOS=portfolio1 portfolio2 portfolio3
 # One risk_monitor.py cron entry (and one log file) gets generated per name listed.
+#
+# Momentum/stop-loss strategy parameters (holding_period, lookback_period, stop_loss_pct,
+# auto_execute_stop_loss, attach_broker_stop_loss, etc.) are NOT set here or anywhere in this
+# file, they're per-portfolio fields in config.yaml's default_risk/risk_overrides. Recommended
+# starting points per regime (see config.example.yaml's own comments and
+# docs/RISK_CONSTRAINTS.md's "Recommended Config Presets"/"Stop-Loss Width" sections):
+#   Short-term/weekly (holding_period: 0.25): stop_loss_pct: 0.10, tighter control, cuts
+#     downside rapidly for a noisier, faster-rotating signal.
+#   Long-term/monthly (holding_period: 1): stop_loss_pct: 0.15-0.20, room to breathe through
+#     normal pullbacks; still a FIXED stop from entry, not a trailing stop, no trailing-stop
+#     mechanism exists in this codebase today, see that "Stop-Loss Width" section for why.
 RISK_MONITOR_PORTFOLIOS="${RISK_MONITOR_PORTFOLIOS:-portfolio1}"
 
 # Overridable so tests/test_docker_entrypoint.py can point this at a temp file instead

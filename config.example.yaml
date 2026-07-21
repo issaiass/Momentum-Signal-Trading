@@ -231,7 +231,13 @@ default_risk:
                                    # name even under the same flat cap. Never allows a single
                                    # position's vol contribution to exceed this budget,
                                    # regardless of how strong the momentum signal is.
-  stop_loss_pct: 0.12             # per-position stop-loss, as a fraction below entry price
+  stop_loss_pct: 0.12             # per-position stop-loss, as a fraction below entry price.
+                                   # FIXED from entry, not trailing (never ratchets up as the
+                                   # position gains, see docs/RISK_CONSTRAINTS.md's "Stop-Loss
+                                   # Width"). Recommended: 0.10 for a short-term/weekly portfolio
+                                   # (tighter control), 0.15-0.20 for a long-term/monthly
+                                   # portfolio (room to breathe through normal pullbacks, still
+                                   # not a true trailing stop, see that doc section)
   auto_execute_stop_loss: false   # true = auto-sell on stop-loss trigger; false = flag + email only
   attach_broker_stop_loss: false  # LIVE-ONLY. Belt-and-suspenders alongside
                                    # auto_execute_stop_loss above, NOT a replacement for it:

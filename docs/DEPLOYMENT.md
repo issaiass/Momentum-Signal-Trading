@@ -673,3 +673,58 @@ signal quality. See `EMAIL_REPORTING.md`/`ALERT_LOG.md` for what that alert look
 process (`risk_monitor.py`), hourly by default, and doesn't need to change for any cadence choice
 here.
 
+### Recommended `risk_monitor.py` timing (Short-Term vs. Long-Term)
+
+`risk_monitor.py`'s check frequency is a separate tuning question from `DAILY_RUNNER_CRON`'s
+rebalance cadence above: it's about *when during the trading day* the independent oversight
+process re-derives P&L and checks the drawdown threshold, not how often the strategy itself
+rebalances. The recommended starting points differ by regime, both chosen to avoid known noisy
+windows:
+
+| Regime | Recommended check times (ET) | Why | Cron expression(s) |
+|---|---|---|---|
+| Short-Term (weekly, `holding_period < 1`) | 10:00 AM and 3:30 PM | Skips the first 30 minutes' post-open "shakeout" noise; the 3:30 check captures the day's near-final trend ahead of the close | `0 10 * * 1-5` (10:00 AM) **and** `30 15 * * 1-5` (3:30 PM), two separate entries |
+| Long-Term (monthly, `holding_period >= 1`) | 3:45 PM - 4:00 PM (closing bell) | The closing print sets the official daily trend; checking only at the close avoids reacting to intraday whipsaws that reverse before the bell | `45 15 * * 1-5` (3:45 PM), one entry |
+
+**Current limitation, confirmed by reading `docker-entrypoint.sh`**: `RISK_MONITOR_CRON` is a
+single cron expression applied identically to *every* portfolio listed in
+`RISK_MONITOR_PORTFOLIOS` (one `for p in $RISK_MONITOR_PORTFOLIOS` loop, reusing the same
+`$RISK_MONITOR_CRON` each iteration). Out of the box, in Docker:
+- You cannot give two different portfolios two different check-time schedules (e.g. a
+  short-term portfolio checked twice a day, a long-term one checked only at the close) inside
+  the same container purely via `.env`.
+- You cannot even give ONE portfolio two different times a day (10:00 AM *and* 3:30 PM) from a
+  single `RISK_MONITOR_CRON` value, cron's per-field comma syntax (`0,30 10,15 * * 1-5`) fires at
+  the cross-product of both fields (10:00, 10:30, 15:00, 15:30), not just the two times you
+  actually want.
+
+**Workaround, no code change required**: drop the portfolio(s) needing a non-default schedule
+from `RISK_MONITOR_PORTFOLIOS`, then add the extra check(s) as HOST-level cron (Linux/Mac) or
+Task Scheduler (Windows) entries that `docker exec` into the running container at the exact
+times you want, each entry fully independent:
+
+```bash
+# Linux/Mac host crontab (crontab -e), for a short-term portfolio "portfolio2" that's been
+# removed from RISK_MONITOR_PORTFOLIOS in .env so the container's own schedule skips it:
+0 10 * * 1-5  docker exec momentum-signal python -m momentum_trading.risk.risk_monitor --portfolio portfolio2 >> /path/to/logs/risk_monitor_portfolio2_manual.log 2>&1
+30 15 * * 1-5 docker exec momentum-signal python -m momentum_trading.risk.risk_monitor --portfolio portfolio2 >> /path/to/logs/risk_monitor_portfolio2_manual.log 2>&1
+```
+
+```powershell
+# Windows Task Scheduler, two separate tasks, same idea:
+schtasks /create /tn "RiskMonitor_portfolio2_1000" /tr "docker exec momentum-signal python -m momentum_trading.risk.risk_monitor --portfolio portfolio2" /sc weekly /d MON,TUE,WED,THU,FRI /st 10:00
+schtasks /create /tn "RiskMonitor_portfolio2_1530" /tr "docker exec momentum-signal python -m momentum_trading.risk.risk_monitor --portfolio portfolio2" /sc weekly /d MON,TUE,WED,THU,FRI /st 15:30
+```
+
+Leave any portfolio(s) that DO want the container's own single default schedule in
+`RISK_MONITOR_PORTFOLIOS` as usual, e.g. a long-term portfolio at the one-time
+`RISK_MONITOR_CRON=45 15 * * 1-5` close-only check.
+
+**Native (non-Docker) installs have no such limitation**: `python -m
+momentum_trading.risk.risk_monitor --portfolio <name>` is already an independently invokable
+command per portfolio, so a plain host crontab or Task Scheduler entry per portfolio, at
+whatever time(s) that portfolio's regime calls for, works out of the box, no workaround needed.
+This limitation is specific to `docker-entrypoint.sh`'s current single-schedule-per-container
+crontab generation. See `docs/RISK_CONSTRAINTS.md`'s "Recommended Config Presets" for the
+matching `stop_loss_pct` width recommendation per regime.
+

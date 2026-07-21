@@ -278,6 +278,61 @@ risk_overrides:
   auto_execute_stop_loss: false   # independent, unaffected by attach_broker_stop_loss's default
 ```
 
+## Stop-Loss Width: Fixed-From-Entry, Not Trailing [`stop_loss_pct`]
+
+**What `stop_loss_pct` actually measures today, confirmed by reading both code paths**:
+`(current_price - entry_price) / entry_price`, checked against `-stop_loss_pct`, in BOTH the
+backtest (`backtest/momentum_backtest.py`'s stop-loss check, `dd <= -config.stop_loss_pct`
+against `entry_prices[ticker]`) and live (`auto_execute_stop_loss`'s Python-side check, and
+`attach_broker_stop_loss`'s broker-side `STP` order, `auxPrice = expected_prices[ticker] * (1 -
+stop_loss_pct)`, both anchored to the entry fill, never to the position's highest price since
+entry). **This is a fixed stop from entry, not a trailing stop.** A true trailing stop ratchets
+its exit level up as the position makes new highs, locking in unrealized gains as they accrue;
+`stop_loss_pct` never moves once a position is opened (only a mid-position `ADJUST_PARAM` email
+command, or a config edit + restart, changes it, and even then it's still measured from the
+original entry price, not from any subsequent high).
+
+**Recommended width by momentum regime** (this project's cadence terminology,
+`holding_period < 1` = short-term/weekly, `holding_period >= 1` = long-term/monthly, matching
+the "Recommended Config Presets" section below):
+
+| Regime | Recommended `stop_loss_pct` | Rationale | What this project delivers today |
+|---|---|---|---|
+| Short-Term (weekly) | `0.10` | Tighter control suits a short-term/volatile regime, cuts downside rapidly, the position is expected to rotate out within the holding period anyway | Exact match, a fixed 10% stop from entry is the tighter-control behavior described |
+| Long-Term (monthly) | `0.15` - `0.20` | Gives winning positions room to breathe through normal pullbacks without an early, premature exit, while still bounding a structural-crash loss | **Partial match only**, see below |
+
+**Why "partial match" for the long-term row**: widening `stop_loss_pct` to `0.15`-`0.20` does
+reproduce the "room to breathe, don't get shaken out by a normal pullback" half of the cited
+research, a wider fixed stop is genuinely less likely to trigger on routine volatility. It does
+**not** reproduce the other half, "lock in gains as the position runs up," a fixed stop measured
+from entry offers zero additional protection to an already-profitable position beyond the same
+flat percentage every other position gets; a position up 40% still only exits if it round-trips
+all the way back down 15-20% from its ORIGINAL entry, not from its peak. If you specifically want
+the gain-locking behavior, that's a genuine trailing stop, which does not exist anywhere in this
+codebase today, neither the Python-side `auto_execute_stop_loss` check nor the broker-side
+`attach_broker_stop_loss` bracket (IBKR's native `TRAIL` order type exists and would implement
+this, but `attach_broker_stop_loss` submits a plain `STP` at a fixed `auxPrice`, not a `TRAIL`
+order that IBKR itself would ratchet). Tracked as a real, documented gap, not implemented, see
+`README.md`'s Known Gaps.
+
+**Configuring the recommended widths** (`config.yaml`, per-portfolio):
+
+```yaml
+portfolios:
+  long_term_portfolio:
+    risk_overrides:
+      stop_loss_pct: 0.18           # room to breathe for a monthly-cadence position; still a
+                                     # FIXED stop from entry, not trailing, see docs/RISK_CONSTRAINTS.md
+  short_term_portfolio:
+    risk_overrides:
+      stop_loss_pct: 0.10           # tighter control for a weekly-cadence, noisier signal
+```
+
+Both regimes can layer `auto_execute_stop_loss: true` (Python-side auto-sell on trigger,
+checked every day this app runs) and/or `attach_broker_stop_loss: true` (a real IBKR bracket at
+BUY time, protects the position even when this app isn't running), independent of which width you
+pick, see "Broker-Side Protective Stop" above.
+
 ## Position Size Hard-Cap [Mandatory tier]
 
 `max_position_weight` (default `0.35`): a flat, single-name cap, identical for every ticker
@@ -471,6 +526,11 @@ max_bid_ask_spread_pct: null    # default, disabled (requires a live, paid real-
 top_n: 10
 sizing_method: inverse_vol
 max_position_weight: 0.35
+stop_loss_pct: 0.18             # room to breathe for a monthly-cadence position, wider than
+                                 # the shipped 0.12 default; still fixed-from-entry, not
+                                 # trailing, see "Stop-Loss Width" above
+auto_execute_stop_loss: false   # opt-in, see "Stop-Loss Width" above for why this remains a
+                                 # per-portfolio choice regardless of regime
 ```
 
 | Field | Value | Why |
@@ -484,6 +544,7 @@ max_position_weight: 0.35
 | `portfolio_vol_lookback` | `21` | ~1 month, matches the monthly rebalance cadence's own natural timescale |
 | `use_absolute_momentum` | `false` | Same opt-in precedent as `skip_month_guardrail`, a real signal-construction change, not enabled by default here either |
 | `max_bid_ask_spread_pct` | `null` | Disabled by default, real-time market data is a real operational dependency (paid subscription), not something to silently assume is available |
+| `stop_loss_pct` | `0.18` | Wider fixed stop for the long-term regime, room to breathe through normal pullbacks, see "Stop-Loss Width" above for why this is not a true trailing stop |
 
 ### Short-Term Momentum (Weekly)
 
@@ -506,6 +567,9 @@ max_bid_ask_spread_pct: null    # same reasoning as the monthly preset
 top_n: 5                        # more concentrated, a shorter lookback carries a noisier signal
 sizing_method: inverse_vol      # kept as the safer default under short-term noise
 max_position_weight: 0.35
+stop_loss_pct: 0.10             # tighter control for the weekly regime's noisier signal, see
+                                 # "Stop-Loss Width" above
+auto_execute_stop_loss: false   # opt-in, same reasoning as the monthly preset
 ```
 
 | Field | Value | Why |
@@ -519,6 +583,7 @@ max_position_weight: 0.35
 | `portfolio_vol_lookback` | `10` | ~2 weeks, more responsive than the monthly preset's 21, matching the weekly cadence's own faster timescale |
 | `use_absolute_momentum` | `false` | Same opt-in precedent as the monthly preset |
 | `max_bid_ask_spread_pct` | `null` | Same reasoning as the monthly preset |
+| `stop_loss_pct` | `0.10` | Tighter control suits the short-term/noisier regime, cuts downside rapidly, see "Stop-Loss Width" above |
 
 **Treat the short-term preset as unvalidated**, same caveat `docs/STRATEGY_THEORY.md` already
 states for weekly-scale momentum in general, this is a genuine departure from the 3-12 month

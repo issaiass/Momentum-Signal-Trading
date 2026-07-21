@@ -395,7 +395,13 @@ that tests enforce, don't casually violate these when editing:
   connections), cancelling any resting `(symbol, SELL, STP)` order matching this run's SELL
   batch via `cancelOrder(orderId)` before that SELL is submitted, broker-truth-based, not
   dependent on any locally-cached order ID, zero extra IBKR round trip when
-  `attach_broker_stop_loss` is off (the default).
+  `attach_broker_stop_loss` is off (the default). `stop_loss_pct` itself (shared by
+  `auto_execute_stop_loss` and this bracket's `auxPrice`) is FIXED from entry price in both
+  paths, not trailing, confirmed by reading both, it never ratchets as a position gains; see
+  `docs/RISK_CONSTRAINTS.md`'s "Stop-Loss Width" section for recommended per-regime values
+  (`0.10` short-term, `0.15`-`0.20` long-term) and why the wider long-term value only reproduces
+  half of the cited "trailing stop" research (room to breathe, not gain-locking, no
+  `TRAIL`-order-type or any trailing mechanism exists in this codebase).
   `is_outside_all_trading_windows(exchange, allow_extended_hours, now)` (pure, `now` injectable
   for testing, defaults to real `pd.Timestamp.now(tz="America/New_York")`) backs a proactive
   `WARNING` logged at the very top of `place_orders_ibkr()`, before ever connecting, when the
@@ -464,7 +470,12 @@ that tests enforce, don't casually violate these when editing:
   never actually reachable. If editing this default again, add a test exercising `main()`'s own
   default (not just `compute_realized_and_open_pnl()` with an explicit `log_path`, which alone
   would not have caught this), see `tests/test_governance.py::TestRiskMonitor`'s two regression
-  tests for the pattern.
+  tests for the pattern. `docker-entrypoint.sh`'s `RISK_MONITOR_CRON` applies ONE schedule to
+  every portfolio listed in `RISK_MONITOR_PORTFOLIOS` (one shared cron line generated per
+  loop iteration), confirmed by reading the script, there is no per-portfolio schedule env var;
+  giving a short-term and a long-term portfolio genuinely different check times in the same
+  container needs a host-level cron/Task Scheduler `docker exec` workaround, not a `.env` change,
+  see `docs/DEPLOYMENT.md`'s "Recommended `risk_monitor.py` timing" section.
 - **`interfaces/`**, email notifications (categorized CRITICAL/STANDARD/PERIODIC/DAILY/WARNING,
   CRITICAL can never be filtered, DAILY uniquely defaults to OFF when unconfigured, every other
   filterable category defaults to ON) and pydantic-validated email-commanded remote actions.

@@ -419,6 +419,19 @@ answer whether the strategy actually works.
   fetch call sites, plus a defensive `INSUFFICIENT_PRICE_HISTORY` warning for the residual edge
   case (a vendor genuinely lacking that much real history for a ticker) that sizing alone can't
   fix. LIVE-ONLY, `lookback_period` has no effect on the backtest engine.
+- **Stop-loss is fixed-from-entry, not trailing, and `risk_monitor.py`'s Docker schedule is one
+  value shared by every portfolio, now documented, no code change**: `stop_loss_pct` is measured
+  from each position's entry price in both the backtest and live paths, confirmed by reading
+  both, it never ratchets up as a position gains, so widening it to 15-20% for a long-term/
+  monthly portfolio (as literature recommends) gives room to breathe through normal pullbacks
+  but does NOT lock in gains the way a genuine trailing stop would; no trailing-stop mechanism
+  exists anywhere in this codebase today. Separately, Docker's `RISK_MONITOR_CRON` applies one
+  schedule to every portfolio in `RISK_MONITOR_PORTFOLIOS`, so a container mixing a short-term
+  portfolio (recommended: check twice daily, 10:00 AM + 3:30 PM ET) with a long-term one
+  (recommended: closing-bell only, 3:45 PM ET) can't express both schedules via `.env` alone.
+  Both gaps, recommended widths/timings, and a zero-code-change host-cron workaround for the
+  scheduling gap are documented in `docs/RISK_CONSTRAINTS.md`'s "Stop-Loss Width" section and
+  `docs/DEPLOYMENT.md`'s "Recommended `risk_monitor.py` timing" section.
 
 ### Who should allocate capital here
 

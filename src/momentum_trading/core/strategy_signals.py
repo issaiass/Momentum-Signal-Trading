@@ -341,8 +341,13 @@ def resolve_strategy_picks(
     Centralizes the "cross-sectional top_n cutoff vs. absolute per-ticker selection" decision,
     shared by run() (live) and generate_strategy_monthly_picks() (backtest), so they can't
     diverge on it. Every strategy_type other than "absolute_momentum" replicates
-    get_top_etfs()'s exact behavior (ranks_row.nsmallest(top_n)), just against a single
+    get_top_etfs()'s exact behavior (ranks_row.dropna().nsmallest(top_n)), just against a single
     already-sliced row instead of a full history DataFrame.
+
+    dropna() BEFORE nsmallest(), not after: see get_top_etfs()'s (execution/live_signal.py)
+    docstring for the full real-bug writeup, pandas' nsmallest(n) backfills with NaN rows when
+    fewer than n non-null values exist, which could silently select a NaN-ranked (e.g.
+    liquidity-filtered) ticker into top_n.
     """
     strategy_type = getattr(cfg, "strategy_type", "momentum")
 
@@ -351,7 +356,7 @@ def resolve_strategy_picks(
 
     if ranks_row is None:
         return []
-    return ranks_row.nsmallest(top_n).index.tolist()
+    return ranks_row.dropna().nsmallest(top_n).index.tolist()
 
 
 def generate_strategy_monthly_picks(

@@ -947,7 +947,9 @@ class TestRunLiquidityFilter:
         # C has the strongest momentum and, with the filter OFF, must be picked as before.
         assert set(orders.keys()) == {"C"}
 
-    def test_filtered_ticker_still_appears_in_full_signal_universe_as_watchlist(self, monkeypatch, tmp_path):
+    def test_filtered_ticker_shows_excluded_illiquid_not_watchlist(self, monkeypatch, tmp_path):
+        # Epic 2: a liquidity-filtered ticker (positive score, rank NaN'd out) gets its own
+        # "Excluded (Illiquid)" status, no longer lumped into the old flat "Watchlist / Reserve".
         prices = self._ranked_prices()
         monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
         self._install_volume(monkeypatch, prices)
@@ -962,8 +964,57 @@ class TestRunLiquidityFilter:
 
         universe = orders.full_signal_universe
         assert "C" in universe  # not silently invisible
-        assert universe["C"]["selection_status"] == "Watchlist / Reserve"
+        assert universe["C"]["selection_status"] == "Excluded (Illiquid)"
         assert universe["C"]["rank"] is None  # NaN-ranked, correctly blank not a stale number
+        assert universe["C"]["signal_score"] > 0  # positive momentum, excluded for liquidity only
+
+    def test_illiquid_flag_off_never_produces_illiquid_status(self, monkeypatch, tmp_path):
+        # use_liquidity_filter=False: C's rank is never touched by the (unused) volume data, so
+        # it stays a normal ranked ticker, "Excluded (Illiquid)" must never appear.
+        prices = self._ranked_prices()
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        self._install_volume(monkeypatch, prices)
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False)  # flag omitted, default False
+        orders = live_signal.run(
+            tickers=["A", "B", "C"], current_holdings={}, total_value=1000.0, cfg=cfg,
+            top_n=1, lookback_period=1.0, dry_run=True, **self._run_kwargs(tmp_path),
+        )
+
+        statuses = {t: info["selection_status"] for t, info in orders.full_signal_universe.items()}
+        assert "Excluded (Illiquid)" not in statuses.values()
+
+    def test_all_tickers_illiquid_holds_cash_never_pads_picks_with_nan_ranked(self, monkeypatch, tmp_path):
+        # Real, confirmed bug (found via Epic 2's real-deployed-code verification): when EVERY
+        # ticker gets liquidity-filtered (fewer valid ranks than top_n), the old nsmallest()
+        # call would pad picks with NaN-ranked (illiquid) tickers anyway. With both A and B
+        # illiquid and top_n=2 (the whole universe), picks must come back EMPTY, not ['A', 'B'].
+        prices = self._ranked_prices()
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        monkeypatch.chdir(tmp_path)
+
+        def all_thin_ohlcv(tickers, **k):
+            result = {}
+            for t in tickers:
+                result[t] = pd.DataFrame({
+                    "open": prices[t], "high": prices[t], "low": prices[t], "close": prices[t],
+                    "volume": 10.0,
+                }, index=prices.index)
+            return result
+        monkeypatch.setattr(live_signal, "fetch_ohlcv_for_tickers", all_thin_ohlcv)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False, use_liquidity_filter=True,
+                              min_avg_dollar_volume=1_000_000.0)
+        orders = live_signal.run(
+            tickers=["A", "B"], current_holdings={}, total_value=1000.0, cfg=cfg,
+            top_n=2, lookback_period=1.0, dry_run=True, **self._run_kwargs(tmp_path),
+        )
+
+        assert set(orders.keys()) == set()  # no BUYs, nothing illiquid ever selected
+        universe = orders.full_signal_universe
+        assert universe["A"]["selection_status"] == "Excluded (Illiquid)"
+        assert universe["B"]["selection_status"] == "Excluded (Illiquid)"
 
     def test_no_volume_data_available_logs_warning_and_does_not_crash(self, monkeypatch, tmp_path, caplog):
         prices = self._ranked_prices()
@@ -1350,7 +1401,69 @@ class TestFullSignalUniverse:
         universe = orders.full_signal_universe
 
         assert universe["A"]["selection_status"] == "Selected (Absolute Momentum)"
-        assert universe["B"]["selection_status"] == "Watchlist / Reserve"
+        # B's own trailing momentum is negative (declining price trend), so it's now
+        # "Excluded (Negative Momentum)", not the old flat "Watchlist / Reserve" (Epic 2).
+        assert universe["B"]["selection_status"] == "Excluded (Negative Momentum)"
+
+
+class TestExcludedVsWatchlistStatus:
+    """
+    Epic 2 of the "Rebalance Reporting Clarity & Selection-Logic Fixes" plan: a non-selected
+    ticker with negative momentum is a genuinely different signal than one that's merely
+    outranked while still positive, they were both flattened into "Watchlist / Reserve" before
+    this existed. Applies across all 11 strategy_types (score sign is a reasonable constructive/
+    destructive signal even for composite/residual/blended scores, not only the 7 base-score
+    types where the score is a literal trailing return).
+    """
+
+    def _prices_with_negative_ticker(self, seed=41):
+        dates = pd.bdate_range("2024-01-01", "2024-05-15")
+        rng = np.random.default_rng(seed)
+        n = len(dates)
+        a = np.linspace(50, 100, n) * (1 + rng.normal(0, 0.0005, n))  # strong positive, selected
+        b = np.linspace(50, 85, n) * (1 + rng.normal(0, 0.0005, n))   # positive, selected
+        c = np.linspace(50, 55, n) * (1 + rng.normal(0, 0.0005, n))   # weak positive, watchlist
+        e = np.linspace(100, 50, n) * (1 + rng.normal(0, 0.0005, n))  # declining, excluded
+        return pd.DataFrame({"A": a, "B": b, "C": c, "E": e}, index=dates)
+
+    def test_negative_score_excluded_under_base_score_strategy(self, monkeypatch, tmp_path):
+        prices = self._prices_with_negative_ticker()
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False)  # default strategy_type=momentum
+        orders = live_signal.run(
+            tickers=["A", "B", "C", "E"], current_holdings={}, total_value=1000.0, cfg=cfg,
+            top_n=2, lookback_period=1.0, dry_run=True,
+            log_path=str(tmp_path / "trade_log.csv"),
+            signal_rankings_log_path=str(tmp_path / "signal_rankings_log.csv"),
+        )
+        universe = orders.full_signal_universe
+
+        # C: still-positive momentum, just outranked, stays Watchlist.
+        assert universe["C"]["selection_status"] == "Watchlist / Reserve"
+        # E: negative momentum, gets the new distinct status.
+        assert universe["E"]["selection_status"] == "Excluded (Negative Momentum)"
+        assert universe["E"]["signal_score"] < 0
+
+    def test_negative_score_excluded_under_composite_strategy_type(self, monkeypatch, tmp_path):
+        prices = self._prices_with_negative_ticker()
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False,
+                              strategy_type="multi_timeframe_composite",
+                              multi_timeframe_lookbacks=[1, 2, 3])
+        orders = live_signal.run(
+            tickers=["A", "B", "C", "E"], current_holdings={}, total_value=1000.0, cfg=cfg,
+            top_n=2, lookback_period=1.0, dry_run=True,
+            log_path=str(tmp_path / "trade_log.csv"),
+            signal_rankings_log_path=str(tmp_path / "signal_rankings_log.csv"),
+        )
+        universe = orders.full_signal_universe
+
+        assert universe["E"]["selection_status"] == "Excluded (Negative Momentum)"
+        assert universe["E"]["signal_score"] < 0
 
 
 class TestLogSignalRankings:
@@ -1409,6 +1522,23 @@ class TestLogSignalRankings:
         assert result["valid"] is True
         assert result["rows_checked"] == 2
 
+    def test_excluded_ticker_gets_excluded_action_not_watchlist(self, tmp_path):
+        universe = {
+            "A": {"rank": 1, "signal_score": 0.15, "close_price": 100.0, "selection_status": "Top 1 (Selected)"},
+            "B": {"rank": 2, "signal_score": 0.05, "close_price": 50.0, "selection_status": "Watchlist / Reserve"},
+            "E": {"rank": None, "signal_score": -0.10, "close_price": 30.0, "selection_status": "Excluded (Negative Momentum)"},
+            "F": {"rank": None, "signal_score": 0.20, "close_price": 20.0, "selection_status": "Excluded (Illiquid)"},
+        }
+        orders = {"A": {"action": "BUY", "shares": 5, "reason": "drift $500.00", "money_invested": 500.0,
+                         "pct_money_invested": 1.0, "stop_loss_price": 90.0}}
+        path = str(tmp_path / "signal_rankings_log.csv")
+        log_signal_rankings(universe, orders, dry_run=True, path=path)
+        import pandas as pd
+        df = pd.read_csv(path)
+        assert df[df["ticker"] == "B"].iloc[0]["action"] == "WATCHLIST"
+        assert df[df["ticker"] == "E"].iloc[0]["action"] == "EXCLUDED"
+        assert df[df["ticker"] == "F"].iloc[0]["action"] == "EXCLUDED"
+
     def test_rows_written_in_momentum_rank_order(self, tmp_path):
         # Deliberately out-of-order dict insertion (C rank=1 last, A rank=2 first, B unranked),
         # rows must land in the CSV sorted by rank ascending, unranked trailing by score desc.
@@ -1457,6 +1587,23 @@ class TestGetTopEtfs:
         # unnecessary in practice, nsmallest() degrades gracefully on its own.
         picks = get_top_etfs(self._ranks(), top_n=10)
         assert len(picks) == 5
+
+    def test_nan_ranked_ticker_never_selected_even_to_pad_top_n(self):
+        # Real, confirmed bug (found via Epic 2's real-deployed-code verification of the
+        # liquidity filter): pandas' nsmallest(n) backfills with NaN rows when fewer than n
+        # non-null values exist (pd.Series([nan, nan]).nsmallest(2) returns BOTH nans, not an
+        # empty Series), so a NaN-ranked ticker (e.g. zeroed out by use_liquidity_filter) could
+        # still get selected whenever fewer than top_n tickers had a valid rank. Two tickers,
+        # one valid rank, one NaN, top_n=2 (more than the valid count): must return only the
+        # valid one, never padded with the NaN entry.
+        ranks = pd.DataFrame({"SPY": [1], "QQQ": [np.nan]})
+        picks = get_top_etfs(ranks, top_n=2)
+        assert picks == ["SPY"]
+
+    def test_all_nan_ranked_returns_empty_not_padded(self):
+        ranks = pd.DataFrame({"SPY": [np.nan], "QQQ": [np.nan]})
+        picks = get_top_etfs(ranks, top_n=2)
+        assert picks == []
 
 
 class TestApplyAbsoluteMomentumFilter:

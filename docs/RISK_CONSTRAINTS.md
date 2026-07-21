@@ -438,9 +438,20 @@ consulting rank at all. An illiquid ticker with positive absolute momentum is **
 under that one `strategy_type` today. If you run `absolute_momentum` and need a liquidity
 constraint too, that combination isn't covered by this feature yet.
 
-A ticker excluded by this filter still appears in the rebalance email's "Full Signal Universe"
-table and `logs/signal_rankings_log_<portfolio>.csv` as `"Watchlist / Reserve"` with a blank
-`Momentum Rank`, an accurate reflection of "excluded for illiquidity," not silently invisible.
+A ticker excluded by this filter appears in the rebalance email's "Full Signal Universe" table
+and `logs/signal_rankings_log_<portfolio>.csv` as `"Excluded (Illiquid)"` (`action = "EXCLUDED"`,
+distinct from `"Watchlist / Reserve"`, see Epic 2 of the "Rebalance Reporting Clarity &
+Selection-Logic Fixes" plan) with a blank `Momentum Rank`, an accurate reflection of "excluded
+for illiquidity," not silently invisible.
+
+**A second real, confirmed bug, found and fixed via that same epic's real-deployed-code
+verification**: `resolve_strategy_picks()`/`get_top_etfs()` previously called `nsmallest(top_n)`
+directly on the (possibly NaN-containing) ranks, and `pandas.Series.nsmallest(n)` backfills with
+NaN rows when fewer than `n` non-null values exist, so a liquidity-filtered ticker could still
+get selected into `top_n` whenever fewer than `top_n` tickers had a valid rank, e.g. every
+ticker in a small portfolio getting filtered at once. Both functions now call `.dropna()` before
+`.nsmallest()`, guaranteeing a filtered ticker can never be selected, correctly returning FEWER
+than `top_n` picks (down to zero, holding cash) rather than padding with invalid ones.
 
 ## Regime Filter: Volatility Dimension
 

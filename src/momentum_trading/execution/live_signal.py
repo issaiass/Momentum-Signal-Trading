@@ -394,9 +394,22 @@ def assign_ranks(df_returns: pd.DataFrame) -> pd.DataFrame:
 
 
 def get_top_etfs(df_ranks: pd.DataFrame, top_n: int = 10) -> list[str]:
-    """Live version returns a plain list for "today", not a Series over history."""
+    """
+    Live version returns a plain list for "today", not a Series over history.
+
+    dropna() BEFORE nsmallest(), not after: a real, confirmed bug found (and fixed) via Epic 2's
+    real-deployed-code verification of the liquidity filter, pandas' nsmallest(n) backfills with
+    NaN rows when fewer than n non-null values exist (confirmed directly:
+    pd.Series([nan, nan]).nsmallest(2) returns BOTH nan entries, not an empty Series), so a
+    NaN-ranked ticker (e.g. one zeroed out by use_liquidity_filter) could still get selected into
+    top_n whenever fewer than top_n tickers had a valid rank, silently defeating the whole point
+    of any rank-NaN'ing filter in exactly the case it matters most. dropna() first guarantees a
+    NaN-ranked ticker can never be selected, and correctly returns FEWER than top_n picks (down
+    to zero) rather than padding with invalid ones, consistent with this project's existing
+    "hold cash safely rather than fake a full picks list" behavior.
+    """
     latest = df_ranks.iloc[-1]
-    return latest.nsmallest(top_n).index.tolist()
+    return latest.dropna().nsmallest(top_n).index.tolist()
 
 
 def apply_absolute_momentum_filter(
@@ -1052,9 +1065,11 @@ def log_signal_rankings(full_signal_universe: dict, orders: dict, dry_run: bool,
 
     For a ticker present in `orders` (selected this rebalance, whether traded or held), action/
     reason/shares/money_invested/pct_money_invested/stop_loss_price come from that order dict.
-    For a ticker NOT in `orders` (ranked but not selected, "watchlist"), action is "WATCHLIST",
-    reason/stop_loss_price are blank, shares/money_invested/pct_money_invested are 0, per the
-    "watchlist tickers show $0.00/0.00%%, no position exists" design.
+    For a ticker NOT in `orders` (ranked but not selected), action is "WATCHLIST" (still-positive
+    momentum, simply outranked) or "EXCLUDED" (negative momentum, or filtered by the liquidity
+    filter, see `run()`'s full_signal_universe construction for the exact criteria, the more
+    specific reason lives in `selection_status`, e.g. "Excluded (Illiquid)"), reason/stop_loss_price
+    are blank, shares/money_invested/pct_money_invested are 0, per the "no position exists" design.
 
     Rows are written in Momentum Rank order (1 = best, ascending), a ticker with no rank (e.g.
     excluded by the liquidity filter) sorts after every ranked ticker, ordered by signal_score
@@ -1083,7 +1098,8 @@ def log_signal_rankings(full_signal_universe: dict, orders: dict, dry_run: bool,
             pct_money_invested = order.get("pct_money_invested", 0.0)
             stop_loss_price = order.get("stop_loss_price")
         else:
-            action, reason, shares = "WATCHLIST", "", 0
+            is_excluded = str(info.get("selection_status", "")).startswith("Excluded")
+            action, reason, shares = ("EXCLUDED" if is_excluded else "WATCHLIST"), "", 0
             money_invested, pct_money_invested, stop_loss_price = 0.0, 0.0, None
         row_fields = [
             ts, ticker, action, info.get("rank", ""), info.get("signal_score", ""),
@@ -2398,6 +2414,12 @@ def run(
         )
     ranks = assign_ranks(scores)
 
+    # Captured BEFORE the liquidity filter (if any) NaNs some ranks out, so a ticker that HAD a
+    # valid rank here but doesn't after filtering can be distinguished as "excluded for
+    # illiquidity" specifically, rather than lumped into a generic "watchlist"/no-rank bucket
+    # further down (see full_signal_universe's selection_status logic below).
+    pre_liquidity_ranks_row = ranks.iloc[-1] if not ranks.empty else None
+
     # --- Liquidity/universe filter (opt-in, cfg.use_liquidity_filter), a PRE-selection
     #     eligibility filter: zeroes a ticker's rank on any date its trailing average dollar
     #     volume falls below cfg.min_avg_dollar_volume, so an illiquid name can never be
@@ -2468,26 +2490,49 @@ def run(
 
     latest_prices = daily_prices.iloc[-1].to_dict()
 
-    # --- Full ranked universe (selected top_n picks AND ranked-but-not-selected "watchlist"
-    #     tickers), distinct from signal_context above which stays scoped to picks only (that
-    #     narrower dict still feeds generate_orders()'s trade log/Table 1, unchanged). Every
-    #     ticker with a valid (non-NaN) score this rebalance gets an entry here, even one never
-    #     selected, so it isn't invisible everywhere the way it was before this existed. See
+    # --- Full ranked universe (selected top_n picks AND ranked-but-not-selected "watchlist"/
+    #     "excluded" tickers), distinct from signal_context above which stays scoped to picks
+    #     only (that narrower dict still feeds generate_orders()'s trade log/Table 1, unchanged).
+    #     Every ticker with a valid (non-NaN) score this rebalance gets an entry here, even one
+    #     never selected, so it isn't invisible everywhere the way it was before this existed.
+    #
+    #     A non-selected ticker gets one of THREE statuses (previously a single flat "Watchlist /
+    #     Reserve" regardless of why it wasn't picked, a real, confirmed gap): "Excluded
+    #     (Illiquid)" if it HAD a valid rank before the liquidity filter ran but not after
+    #     (pre_liquidity_ranks_row above, only ever differs from latest_ranks_row when
+    #     cfg.use_liquidity_filter is on); "Excluded (Negative Momentum)" if its own signal_score
+    #     is negative (applies across all 11 strategy_types, a negative composite/residual/
+    #     blended score is still a meaningfully destructive signal under that strategy's own
+    #     logic, not just for the 7 base-score types where the score is a literal return); else
+    #     unchanged "Watchlist / Reserve" (still-positive momentum, simply outranked). See
     #     docs/SIGNAL_RANKINGS_LOG.md. ---
     full_signal_universe: dict = {}
     if latest_ranks_row is not None and latest_scores is not None:
         for t in tickers:
             if t not in latest_scores.index or pd.isna(latest_scores[t]):
                 continue
-            if cfg.strategy_type == "absolute_momentum":
-                # No top_n cutoff in this strategy_type, every ticker with a positive OWN
+            score = float(latest_scores[t])
+            rank = int(latest_ranks_row[t]) if t in latest_ranks_row.index and pd.notna(latest_ranks_row[t]) else None
+            selected = t in picks
+            if selected:
+                # No top_n cutoff under absolute_momentum, every ticker with a positive OWN
                 # trailing score is held instead, see core/strategy_signals.py.
-                status = "Selected (Absolute Momentum)" if t in picks else "Watchlist / Reserve"
+                status = "Selected (Absolute Momentum)" if cfg.strategy_type == "absolute_momentum" else f"Top {top_n} (Selected)"
             else:
-                status = f"Top {top_n} (Selected)" if t in picks else "Watchlist / Reserve"
+                was_liquidity_filtered = (
+                    cfg.use_liquidity_filter and rank is None
+                    and pre_liquidity_ranks_row is not None
+                    and t in pre_liquidity_ranks_row.index and pd.notna(pre_liquidity_ranks_row[t])
+                )
+                if was_liquidity_filtered:
+                    status = "Excluded (Illiquid)"
+                elif score < 0:
+                    status = "Excluded (Negative Momentum)"
+                else:
+                    status = "Watchlist / Reserve"
             full_signal_universe[t] = {
-                "rank": int(latest_ranks_row[t]) if t in latest_ranks_row.index and pd.notna(latest_ranks_row[t]) else None,
-                "signal_score": float(latest_scores[t]),
+                "rank": rank,
+                "signal_score": score,
                 "close_price": latest_prices.get(t),
                 "selection_status": status,
             }

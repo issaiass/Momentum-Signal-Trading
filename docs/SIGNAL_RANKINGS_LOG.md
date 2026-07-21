@@ -46,8 +46,10 @@ every ranked ticker, ordered by `signal_score` descending among themselves.
 
 - **timestamp**, ISO 8601, when this rebalance ran.
 - **ticker**.
-- **action**, `BUY`/`SELL`/`HOLD` (from the real order decision) or `WATCHLIST` (ranked, not
-  selected this rebalance).
+- **action**, `BUY`/`SELL`/`HOLD` (from the real order decision), `WATCHLIST` (ranked, not
+  selected this rebalance, still-positive momentum), or `EXCLUDED` (ranked, not selected,
+  either negative momentum or filtered by the liquidity filter, see `selection_status` below for
+  the specific reason).
 - **momentum_rank**, 1 = strongest, from the same `assign_ranks()` call every `strategy_type`
   already uses for selection.
 - **signal_score**, the raw ranking value. For the 7 `_BASE_SCORE_STRATEGY_TYPES` (`momentum`,
@@ -58,9 +60,17 @@ every ranked ticker, ordered by `signal_score` descending among themselves.
   `hybrid_multi_factor`) it's that strategy's own composite/residual/blended score, not a
   literal price return, see `docs/MOMENTUM_STRATEGIES.md`.
 - **close_price**, the price this ticker was ranked/sized against this rebalance.
-- **selection_status**, `"Top N (Selected)"` (N = that portfolio's `top_n`), `"Selected (Absolute
-  Momentum)"` (the `absolute_momentum` `strategy_type` has no `top_n` cutoff, every ticker with a
-  positive OWN trailing score is held instead), or `"Watchlist / Reserve"`.
+- **selection_status**, one of five values: `"Top N (Selected)"` (N = that portfolio's `top_n`);
+  `"Selected (Absolute Momentum)"` (the `absolute_momentum` `strategy_type` has no `top_n`
+  cutoff, every ticker with a positive OWN trailing score is held instead); `"Watchlist /
+  Reserve"` (not selected, but `signal_score` is still positive, simply outranked);
+  `"Excluded (Negative Momentum)"` (not selected, `signal_score` is negative, applies across all
+  11 `strategy_type`s, a negative composite/residual/blended score is still a meaningfully
+  destructive signal under that strategy's own logic, not only for the 7 base-score types where
+  the score is a literal trailing return); or `"Excluded (Illiquid)"` (not selected, filtered out
+  by `use_liquidity_filter`, only possible when that flag is on, see
+  `docs/RISK_CONSTRAINTS.md`'s "Liquidity / Universe Filter"). The two `"Excluded"` variants both
+  map to `action = "EXCLUDED"`, `"Watchlist / Reserve"` maps to `action = "WATCHLIST"`.
 - **money_invested** / **pct_money_invested**, this ticker's TARGET dollar allocation this
   rebalance (`0.00`/`0.00%` for a watchlist ticker), same figures the trade log and rebalance
   email already show for selected tickers.

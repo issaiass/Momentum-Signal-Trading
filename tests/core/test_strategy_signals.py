@@ -360,6 +360,24 @@ class TestResolveStrategyPicks:
         result = resolve_strategy_picks(None, None, ["A", "B"], cfg, top_n=2)
         assert result == []
 
+    def test_nan_ranked_ticker_never_selected_even_to_pad_top_n(self):
+        # Real, confirmed bug (found via Epic 2's real-deployed-code verification of the
+        # liquidity filter): pandas' nsmallest(n) backfills with NaN rows when fewer than n
+        # non-null values exist, so a NaN-ranked ticker (e.g. zeroed out by use_liquidity_filter)
+        # could still get selected whenever fewer than top_n tickers had a valid rank.
+        scores_row = pd.Series({"A": 0.05, "B": 0.02})
+        ranks_row = pd.Series({"A": 1.0, "B": np.nan})  # B liquidity-filtered
+        cfg = BacktestConfig(holding_period=1)
+        result = resolve_strategy_picks(scores_row, ranks_row, ["A", "B"], cfg, top_n=2)
+        assert result == ["A"]
+
+    def test_all_nan_ranked_returns_empty_not_padded(self):
+        scores_row = pd.Series({"A": 0.05, "B": 0.02})
+        ranks_row = pd.Series({"A": np.nan, "B": np.nan})
+        cfg = BacktestConfig(holding_period=1)
+        result = resolve_strategy_picks(scores_row, ranks_row, ["A", "B"], cfg, top_n=2)
+        assert result == []
+
 
 class TestGenerateStrategyMonthlyPicks:
     """

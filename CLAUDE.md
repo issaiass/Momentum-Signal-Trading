@@ -146,11 +146,23 @@ that tests enforce, don't casually violate these when editing:
   `resolve_strategy_picks(scores_row, ranks_row, tickers, cfg, top_n)` centralizes the
   "cross-sectional `top_n` cutoff vs. absolute per-ticker selection" decision, shared by `run()`
   and `generate_strategy_monthly_picks()`: every `strategy_type` except `absolute_momentum`
-  replicates `get_top_etfs()`'s exact behavior, `absolute_momentum` delegates to
+  replicates `get_top_etfs()`'s exact behavior (`ranks_row.dropna().nsmallest(top_n)`),
+  `absolute_momentum` delegates to
   `select_absolute_momentum_picks(latest_scores, tickers, defensive_ticker)` (no `top_n` cutoff
   at all, every ticker with a positive OWN trailing score is held, `defensive_ticker` alone
   otherwise, `defensive_ticker` must be priced alongside the portfolio's own `tickers:`, the same
   "must be priced" requirement `dual_momentum`'s `use_absolute_momentum` already documents).
+  `.dropna()` BEFORE `.nsmallest()`, not after, fixes a real, confirmed bug found via Epic 2 of
+  the "Rebalance Reporting Clarity & Selection-Logic Fixes" plan's own real-deployed-code
+  verification: `pandas.Series.nsmallest(n)` backfills with NaN rows when fewer than `n`
+  non-null values exist (confirmed directly: `pd.Series([nan, nan]).nsmallest(2)` returns BOTH
+  NaN entries, not an empty Series), so a NaN-ranked ticker (e.g. one zeroed out by
+  `use_liquidity_filter`) could still get selected into `top_n` whenever fewer than `top_n`
+  tickers had a valid rank, silently defeating the whole point of the liquidity filter in exactly
+  the case it matters most. Confirmed both in a unit test and against real deployed code: a temp
+  portfolio with `min_avg_dollar_volume` set absurdly high (every real ticker's dollar volume
+  falls below it) previously still generated real BUY orders for the "illiquid" tickers; after
+  the fix, zero orders. `get_top_etfs()` (`execution/live_signal.py`) got the identical fix.
   Four genuinely new ranking functions, one per strategy: `blend_momentum_scores()` (reused
   UNCHANGED from `core/functions_quant_extensions.py`, previously fully coded but dead code, zero
   production call sites before this, for `multi_timeframe_composite`, resamples to monthly FIRST
@@ -527,6 +539,22 @@ that tests enforce, don't casually violate these when editing:
   identical sort key independently (see that file's own bullet below), the two functions don't
   share a helper, deliberately, matching this codebase's existing pattern of `full_signal_universe`
   having multiple independent consumers.
+  `run()`'s `full_signal_universe` construction (Epic 2 of the same plan) now distinguishes THREE
+  outcomes for a non-selected ticker, previously flattened into one flat `"Watchlist / Reserve"`
+  regardless of why it wasn't picked, a real, confirmed gap: `"Excluded (Illiquid)"` (the ticker
+  HAD a valid rank before `liquidity_filter()` ran but not after, only possible when
+  `cfg.use_liquidity_filter` is on, detected via a new `pre_liquidity_ranks_row` snapshot taken
+  right after `ranks = assign_ranks(scores)`, before the filter reassigns `ranks`);
+  `"Excluded (Negative Momentum)"` (`signal_score < 0`, applies across all 11 `strategy_type`s, a
+  negative composite/residual/blended score is still a meaningfully destructive signal under that
+  strategy's own logic, not only for the 7 base-score types where the score is a literal trailing
+  return); else unchanged `"Watchlist / Reserve"` (still-positive momentum, simply outranked).
+  `log_signal_rankings()`'s CSV `action` column and `interfaces/notifications.py`'s
+  `build_signal_universe_html()`'s Action column both derive `action = "EXCLUDED"` from either
+  `"Excluded (...)"` variant (else `"WATCHLIST"`), the more specific reason stays in
+  `selection_status`, giving a 6-value Action set: `BUY`/`SELL`/`HOLD` (from a real order, this
+  part was already correct and untouched by this epic), `WATCHLIST`, and the two `EXCLUDED`
+  variants. See `docs/SIGNAL_RANKINGS_LOG.md`'s five documented `selection_status` values.
   `resolve_ticker_stop_loss_pct(ticker, cfg) -> float | None` is the single source of truth for
   per-ticker stop-loss resolution, `BacktestConfig.ticker_risk_overrides` (`{}` default, zero
   behavior change for a ticker with no entry): returns `None` when
@@ -702,6 +730,13 @@ that tests enforce, don't casually violate these when editing:
   applies independently (Epic 1, "Rebalance Reporting Clarity & Selection-Logic Fixes" plan),
   this function previously rendered rows in `full_signal_universe`'s raw dict order, not rank
   order. See `docs/SIGNAL_RANKINGS_LOG.md`.
+  The Action column (Epic 2, same plan) derives `"EXCLUDED"` (color `#8e44ad`, distinct from
+  `BUY`'s green/`SELL`'s red/`WATCHLIST`'s grey) from a `selection_status` starting with
+  `"Excluded"`, else `"WATCHLIST"` unchanged, for any ticker with no order this rebalance; the
+  Reason column shows the specific `selection_status` text (`"Excluded (Negative Momentum)"` or
+  `"Excluded (Illiquid)"`) for an excluded ticker instead of the generic `"Not selected this
+  rebalance"`. The `order is not None` branch (a ticker WITH a real BUY/SELL/HOLD decision this
+  rebalance) is untouched, this epic only splits the no-order fallback branch.
 - **`daily_runner.py`**, the actual scheduled entry point (`daily-runner` console script).
   Loads and schema-validates `config.yaml`, loops over every portfolio defined under
   `portfolios:`, idempotent per day, refuses `--live` unless `config.yaml`'s

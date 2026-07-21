@@ -244,15 +244,18 @@ def build_signal_universe_html(full_signal_universe: dict, orders: dict, top_n: 
     table (Table 1, unchanged): the FULL ranked universe (every configured ticker with a valid
     momentum score this rebalance), not just the tickers actually selected/traded. Table 1 stays
     the clean "decisions actually made" summary; this table is the exhaustive audit view,
-    including "Watchlist / Reserve" tickers that were ranked but never selected, which are
-    otherwise invisible everywhere (never appear in `orders` at all).
+    including tickers that were ranked but never selected, which are otherwise invisible
+    everywhere (never appear in `orders` at all), split into "Watchlist / Reserve" (still-positive
+    momentum, simply outranked) and "Excluded (Negative Momentum)"/"Excluded (Illiquid)" (won't
+    help the strategy, distinct reasons), not lumped together.
 
     full_signal_universe : {ticker: {'rank', 'signal_score', 'close_price', 'selection_status'}},
     execution/live_signal.py's run()'s new OrdersResult.full_signal_universe attribute.
     orders : the SAME dict Table 1 was built from; a ticker present here (selected, whether
     traded or held) gets its real action/shares/money-invested/stop-loss-price/fill-outcome
-    columns from its order; a ticker absent here ("watchlist") gets zeroed money/shares, no
-    stop-loss price, and "N/A (not traded)" in place of a fill outcome.
+    columns from its order; a ticker absent here (Action column shows "WATCHLIST" or "EXCLUDED",
+    derived from `selection_status`) gets zeroed money/shares, no stop-loss price, and
+    "N/A (not traded)" in place of a fill outcome.
 
     "Lookback Return (%)" is signal_score expressed as a percentage for the 7 strategy_types
     whose score IS literally the trailing lookback_period return (_BASE_SCORE_STRATEGY_TYPES,
@@ -301,9 +304,11 @@ def build_signal_universe_html(full_signal_universe: dict, orders: dict, top_n: 
             else:
                 stop_loss_text = f"${stop_loss_price:,.2f}"
         else:
-            action, action_color = "WATCHLIST", "#7f8c8d"
+            is_excluded = status.startswith("Excluded")
+            action = "EXCLUDED" if is_excluded else "WATCHLIST"
+            action_color = "#8e44ad" if is_excluded else "#7f8c8d"
             money_invested, pct_money_invested, shares = 0.0, 0.0, 0
-            reason = "Not selected this rebalance"
+            reason = status if is_excluded else "Not selected this rebalance"
             outcome_text, outcome_color = "N/A (not traded)", "#7f8c8d"
             stop_loss_text = "N/A"
 

@@ -450,6 +450,24 @@ class TestBuildSignalUniverseHtml:
         assert "Rebalance Summary" in combined
         assert "Full Signal Universe" in combined
 
+    def test_excluded_variants_render_with_distinct_action_and_reason(self):
+        universe = {
+            "A": {"rank": 1, "signal_score": 0.15, "close_price": 100.0, "selection_status": "Top 1 (Selected)"},
+            "B": {"rank": 2, "signal_score": 0.05, "close_price": 50.0, "selection_status": "Watchlist / Reserve"},
+            "E": {"rank": None, "signal_score": -0.10, "close_price": 30.0, "selection_status": "Excluded (Negative Momentum)"},
+            "F": {"rank": None, "signal_score": 0.20, "close_price": 20.0, "selection_status": "Excluded (Illiquid)"},
+        }
+        orders = self._orders()
+        html = build_signal_universe_html(universe, orders, top_n=1, strategy_type="momentum")
+        # Action column shows the generic "EXCLUDED" value for both variants...
+        assert html.count(">EXCLUDED<") == 2
+        # ...while the Selection Status column (and Reason, since these were never in `orders`)
+        # still carries the specific reason.
+        assert "Excluded (Negative Momentum)" in html
+        assert "Excluded (Illiquid)" in html
+        # WATCHLIST is untouched for the still-positive, merely-outranked ticker.
+        assert ">WATCHLIST<" in html
+
     def test_rows_render_in_momentum_rank_order(self):
         # Deliberately out-of-order dict insertion (C rank=1 last, A rank=2 first, B unranked),
         # rows must render sorted by rank ascending, unranked trailing by score desc.

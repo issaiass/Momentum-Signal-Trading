@@ -15,6 +15,9 @@ Run with: pytest tests/test_governance.py -v
 """
 import csv
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -117,6 +120,28 @@ class TestHashChainAuditLog:
         result = verify_log_integrity(path)
         assert result["valid"] is False
         assert result["first_bad_row"] == 1
+
+    def test_concurrent_log_orders_calls_do_not_corrupt_the_chain(self, tmp_path):
+        # Reproduces a real, confirmed incident: two `daily-runner --force-rebalance`
+        # invocations run close together broke this exact log's hash chain (both read the
+        # same stale "last row hash" before either had written). acquire_log_lock() now
+        # guards log_orders()'s critical section, this proves it holds under real contention.
+        path = str(tmp_path / "log.csv")
+        cfg = BacktestConfig()
+        n_writers = 10
+        barrier = threading.Barrier(n_writers)
+
+        def write_one(i):
+            barrier.wait()
+            log_orders({f"T{i}": {"action": "BUY", "shares": 1, "reason": "t"}},
+                       {f"T{i}": 100.0}, True, path=path, cfg=cfg)
+
+        with ThreadPoolExecutor(max_workers=n_writers) as pool:
+            list(pool.map(write_one, range(n_writers)))
+
+        result = verify_log_integrity(path)
+        assert result["valid"] is True
+        assert result["rows_checked"] == n_writers
 
 
 class TestRiskMonitor:

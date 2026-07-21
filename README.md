@@ -441,6 +441,17 @@ answer whether the strategy actually works.
   Both gaps, recommended widths/timings, and a zero-code-change host-cron workaround for the
   scheduling gap are documented in `docs/RISK_CONSTRAINTS.md`'s "Stop-Loss Width" section and
   `docs/DEPLOYMENT.md`'s "Recommended `risk_monitor.py` timing" section.
+- **A real, confirmed hash-chain race in the trade/alert/email-command logs (2026-07-21), now
+  fixed**: two `daily-runner --force-rebalance` invocations run seconds apart broke a real
+  trade log's tamper-evident hash chain, both read the same "last row hash" before either had
+  written, producing two rows chained from the SAME predecessor rather than one after the
+  other, confirmed directly via `verify_log_integrity()` flagging the exact break. All three
+  hash-chained logs (trade, alert, email-command) shared this same unguarded read-then-write
+  critical section. `core/audit_log.py`'s new `acquire_log_lock()`/`release_log_lock()` (a
+  portable exclusive-create file lock, no new dependency) now guards all three; a regression
+  test reproducing the exact race (many threads writing the same log concurrently) confirms the
+  fix holds under real contention, including a real Windows-specific finding along the way
+  (contended lock creation raises `PermissionError` there, not `FileExistsError` like POSIX).
 
 ### Who should allocate capital here
 

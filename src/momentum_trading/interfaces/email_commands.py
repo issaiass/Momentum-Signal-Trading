@@ -49,6 +49,7 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from ..core.paths import data_dir, logs_dir
+from ..core.audit_log import acquire_log_lock, release_log_lock
 
 logger = logging.getLogger("email_commands")
 
@@ -316,6 +317,11 @@ def log_command_attempt(
     while APPLYING an already-ACCEPTED command, so those failures land in
     the SAME audit trail instead of only ever reaching daily_runner.py's
     own log stream.
+
+    The read-last-hash-then-append critical section is guarded by core/audit_log.py's
+    acquire_log_lock()/release_log_lock() (same helper the trade log, alert log, and signal
+    rankings log use), fixing a real, confirmed race between two processes writing this file
+    close together, see that function's own docstring.
     """
     import csv
     import hashlib
@@ -333,25 +339,29 @@ def log_command_attempt(
         return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
     os.makedirs(os.path.dirname(log_path) or ".", exist_ok=True)
-    file_exists = os.path.isfile(log_path)
-    prev_hash = _last_hash(log_path)
+    lock_path = acquire_log_lock(log_path)
+    try:
+        file_exists = os.path.isfile(log_path)
+        prev_hash = _last_hash(log_path)
 
-    action = result.raw_action or ""
-    portfolio = getattr(result.command, "portfolio", "") if result.success else ""
-    resolved_outcome = outcome if outcome is not None else ("ACCEPTED" if result.success else "REJECTED")
-    resolved_reason = reason if reason is not None else (result.error or "")
-    row_fields = [
-        datetime.now().isoformat(), sender, action, portfolio,
-        resolved_outcome,
-        resolved_reason,
-    ]
-    row_hash = _row_hash(prev_hash, row_fields)
+        action = result.raw_action or ""
+        portfolio = getattr(result.command, "portfolio", "") if result.success else ""
+        resolved_outcome = outcome if outcome is not None else ("ACCEPTED" if result.success else "REJECTED")
+        resolved_reason = reason if reason is not None else (result.error or "")
+        row_fields = [
+            datetime.now().isoformat(), sender, action, portfolio,
+            resolved_outcome,
+            resolved_reason,
+        ]
+        row_hash = _row_hash(prev_hash, row_fields)
 
-    with open(log_path, "a", newline="") as f:
-        writer = csv.writer(f)
-        if not file_exists:
-            writer.writerow(["timestamp", "sender", "action", "portfolio", "outcome", "reason", "row_hash"])
-        writer.writerow(row_fields + [row_hash])
+        with open(log_path, "a", newline="") as f:
+            writer = csv.writer(f)
+            if not file_exists:
+                writer.writerow(["timestamp", "sender", "action", "portfolio", "outcome", "reason", "row_hash"])
+            writer.writerow(row_fields + [row_hash])
+    finally:
+        release_log_lock(lock_path)
 
     logger.info("Command attempt logged: sender=%s action=%s outcome=%s",
                 sender, action, resolved_outcome)

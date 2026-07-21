@@ -54,7 +54,7 @@ import pandas_market_calendars as mcal
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ..core import functions as fn
-from ..core.audit_log import log_alert, ALERTS_LOG_PATH, append_hash_chained_row
+from ..core.audit_log import log_alert, ALERTS_LOG_PATH, append_hash_chained_row, acquire_log_lock, release_log_lock
 from ..core.paths import data_dir, logs_dir
 from ..backtest.momentum_backtest import (
     BacktestConfig,
@@ -914,28 +914,38 @@ def log_orders(orders: dict, latest_prices: dict, dry_run: bool, path: str = TRA
     ticker this rebalance (see that function's own docstring), not the incremental drift; set on
     every order including HOLDs, so the log answers "how much of this period's capital was
     allocated here" for every row, matching the same columns in the rebalance summary email.
-    """
-    file_exists = os.path.isfile(path)
-    config_hash = _config_hash(cfg) if cfg is not None else ""
-    prev_hash = _last_row_hash(path)
 
-    with open(path, "a", newline="") as f:
-        writer = csv.writer(f)
-        if not file_exists:
-            writer.writerow(["timestamp", "ticker", "action", "shares", "price", "reason",
-                              "rank", "signal_score", "money_invested", "pct_money_invested",
-                              "dry_run", "config_hash", "row_hash"])
-        ts = datetime.now().isoformat()
-        for ticker, order in orders.items():
-            row_fields = [
-                ts, ticker, order["action"], order["shares"], latest_prices.get(ticker, ""),
-                order["reason"], order.get("rank", ""), order.get("signal_score", ""),
-                order.get("money_invested", ""), order.get("pct_money_invested", ""),
-                dry_run, config_hash,
-            ]
-            row_hash = _compute_row_hash(prev_hash, row_fields)
-            writer.writerow(row_fields + [row_hash])
-            prev_hash = row_hash
+    The read-last-hash-then-append critical section is guarded by core/audit_log.py's
+    acquire_log_lock()/release_log_lock() (same helper the alert log and signal rankings log
+    use), fixing a real, confirmed race between two processes writing this file close together,
+    see that function's own docstring.
+    """
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    lock_path = acquire_log_lock(path)
+    try:
+        file_exists = os.path.isfile(path)
+        config_hash = _config_hash(cfg) if cfg is not None else ""
+        prev_hash = _last_row_hash(path)
+
+        with open(path, "a", newline="") as f:
+            writer = csv.writer(f)
+            if not file_exists:
+                writer.writerow(["timestamp", "ticker", "action", "shares", "price", "reason",
+                                  "rank", "signal_score", "money_invested", "pct_money_invested",
+                                  "dry_run", "config_hash", "row_hash"])
+            ts = datetime.now().isoformat()
+            for ticker, order in orders.items():
+                row_fields = [
+                    ts, ticker, order["action"], order["shares"], latest_prices.get(ticker, ""),
+                    order["reason"], order.get("rank", ""), order.get("signal_score", ""),
+                    order.get("money_invested", ""), order.get("pct_money_invested", ""),
+                    dry_run, config_hash,
+                ]
+                row_hash = _compute_row_hash(prev_hash, row_fields)
+                writer.writerow(row_fields + [row_hash])
+                prev_hash = row_hash
+    finally:
+        release_log_lock(lock_path)
     logger.info("Logged %d order decisions to %s (config_hash=%s)", len(orders), path, config_hash)
 
 

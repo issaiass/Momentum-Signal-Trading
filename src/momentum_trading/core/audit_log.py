@@ -23,9 +23,74 @@ duplicated here.
 import csv
 import hashlib
 import os
+import time
 from datetime import datetime
 
 from .paths import logs_dir
+
+
+def acquire_log_lock(log_path: str, timeout: float = 15.0, stale_after: float = 10.0) -> str:
+    """
+    A portable, dependency-free mutual-exclusion lock for the read-last-hash-then-append
+    critical section every hash-chained log shares: this file's append_hash_chained_row()
+    (alert log, signal rankings log), execution/live_signal.py's log_orders() (trade log), and
+    interfaces/email_commands.py's log_command_attempt() (email command log), all four import
+    this same helper rather than each inventing their own.
+
+    Fixes a real, confirmed race: two processes writing to the SAME log file close together
+    (e.g. two manual --force-rebalance invocations run back-to-back, or scheduled cron
+    overlapping a long-running manual run) can each read the same "last row hash" before
+    either has written, producing two rows chained from the SAME predecessor instead of one
+    chained after the other, a broken link verify_log_integrity() correctly flags. Confirmed
+    directly, not theoretical: two `docker exec ... daily-runner --force-rebalance` invocations
+    run seconds apart produced exactly this break in a real trade log.
+
+    Implemented as an exclusively-created sentinel file (log_path + ".lock"), portable across
+    POSIX and Windows via os.open()'s O_CREAT | O_EXCL atomicity (no new dependency, matching
+    this project's existing "no new deps for a lock/marker" precedent, daily_runner.py's
+    rebalance-in-progress marker uses the same atomic-file philosophy). A lock file older than
+    stale_after seconds is treated as abandoned (its holder crashed before releasing) and is
+    force-reclaimed; the real critical section here is a handful of small file I/O calls that
+    should complete in well under a second, so this is a generous, conservative margin, not a
+    tight one. Raises TimeoutError if the overall timeout elapses without acquiring (sustained
+    contention well beyond what a crashed holder alone would explain), rather than blocking
+    forever. Returns the lock file path, pass it to release_log_lock() when done.
+
+    Contended O_CREAT | O_EXCL raises FileExistsError on POSIX but can raise PermissionError
+    on Windows instead (confirmed directly, not documented behavior assumed: a real concurrency
+    test under real thread contention on this project's actual Windows dev environment hit
+    PermissionError, not FileExistsError), both mean the same thing here, "someone else holds
+    it right now," and are handled identically.
+    """
+    lock_path = log_path + ".lock"
+    os.makedirs(os.path.dirname(log_path) or ".", exist_ok=True)
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+            return lock_path
+        except (FileExistsError, PermissionError):
+            try:
+                age = time.time() - os.path.getmtime(lock_path)
+            except OSError:
+                continue  # lock file vanished between the failed create and this check, retry
+            if age > stale_after:
+                try:
+                    os.remove(lock_path)
+                except OSError:
+                    pass  # another process already reclaimed it, retry our own create
+                continue
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"Timed out waiting for log lock: {lock_path}")
+            time.sleep(0.05)
+
+
+def release_log_lock(lock_path: str) -> None:
+    try:
+        os.remove(lock_path)
+    except FileNotFoundError:
+        pass
 
 
 def _last_row_hash(path: str) -> str:
@@ -50,19 +115,28 @@ def append_hash_chained_row(log_path: str, header: list[str], fields: list) -> s
     """
     Appends one hash-chained row to log_path, writing the header first if the
     file doesn't exist yet. Returns the new row's hash (mainly useful for tests).
+
+    The read-last-hash-then-append critical section is guarded by acquire_log_lock()/
+    release_log_lock() (see that function's own docstring for the real race it fixes), so
+    concurrent callers on the SAME log_path serialize instead of both chaining from the same
+    stale prev_hash.
     """
     os.makedirs(os.path.dirname(log_path) or ".", exist_ok=True)
-    file_exists = os.path.isfile(log_path)
-    prev_hash = _last_row_hash(log_path)
-    row_hash = _compute_row_hash(prev_hash, fields)
+    lock_path = acquire_log_lock(log_path)
+    try:
+        file_exists = os.path.isfile(log_path)
+        prev_hash = _last_row_hash(log_path)
+        row_hash = _compute_row_hash(prev_hash, fields)
 
-    with open(log_path, "a", newline="") as f:
-        writer = csv.writer(f)
-        if not file_exists:
-            writer.writerow(header)
-        writer.writerow(list(fields) + [row_hash])
+        with open(log_path, "a", newline="") as f:
+            writer = csv.writer(f)
+            if not file_exists:
+                writer.writerow(header)
+            writer.writerow(list(fields) + [row_hash])
 
-    return row_hash
+        return row_hash
+    finally:
+        release_log_lock(lock_path)
 
 
 ALERTS_LOG_HEADER = ["timestamp", "portfolio", "alert_type", "severity", "message", "sender", "row_hash"]

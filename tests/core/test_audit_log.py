@@ -11,11 +11,16 @@ chaining, tamper detection) and that log_alert()/read_recent_alerts() work
 correctly on top of it.
 """
 import csv
+import os
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
 from momentum_trading.core.audit_log import (
     append_hash_chained_row, log_alert, read_recent_alerts, ALERTS_LOG_HEADER,
+    acquire_log_lock, release_log_lock,
 )
 from momentum_trading.execution.live_signal import verify_log_integrity
 
@@ -66,6 +71,90 @@ class TestAppendHashChainedRow:
         result = verify_log_integrity(path)
         assert result["valid"] is False
         assert result["first_bad_row"] == 1
+
+    def test_concurrent_writers_do_not_corrupt_the_chain(self, tmp_path):
+        # Reproduces the real, confirmed race (two `daily-runner --force-rebalance`
+        # invocations run close together corrupted a real trade log's hash chain):
+        # many threads appending to the SAME log_path at once, forced to start together via a
+        # Barrier to maximize contention. Before acquire_log_lock() existed, this reliably
+        # broke the chain (two writers reading the same stale prev_hash); now every row must
+        # still verify, in SOME order, no forks.
+        path = str(tmp_path / "log.csv")
+        n_writers = 12
+        barrier = threading.Barrier(n_writers)
+
+        def write_one(i):
+            barrier.wait()
+            append_hash_chained_row(path, ["a", "b"], [f"row{i}", "y"])
+
+        with ThreadPoolExecutor(max_workers=n_writers) as pool:
+            list(pool.map(write_one, range(n_writers)))
+
+        result = verify_log_integrity(path)
+        assert result["valid"] is True
+        assert result["rows_checked"] == n_writers
+        with open(path) as f:
+            rows = list(csv.reader(f))
+        assert len(rows) == n_writers + 1  # header + one row per writer, none lost
+
+
+class TestAcquireLogLock:
+    """
+    The portable exclusive-create lock backing append_hash_chained_row()/log_orders()/
+    log_command_attempt()'s shared critical section.
+    """
+
+    def test_acquire_then_release_allows_reacquire(self, tmp_path):
+        log_path = str(tmp_path / "log.csv")
+        lock_path = acquire_log_lock(log_path)
+        assert os.path.isfile(lock_path)
+        release_log_lock(lock_path)
+        assert not os.path.isfile(lock_path)
+        # A second acquire after release must succeed immediately, not hang.
+        lock_path2 = acquire_log_lock(log_path, timeout=1.0)
+        release_log_lock(lock_path2)
+
+    def test_second_acquire_blocks_until_first_releases(self, tmp_path):
+        log_path = str(tmp_path / "log.csv")
+        lock_path = acquire_log_lock(log_path)
+        released_at = {}
+
+        def release_after_delay():
+            time.sleep(0.2)
+            released_at["time"] = time.monotonic()
+            release_log_lock(lock_path)
+
+        releaser = threading.Thread(target=release_after_delay)
+        releaser.start()
+        start = time.monotonic()
+        acquire_log_lock(log_path, timeout=5.0)
+        acquired_at = time.monotonic()
+        releaser.join()
+
+        assert acquired_at >= released_at["time"]  # genuinely waited, didn't just get lucky
+        assert acquired_at - start >= 0.15  # real delay, not immediate
+
+    def test_stale_lock_is_reclaimed_without_waiting_full_timeout(self, tmp_path):
+        log_path = str(tmp_path / "log.csv")
+        lock_path = log_path + ".lock"
+        os.makedirs(tmp_path, exist_ok=True)
+        with open(lock_path, "w") as f:
+            f.write("")
+        stale_mtime = time.time() - 3600  # 1 hour old, way past any real crash-recovery window
+        os.utime(lock_path, (stale_mtime, stale_mtime))
+
+        start = time.monotonic()
+        reclaimed = acquire_log_lock(log_path, timeout=10.0, stale_after=10.0)
+        elapsed = time.monotonic() - start
+
+        assert elapsed < 1.0  # reclaimed promptly, did not wait out the 10s timeout
+        release_log_lock(reclaimed)
+
+    def test_timeout_raises_if_never_released(self, tmp_path):
+        log_path = str(tmp_path / "log.csv")
+        acquire_log_lock(log_path)  # never released
+        with pytest.raises(TimeoutError):
+            acquire_log_lock(log_path, timeout=0.3, stale_after=999.0)
 
 
 class TestLogAlert:

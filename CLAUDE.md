@@ -103,6 +103,23 @@ that tests enforce, don't casually violate these when editing:
   same "grow at the end" schema-evolution precedent as the trade log's own additions), see
   `docs/ALERT_LOG.md`'s schema section for the full caveat (records the configured account, not
   proof of actual delivery).
+  `acquire_log_lock(log_path, timeout=15.0, stale_after=10.0)`/`release_log_lock(lock_path)`
+  (also here) fix a real, confirmed incident (2026-07-21): two `daily-runner
+  --force-rebalance` invocations run seconds apart broke a real trade log's hash chain, both
+  processes read the same "last row hash" before either had written (`append_hash_chained_row()`,
+  `execution/live_signal.py`'s `log_orders()`, and `interfaces/email_commands.py`'s
+  `log_command_attempt()` all had this exact read-then-write race, confirmed by reading all
+  three, not assumed identical). Implemented as a portable exclusive-create sentinel file
+  (`log_path + ".lock"`, `os.open(..., O_CREAT | O_EXCL)`), no new dependency, same philosophy
+  as `daily_runner.py`'s rebalance-in-progress marker; a lock older than `stale_after` is
+  force-reclaimed (a crashed holder must not deadlock every future run). Windows raises
+  `PermissionError` under contention here, not `FileExistsError` like POSIX, confirmed directly
+  by a real concurrency test failure on this project's own Windows dev environment, both are
+  handled identically, don't narrow that except clause back to one exception type. All three
+  call sites (`append_hash_chained_row()`'s own body, plus `log_orders()` and
+  `log_command_attempt()`'s bespoke read-then-write blocks, which don't go through
+  `append_hash_chained_row()` and so each needed their own explicit acquire/release) now share
+  this one locking primitive rather than each risking reinventing (or omitting) it.
 - **`core/strategy_signals.py`** (NEW module, selectable-momentum-strategy plan), dispatches on
   `BacktestConfig.strategy_type` (`config.yaml`'s per-portfolio `default_risk`/`risk_overrides`,
   one of 11 allowed values, `ALLOWED_STRATEGY_TYPES` in `backtest/momentum_backtest.py`, see

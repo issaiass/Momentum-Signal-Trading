@@ -275,6 +275,31 @@ class TestAuditLogging:
         result_tampered = verify_log_integrity(log_path)
         assert result_tampered["valid"] is False
 
+    def test_concurrent_log_command_attempt_calls_do_not_corrupt_the_chain(self, tmp_path):
+        # Same real race class confirmed in the trade log (two processes reading the same
+        # stale "last row hash" before either writes), now guarded here too via the shared
+        # acquire_log_lock()/release_log_lock() helper.
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+        from momentum_trading.interfaces.email_commands import log_command_attempt
+        from momentum_trading.execution.live_signal import verify_log_integrity
+
+        log_path = str(tmp_path / "cmd_log.csv")
+        n_writers = 10
+        barrier = threading.Barrier(n_writers)
+
+        def write_one(i):
+            barrier.wait()
+            result = parse_command(TRUSTED, TRUSTED, f"ACTION: RESUME\nPORTFOLIO: p{i}")
+            log_command_attempt(TRUSTED, result, log_path)
+
+        with ThreadPoolExecutor(max_workers=n_writers) as pool:
+            list(pool.map(write_one, range(n_writers)))
+
+        result = verify_log_integrity(log_path)
+        assert result["valid"] is True
+        assert result["rows_checked"] == n_writers
+
     def test_default_outcome_derivation_unchanged(self, tmp_path):
         # Regression: omitting outcome/reason (every pre-existing call site) must still
         # derive ACCEPTED/REJECTED from result.success exactly as before this extension.

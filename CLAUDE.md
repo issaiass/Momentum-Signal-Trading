@@ -640,17 +640,22 @@ that tests enforce, don't casually violate these when editing:
   cause visible instead of looking identical to a routine no-action rebalance. Read by
   `daily_runner.py`'s no-action email branch (see `interfaces/notifications.py`'s
   `build_no_action_summary_html()` bullet).
-  `compute_stop_loss_price(action, cfg, latest_price, avg_entry_price=None)` surfaces the
-  EXISTING fixed-from-entry `stop_loss_pct` mechanism (see `docs/RISK_CONSTRAINTS.md`'s
-  "Stop-Loss Width", still not trailing) for reporting: an ESTIMATE
-  (`latest_price * (1 - stop_loss_pct)`) for a `BUY` (the real fill price isn't known yet), the
-  REAL value (`avg_entry_price * (1 - stop_loss_pct)`) for a `HOLD` on an already-open position
-  when `avg_entry_price` is provided, `None` for `SELL`/no-position/no-price. Wired into
-  `generate_orders()` via a new optional `current_avg_entry_prices: dict | None = None` param
-  (`None` default is byte-identical to before), and `run()`'s own new same-named param, which
-  `daily_runner.py` populates from its existing `current_positions` dict (live-only, `{}` in
-  dry-run, matching the established "position-performance fields are live-only" pattern already
-  documented for `build_position_performance()`), no new broker call.
+  `compute_stop_loss_price(action, cfg, money_invested, ticker=None)` reports a DOLLAR AMOUNT AT
+  RISK on a position (`money_invested * stop_loss_pct`), NOT a per-share price despite the
+  "Stop-Loss Price" column header it feeds, a deliberate, explicit product decision (confirmed
+  directly with the project owner, not a bug): `money_invested` for a `BUY` or `HOLD` when it's
+  `> 0` and `stop_loss_pct` (via `resolve_ticker_stop_loss_pct()`) isn't `None`, else `None`
+  (`SELL`, or a `$0`/no-position row). This function is purely REPORTING-only; it is not, and
+  must not be, wired into either REAL stop-loss enforcement mechanism, both of which correctly
+  need a real per-share reference price and compute it independently: `check_and_handle_stop_
+  losses()`'s daily percentage-drawdown check and `place_orders_ibkr()`'s broker-side bracket
+  order (`attach_broker_stop_loss`'s `auxPrice`), both derived directly from `avg_entry_price`,
+  never through this function. Superseded an earlier per-share formula (`latest_price * (1 -
+  stop_loss_pct)` for `BUY`, `avg_entry_price * (1 - stop_loss_pct)` for `HOLD`, live-only) that
+  needed a now-removed `current_avg_entry_prices` param threaded through `generate_orders()`/
+  `run()`/`daily_runner.py`; since `money_invested` is uniformly available regardless of live vs.
+  dry-run (unlike the old `avg_entry_price`), `stop_loss_price` is now populated for HOLD rows in
+  dry-run mode too, a real, intentional behavior change, not a regression.
   `log_signal_rankings(full_signal_universe, orders, dry_run, path, cfg=None)` writes one
   hash-chained row per full-universe ticker to `logs/signal_rankings_log_<portfolio>.csv` (a new
   `signal_rankings_log_path` param on `run()`, built by `daily_runner.py` next to `trade_log_path`

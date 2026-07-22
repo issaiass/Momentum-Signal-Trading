@@ -80,11 +80,15 @@ every ranked ticker, ordered by `signal_score` descending among themselves.
   distinct concept from `money_invested` above: for a full-exit `SELL` (the ticker leaves the
   target universe entirely), `money_invested` is `0.00` (correctly reflecting the post-rebalance
   target), `transaction_amount` is what actually got sold.
-- **stop_loss_price**, fixed-from-entry (NOT trailing, see `docs/RISK_CONSTRAINTS.md`'s
-  "Stop-Loss Width"): an ESTIMATE (`close_price * (1 - stop_loss_pct)`) for a `BUY` this
-  rebalance (the real fill price isn't known yet), the REAL value
-  (`avg_entry_price * (1 - stop_loss_pct)`) for a `HOLD` on an already-open position (live mode
-  only, blank in dry-run), and blank for `SELL`/`WATCHLIST` (no open or intended position).
+- **stop_loss_price**, despite the column name, this is a DOLLAR AMOUNT AT RISK, not a per-share
+  price: `money_invested * stop_loss_pct` for a `BUY` or `HOLD` with a real `money_invested`
+  (populated the same way regardless of live vs. dry-run), blank for `SELL`/`WATCHLIST`/
+  `EXCLUDED` (no open or intended position, `money_invested` is already `0.00` for those). This
+  is a deliberate, explicit reporting choice, not a bug, and is entirely independent of the two
+  REAL stop-loss enforcement mechanisms (`daily_runner.py`'s daily percentage-drawdown check and
+  `place_orders_ibkr()`'s broker-side bracket order), both of which compute their own real
+  per-share threshold directly from `avg_entry_price`, never from this reported figure. See
+  `compute_stop_loss_price()`'s own docstring (`execution/live_signal.py`).
 - **reason**, the order's reason string (blank for watchlist).
 - **dry_run**, whether this run had `--live` set.
 - **config_hash**, same per-run `BacktestConfig` fingerprint the trade log already writes.

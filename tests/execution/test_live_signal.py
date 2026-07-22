@@ -1820,48 +1820,51 @@ class TestTickerRiskOverridesValidation:
 
 class TestComputeStopLossPrice:
     """
-    Fixed-from-entry stop-loss price reporting (docs/RISK_CONSTRAINTS.md's "Stop-Loss Width"),
-    NOT a trailing stop, these tests confirm each of the three real cases and the "no price"
-    guard, matching the function's own docstring exactly.
+    Reports the DOLLAR AMOUNT AT RISK on a position (money_invested * stop_loss_pct), a
+    reporting-only figure under the "Stop-Loss Price" column header (a deliberate, explicit
+    product decision, not a per-share price), NOT used by either real stop-loss enforcement
+    mechanism. These tests confirm each real case and the "not meaningful" guards, matching the
+    function's own docstring exactly.
     """
-    def test_buy_uses_latest_price_as_estimate(self):
+    def test_buy_uses_money_invested(self):
         cfg = BacktestConfig(stop_loss_pct=0.10)
-        assert compute_stop_loss_price("BUY", cfg, 100.0) == pytest.approx(90.0)
+        assert compute_stop_loss_price("BUY", cfg, 500.0) == pytest.approx(50.0)
 
-    def test_hold_with_avg_entry_price_uses_real_entry(self):
+    def test_hold_uses_money_invested(self):
         cfg = BacktestConfig(stop_loss_pct=0.20)
-        # latest_price is deliberately different from avg_entry_price, the stop must be
-        # computed from the REAL entry, not today's close, unlike the BUY estimate above.
-        assert compute_stop_loss_price("HOLD", cfg, 150.0, avg_entry_price=100.0) == pytest.approx(80.0)
-
-    def test_hold_without_avg_entry_price_is_none(self):
-        # dry-run, or any caller that didn't pass current_avg_entry_prices, matching the
-        # documented "position-performance fields are live-only" pattern.
-        cfg = BacktestConfig(stop_loss_pct=0.10)
-        assert compute_stop_loss_price("HOLD", cfg, 100.0) is None
+        assert compute_stop_loss_price("HOLD", cfg, 500.0) == pytest.approx(100.0)
 
     def test_sell_is_none(self):
         cfg = BacktestConfig(stop_loss_pct=0.10)
-        assert compute_stop_loss_price("SELL", cfg, 100.0, avg_entry_price=90.0) is None
+        assert compute_stop_loss_price("SELL", cfg, 500.0) is None
 
-    def test_no_price_is_none(self):
+    def test_zero_or_missing_money_invested_is_none(self):
+        # $0 money_invested is the existing "no position exists" convention (WATCHLIST/EXCLUDED
+        # rows), must stay blank rather than compute to a numeric 0.
         cfg = BacktestConfig(stop_loss_pct=0.10)
         assert compute_stop_loss_price("BUY", cfg, None) is None
         assert compute_stop_loss_price("BUY", cfg, 0.0) is None
 
-    def test_ticker_disabled_override_returns_none_even_with_a_price(self):
+    def test_ticker_disabled_override_returns_none_even_with_money_invested(self):
         cfg = BacktestConfig(stop_loss_pct=0.10, ticker_risk_overrides={"AAPL": {"enabled": False}})
-        assert compute_stop_loss_price("BUY", cfg, 100.0, ticker="AAPL") is None
+        assert compute_stop_loss_price("BUY", cfg, 500.0, ticker="AAPL") is None
 
     def test_ticker_custom_pct_override_is_used(self):
         cfg = BacktestConfig(stop_loss_pct=0.10,
                               ticker_risk_overrides={"AMD": {"stop_loss_pct": 0.25}})
-        assert compute_stop_loss_price("BUY", cfg, 100.0, ticker="AMD") == pytest.approx(75.0)
+        assert compute_stop_loss_price("BUY", cfg, 500.0, ticker="AMD") == pytest.approx(125.0)
 
     def test_no_ticker_param_falls_back_to_portfolio_default(self):
         # Regression: omitting ticker (every pre-existing call site) must stay byte-identical.
         cfg = BacktestConfig(stop_loss_pct=0.10, ticker_risk_overrides={"AMD": {"stop_loss_pct": 0.25}})
-        assert compute_stop_loss_price("BUY", cfg, 100.0) == pytest.approx(90.0)
+        assert compute_stop_loss_price("BUY", cfg, 500.0) == pytest.approx(50.0)
+
+    def test_dry_run_hold_is_now_populated_unlike_before(self):
+        # Real, documented behavior change: money_invested is uniformly available regardless of
+        # live vs. dry-run, unlike the old avg_entry_price (live-only), so a HOLD's stop-loss
+        # figure is no longer forced to None in dry-run mode.
+        cfg = BacktestConfig(stop_loss_pct=0.10)
+        assert compute_stop_loss_price("HOLD", cfg, 500.0) == pytest.approx(50.0)
 
 
 class TestGenerateOrders:
@@ -1974,35 +1977,25 @@ class TestGenerateOrders:
         assert orders["GHOST"]["money_invested"] == pytest.approx(500.0)
         assert orders["GHOST"]["pct_money_invested"] == pytest.approx(0.5)
 
-    def test_buy_order_carries_estimated_stop_loss_price(self):
+    def test_buy_order_stop_loss_price_is_money_invested_times_pct(self):
         cfg = BacktestConfig(drift_threshold=0.0, min_trade_size=1.0, stop_loss_pct=0.10)
         orders = generate_orders(
             current_holdings={}, target_weights={"XLK": 1.0}, gross_exposure=1.0,
             total_value=1000.0, latest_prices={"XLK": 220.0}, cfg=cfg,
         )
         assert orders["XLK"]["action"] == "BUY"
-        assert orders["XLK"]["stop_loss_price"] == pytest.approx(198.0)  # 220 * (1 - 0.10)
+        assert orders["XLK"]["money_invested"] == pytest.approx(1000.0)
+        assert orders["XLK"]["stop_loss_price"] == pytest.approx(100.0)  # 1000 * 0.10
 
-    def test_hold_on_open_position_uses_real_entry_price_when_provided(self):
-        cfg = BacktestConfig(drift_threshold=0.5, min_trade_size=1.0, stop_loss_pct=0.20)
-        orders = generate_orders(
-            current_holdings={"SPY": 1.0}, target_weights={"SPY": 1.0}, gross_exposure=1.0,
-            total_value=500.0, latest_prices={"SPY": 500.0}, cfg=cfg,
-            current_avg_entry_prices={"SPY": 400.0},
-        )
-        assert orders["SPY"]["action"] == "HOLD"
-        assert orders["SPY"]["stop_loss_price"] == pytest.approx(320.0)  # 400 * (1 - 0.20)
-
-    def test_hold_without_avg_entry_prices_has_no_stop_loss_price(self):
-        # Default behavior (no current_avg_entry_prices passed), byte-identical to before this
-        # param existed: stop_loss_price is None for a HOLD on an already-open position.
+    def test_hold_on_open_position_stop_loss_price_is_money_invested_times_pct(self):
         cfg = BacktestConfig(drift_threshold=0.5, min_trade_size=1.0, stop_loss_pct=0.20)
         orders = generate_orders(
             current_holdings={"SPY": 1.0}, target_weights={"SPY": 1.0}, gross_exposure=1.0,
             total_value=500.0, latest_prices={"SPY": 500.0}, cfg=cfg,
         )
         assert orders["SPY"]["action"] == "HOLD"
-        assert orders["SPY"]["stop_loss_price"] is None
+        assert orders["SPY"]["money_invested"] == pytest.approx(500.0)
+        assert orders["SPY"]["stop_loss_price"] == pytest.approx(100.0)  # 500 * 0.20
 
     def test_sell_order_has_no_stop_loss_price(self):
         cfg = BacktestConfig(drift_threshold=0.0, min_trade_size=1.0, stop_loss_pct=0.10)

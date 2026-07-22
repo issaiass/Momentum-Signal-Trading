@@ -1707,9 +1707,6 @@ def main():
                         alerts_log_path=ALERTS_LOG_PATH,
                         extra_price_tickers=confirmed_orphaned,
                         daily_prices=daily_prices,
-                        current_avg_entry_prices={
-                            t: pos["avg_entry_price"] for t, pos in current_positions.items()
-                        },
                         signal_rankings_log_path=signal_rankings_log_path,
                     )
                 finally:

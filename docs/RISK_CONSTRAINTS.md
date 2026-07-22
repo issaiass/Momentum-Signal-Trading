@@ -405,12 +405,14 @@ checked every day this app runs) and/or `attach_broker_stop_loss: true` (a real 
 BUY time, protects the position even when this app isn't running), independent of which width you
 pick, see "Broker-Side Protective Stop" above.
 
-**This fixed-from-entry stop-loss price is now visible per-ticker**, not just computable by
-hand: the rebalance email's second "Full Signal Universe" table and its sibling
-`logs/signal_rankings_log_<portfolio>.csv` both show a `Stop-Loss Price` column (an estimate
-based on today's close for a new `BUY`, the real entry-price-derived value for a `HOLD` on an
-already-open position, live mode only), see `docs/SIGNAL_RANKINGS_LOG.md`. Still the same fixed
-mechanism described above, not trailing, this only changes visibility, not behavior.
+**A per-ticker "Stop-Loss Price" figure is also visible**, in the rebalance email's second "Full
+Signal Universe" table and its sibling `logs/signal_rankings_log_<portfolio>.csv`, but despite
+the column name, it does NOT report the per-share price described above: it's `Money Invest *
+stop_loss_pct`, a DOLLAR AMOUNT AT RISK on the position, for a `BUY` or `HOLD`, see
+`docs/SIGNAL_RANKINGS_LOG.md`. This is a deliberate, explicit reporting-layer decision, entirely
+separate from the fixed-from-entry mechanism described above: neither `check_and_handle_stop_
+losses()`'s daily check nor `place_orders_ibkr()`'s broker-side bracket read this reported value,
+both still compute their own real per-share threshold directly from `avg_entry_price`.
 
 ## Per-Ticker Stop-Loss Override
 
@@ -439,8 +441,9 @@ A ticker with **no entry** in `ticker_risk_overrides` behaves exactly as before 
 existed, using the portfolio's own `stop_loss_pct`. This applies uniformly across every place
 `stop_loss_pct` is consulted: `check_and_handle_stop_losses()`'s daily drawdown check (the
 "ALWAYS runs" block, before any rebalance-day logic), `compute_stop_loss_price()`'s reporting
-(the Full Signal Universe table/log's `Stop-Loss Price` column), and `place_orders_ibkr()`'s
-`attach_broker_stop_loss` bracket, resolved once via `execution/live_signal.py`'s
+(the Full Signal Universe table/log's `Stop-Loss Price` column, a dollar-at-risk figure, see
+above), and `place_orders_ibkr()`'s `attach_broker_stop_loss` bracket, resolved once via
+`execution/live_signal.py`'s
 `resolve_ticker_stop_loss_pct(ticker, cfg)`, the single source of truth for "what stop-loss
 width, if any, applies to this ticker right now."
 

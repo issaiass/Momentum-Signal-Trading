@@ -728,40 +728,41 @@ def resolve_ticker_stop_loss_pct(ticker: str, cfg: BacktestConfig) -> float | No
     return override.get("stop_loss_pct", cfg.stop_loss_pct)
 
 
-def compute_stop_loss_price(action: str, cfg: BacktestConfig, latest_price: float | None,
-                             avg_entry_price: float | None = None,
+def compute_stop_loss_price(action: str, cfg: BacktestConfig, money_invested: float | None,
                              ticker: str | None = None) -> float | None:
     """
-    Fixed-from-entry stop-loss price (stop_loss_pct below a reference price), NOT a trailing
-    stop, see docs/RISK_CONSTRAINTS.md's "Stop-Loss Width" for why: stop_loss_pct never ratchets
-    up as a position gains in either the backtest or live path, this function surfaces that
-    EXISTING mechanism for reporting, it doesn't add trailing behavior.
+    Reports the DOLLAR AMOUNT AT RISK on a position under its stop-loss, NOT a per-share price
+    despite the "Price" column header this feeds (a deliberate, explicit product decision, not a
+    bug, see docs/SIGNAL_RANKINGS_LOG.md): money_invested * stop_loss_pct, the target dollar
+    allocation for this ticker this rebalance times the configured stop-loss width.
+
+    This is a REPORTING-ONLY figure. It is NOT, and must not be, wired into either REAL
+    stop-loss enforcement mechanism, both of which correctly need a real per-share reference
+    price, not a dollar figure: daily_runner.py's check_and_handle_stop_losses() (the daily
+    percentage-drawdown check) and place_orders_ibkr()'s broker-side bracket order
+    (attach_broker_stop_loss's auxPrice), both compute their own real per-share threshold
+    directly from avg_entry_price, independently of this function.
 
     ticker : optional, resolves cfg.ticker_risk_overrides via resolve_ticker_stop_loss_pct()
     when given; None (the default, e.g. a caller that predates per-ticker overrides) falls back
-    to the portfolio-wide cfg.stop_loss_pct directly, byte-identical to before this param
-    existed. When the resolved width is None (disabled for this ticker), returns None
-    immediately regardless of action, surfaced as "N/A" wherever this is displayed, the same
-    as every other "not meaningful" case below.
+    to the portfolio-wide cfg.stop_loss_pct directly. When the resolved width is None (disabled
+    for this ticker), returns None immediately regardless of action, surfaced as "N/A" wherever
+    this is displayed, the same as every other "not meaningful" case below.
 
-    BUY: latest_price * (1 - stop_loss_pct), an ESTIMATE based on today's close, since the real
-    fill price isn't known yet and may differ once the order actually executes.
-    HOLD on an already-open position: avg_entry_price * (1 - stop_loss_pct) when avg_entry_price
-    is provided (a REAL reference, sourced from the broker's own FIFO cost basis), None when it
-    isn't (dry-run, or a caller that didn't pass current_avg_entry_prices to generate_orders()/
-    run(), matching the existing documented "position-performance fields are live-only" pattern).
-    SELL, or a ticker with no live price at all: None, not meaningful, the position is being
-    closed or was never priced.
+    BUY or HOLD with a real money_invested (> 0): money_invested * stop_loss_pct. Unlike the
+    prior per-share formula (which needed avg_entry_price, live-only), money_invested is
+    uniformly available regardless of live vs. dry-run, so this is now populated for HOLD rows
+    in dry-run mode too, previously always None there.
+    SELL, or a $0/no-position row (WATCHLIST/EXCLUDED, which already report money_invested=0
+    per the existing "no position exists" convention): None, not meaningful.
     """
     stop_loss_pct = resolve_ticker_stop_loss_pct(ticker, cfg) if ticker is not None else cfg.stop_loss_pct
     if stop_loss_pct is None:
         return None
-    if latest_price is None or latest_price <= 0:
+    if money_invested is None or money_invested <= 0:
         return None
-    if action == "BUY":
-        return latest_price * (1 - stop_loss_pct)
-    if action == "HOLD" and avg_entry_price:
-        return avg_entry_price * (1 - stop_loss_pct)
+    if action in ("BUY", "HOLD"):
+        return money_invested * stop_loss_pct
     return None
 
 
@@ -773,7 +774,6 @@ def generate_orders(
     latest_prices: dict,         # {ticker: price}
     cfg: BacktestConfig,
     signal_context: dict | None = None,  # optional {ticker: {'rank': int, 'signal_score': float}}
-    current_avg_entry_prices: dict | None = None,  # optional {ticker: avg_entry_price}, live-only
 ) -> dict:
     """
     Returns {ticker: {'action': 'BUY'|'SELL'|'HOLD', 'shares': int, 'reason': str,
@@ -810,11 +810,11 @@ def generate_orders(
     post-rebalance target), but transaction_amount reflects the real dollar amount transacted.
     0.0 for every HOLD, including "no live price available".
 
-    stop_loss_price (see compute_stop_loss_price()) is set the same uniform way, None default
-    (unchanged behavior) when current_avg_entry_prices isn't passed.
+    stop_loss_price (see compute_stop_loss_price()) is set the same uniform way, derived from
+    tgt_dollar (money_invested) and cfg.stop_loss_pct, a reporting-only dollar-at-risk figure,
+    None when money_invested is 0 or the stop-loss is disabled for this ticker.
     """
     signal_context = signal_context or {}
-    current_avg_entry_prices = current_avg_entry_prices or {}
     current_value = {t: s * latest_prices.get(t, 0.0) for t, s in current_holdings.items()}
     target_dollar = {t: total_value * gross_exposure * w for t, w in target_weights.items()}
     capital_this_rebalance = total_value * gross_exposure
@@ -828,7 +828,7 @@ def generate_orders(
         order["pct_money_invested"] = (tgt_dollar / capital_this_rebalance) if capital_this_rebalance > 0 else 0.0
         order["stop_loss_pct"] = resolve_ticker_stop_loss_pct(ticker, cfg)
         order["stop_loss_price"] = compute_stop_loss_price(
-            order["action"], cfg, price, current_avg_entry_prices.get(ticker), ticker=ticker,
+            order["action"], cfg, tgt_dollar, ticker=ticker,
         )
         # The actual dollar amount bought/sold THIS transaction (shares * price), distinct from
         # money_invested above (the post-rebalance TARGET allocation, $0 for a full exit SELL).
@@ -2381,16 +2381,9 @@ def run(
     alerts_log_path: str = ALERTS_LOG_PATH,
     extra_price_tickers: list[str] | None = None,
     daily_prices: pd.DataFrame | None = None,
-    current_avg_entry_prices: dict | None = None,
     signal_rankings_log_path: str = SIGNAL_RANKINGS_LOG_PATH,
 ) -> OrdersResult:
     """
-    current_avg_entry_prices : optional {ticker: avg_entry_price}, sourced from the broker's own
-    FIFO cost basis (daily_runner.py's current_positions, live-only, {} in dry-run). Backs the
-    Stop-Loss Price column/log field for an already-HELD position, see
-    compute_stop_loss_price()'s own docstring. None (default) is byte-identical to this
-    function's behavior before this param existed (stop_loss_price is None for every HOLD).
-
     signal_rankings_log_path : where log_signal_rankings() writes the full ranked-universe log
     (selected + watchlist tickers), a sibling to log_path's trade log, kept as a SEPARATE file so
     the trade log stays a clean "decisions actually made" audit trail, see
@@ -2680,8 +2673,7 @@ def run(
             return skip_result
 
     orders = generate_orders(current_holdings, weights, gross_exposure, total_value, latest_prices, cfg,
-                              signal_context=signal_context,
-                              current_avg_entry_prices=current_avg_entry_prices)
+                              signal_context=signal_context)
 
     for ticker, order in orders.items():
         logger.info("%-6s %-4s shares=%-8.4f (%s)", ticker, order["action"], order["shares"], order["reason"])

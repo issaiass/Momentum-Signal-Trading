@@ -150,12 +150,16 @@ WATCHLIST/EXCLUDED) shows `$0.00`/`0.00%` money and `"N/A"` for its stop-loss pr
 position was ever opened for it. "Lookback Return (%)" is footnoted "(composite score)" for the
 4 `strategy_type`s whose score isn't a literal price return
 (`multi_timeframe_composite`/`residual_momentum`/`path_dependent_momentum`/
-`hybrid_multi_factor`), see `docs/SIGNAL_RANKINGS_LOG.md`. Stop-Loss Price is fixed-from-entry,
-NOT trailing (see `docs/RISK_CONSTRAINTS.md`'s "Stop-Loss Width"): an estimate based on today's
-close for a `BUY`, the real entry-price-derived value for a `HOLD` on an already-open position
-(live mode only), and `"N/A"` for `SELL`/watchlist. The same data is also persisted every
-rebalance to `logs/signal_rankings_log_<portfolio>.csv`, a sibling to the trade log kept
-deliberately separate, see that doc for the full schema.
+`hybrid_multi_factor`), see `docs/SIGNAL_RANKINGS_LOG.md`. Despite the column name, "Stop-Loss
+Price" reports a DOLLAR AMOUNT AT RISK, not a per-share price: `Money Invest * stop_loss_pct` for
+a `BUY` or `HOLD` (populated the same way regardless of live vs. dry-run), and `"N/A"` for
+`SELL`/watchlist/excluded. A deliberate, explicit reporting choice, entirely independent of the
+two REAL stop-loss enforcement mechanisms (the daily percentage-drawdown check and the
+broker-side bracket order), both of which still compute their own real per-share threshold from
+`avg_entry_price`, unaffected by this column. See `docs/SIGNAL_RANKINGS_LOG.md`'s `stop_loss_price`
+entry for the full detail. The same data is also persisted every rebalance to
+`logs/signal_rankings_log_<portfolio>.csv`, a sibling to the trade log kept deliberately separate,
+see that doc for the full schema.
 
 **STANDARD (no-change confirmation)**, sent instead of the table above whenever a rebalance
 (scheduled or `--force-rebalance`) ran to completion but produced zero orders (e.g. every

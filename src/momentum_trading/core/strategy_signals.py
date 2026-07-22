@@ -333,6 +333,29 @@ def select_absolute_momentum_picks(
     return held if held else [defensive_ticker]
 
 
+def is_universe_negative(scores_row: pd.Series | None, tickers: list[str]) -> bool:
+    """
+    True when every ticker in `tickers` with a valid (non-NaN) score has a non-positive score,
+    i.e. NOTHING in the eligible universe shows positive momentum this rebalance. False when
+    scores_row is None or every score is NaN (nothing to judge either way, a different failure
+    mode, see run()'s own INSUFFICIENT_PRICE_HISTORY check), or when at least one valid score is
+    positive. A zero score is not positive, a flat trailing return is not momentum, same
+    convention select_absolute_momentum_picks() already uses.
+
+    Shared by resolve_strategy_picks() below (to decide whether to force empty picks) AND
+    execution/live_signal.py's run() (to detect, after the fact, whether THIS specific
+    constraint is what caused an empty picks list, for the MARKET_WIDE_NEGATIVE_MOMENTUM_CASH
+    alert), so the two call sites can't silently diverge on the definition of "the whole market
+    looks bad."
+    """
+    if scores_row is None:
+        return False
+    valid = scores_row.reindex(tickers).dropna()
+    if valid.empty:
+        return False
+    return bool((valid <= 0).all())
+
+
 def resolve_strategy_picks(
     scores_row: pd.Series | None, ranks_row: pd.Series | None, tickers: list[str],
     cfg: BacktestConfig, top_n: int,
@@ -348,7 +371,18 @@ def resolve_strategy_picks(
     docstring for the full real-bug writeup, pandas' nsmallest(n) backfills with NaN rows when
     fewer than n non-null values exist, which could silently select a NaN-ranked (e.g.
     liquidity-filtered) ticker into top_n.
+
+    cfg.use_negative_universe_cash_filter (Epic 6, opt-in, default False): checked FIRST, before
+    the strategy_type dispatch, so it takes precedence over "absolute_momentum"'s own
+    defensive_ticker fallback (select_absolute_momentum_picks() never itself returns empty,
+    this constraint forces a literal empty pick list, holding cash, when the entire universe has
+    non-positive momentum). Reuses the already-confirmed-safe "empty picks -> generate_orders()
+    sells any current holdings to cash and buys nothing, no crash" code path, no new sizing-path
+    risk introduced.
     """
+    if getattr(cfg, "use_negative_universe_cash_filter", False) and is_universe_negative(scores_row, tickers):
+        return []
+
     strategy_type = getattr(cfg, "strategy_type", "momentum")
 
     if strategy_type == "absolute_momentum":
@@ -368,8 +402,21 @@ def generate_strategy_monthly_picks(
     monthly_picks series (index=rebalance-period dates, values=list of picked tickers), the same
     shape research notebooks already hand-build for the default strategy, now reusable and
     strategy_type-aware. A date whose scores are all-NaN (e.g. the lookback window isn't
-    satisfied yet at the start of the history) is skipped entirely, not included with an empty
-    pick list.
+    satisfied yet at the start of the history, genuinely no signal exists yet) is skipped
+    entirely, not included at all.
+
+    A real, confirmed parity gap, fixed via Epic 6 ("Rebalance Reporting Clarity &
+    Selection-Logic Fixes" plan): a date where scores/ranks WERE computed but
+    resolve_strategy_picks() explicitly decided on ZERO picks (e.g. use_liquidity_filter zeroing
+    every rank, or use_negative_universe_cash_filter below detecting the whole universe is
+    negative) used to also be silently SKIPPED, exactly like the "no signal at all" case above,
+    even though it's a genuinely different situation, a real decision was made, it just happened
+    to be "hold cash." That skip meant run_risk_managed_backtest()'s monthly_picks.get(date, [])
+    lookup would silently fall through to the PREVIOUS period's picks instead of correctly going
+    to cash for that period, a real live/backtest divergence (live's run() DOES sell to cash
+    immediately for an empty picks list, see execution/live_signal.py's OrdersResult.
+    picks_were_empty). Fixed: such a date is now INCLUDED with an explicit empty list `[]`,
+    letting the backtest correctly simulate holding cash for that period, matching live.
 
     strategy_type == "hybrid_multi_factor" raises NotImplementedError, not a silent wrong
     number: core/fundamentals.py only ever fetches TODAY's/latest fundamentals snapshot (file-
@@ -413,10 +460,9 @@ def generate_strategy_monthly_picks(
     for date in ranks.index:
         ranks_row = ranks.loc[date].dropna()
         scores_row = scores.loc[date].dropna() if date in scores.index else None
-        if ranks_row.empty and (scores_row is None or scores_row.empty):
-            continue
-        selected = resolve_strategy_picks(scores_row, ranks_row, tickers, cfg, top_n)
-        if not selected:
-            continue
-        picks[date] = selected
+        if scores_row is None or scores_row.empty:
+            continue  # no signal at all yet (e.g. lookback window not satisfied), not a decision point
+        # An empty result here IS a real decision (hold cash), included, not skipped, see the
+        # parity note in this function's own docstring above.
+        picks[date] = resolve_strategy_picks(scores_row, ranks_row, tickers, cfg, top_n)
     return pd.Series(picks)

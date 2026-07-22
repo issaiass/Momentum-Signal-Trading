@@ -1476,6 +1476,111 @@ class TestExcludedVsWatchlistStatus:
         assert universe["E"]["signal_score"] < 0
 
 
+class TestMarketWideNegativeMomentumCashFilter:
+    """
+    cfg.use_negative_universe_cash_filter (Epic 6, opt-in, default False, byte-identical when
+    off): when the ENTIRE eligible universe has non-positive trailing momentum, holds literal
+    cash (empty picks) instead of the "least bad" top_n or a defensive_ticker swap. Distinct
+    from use_absolute_momentum (per-ticker swap, still ends up invested).
+    """
+
+    def _run_kwargs(self, tmp_path):
+        return dict(
+            log_path=str(tmp_path / "trade_log.csv"),
+            signal_rankings_log_path=str(tmp_path / "signal_rankings_log.csv"),
+            alerts_log_path=str(tmp_path / "alerts_log.csv"),
+        )
+
+    def _all_negative_prices(self, seed=51):
+        dates = pd.bdate_range("2024-01-01", "2024-05-15")
+        rng = np.random.default_rng(seed)
+        n = len(dates)
+        a = np.linspace(100, 60, n) * (1 + rng.normal(0, 0.0005, n))  # declining
+        b = np.linspace(100, 70, n) * (1 + rng.normal(0, 0.0005, n))  # declining, less steep
+        return pd.DataFrame({"A": a, "B": b}, index=dates)
+
+    def _mixed_prices(self, seed=52):
+        dates = pd.bdate_range("2024-01-01", "2024-05-15")
+        rng = np.random.default_rng(seed)
+        n = len(dates)
+        a = np.linspace(100, 60, n) * (1 + rng.normal(0, 0.0005, n))  # declining
+        b = np.linspace(50, 90, n) * (1 + rng.normal(0, 0.0005, n))   # rising
+        return pd.DataFrame({"A": a, "B": b}, index=dates)
+
+    def test_all_negative_holds_cash_and_fires_dedicated_alert(self, monkeypatch, tmp_path):
+        prices = self._all_negative_prices()
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False,
+                              use_negative_universe_cash_filter=True)
+        orders = live_signal.run(
+            tickers=["A", "B"], current_holdings={}, total_value=1000.0, cfg=cfg,
+            top_n=2, lookback_period=1.0, dry_run=True, **self._run_kwargs(tmp_path),
+        )
+
+        assert set(orders.keys()) == set()  # no BUYs, literal cash
+        assert orders.picks_were_empty is True
+        with open(str(tmp_path / "alerts_log.csv")) as f:
+            alerts_content = f.read()
+        assert "MARKET_WIDE_NEGATIVE_MOMENTUM_CASH" in alerts_content
+        assert "NO_ELIGIBLE_TICKERS" in alerts_content  # both fire together, different meanings
+
+    def test_overrides_absolute_momentum_defensive_ticker_fallback(self, monkeypatch, tmp_path):
+        # Real, confirmed interaction bug found while implementing this epic:
+        # absolute_momentum_overlay() falls back to [defensive_ticker] whenever handed an
+        # EMPTY picks list, which would silently re-inject a position and defeat this
+        # constraint entirely if both flags were on at once. Must still end up empty.
+        prices = self._all_negative_prices()
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False,
+                              use_negative_universe_cash_filter=True,
+                              use_absolute_momentum=True, defensive_ticker="B")
+        orders = live_signal.run(
+            tickers=["A", "B"], current_holdings={}, total_value=1000.0, cfg=cfg,
+            top_n=2, lookback_period=1.0, dry_run=True, **self._run_kwargs(tmp_path),
+        )
+
+        assert set(orders.keys()) == set()  # NOT defensive_ticker "B", still literal cash
+        assert orders.picks_were_empty is True
+
+    def test_one_positive_ticker_unaffected_no_alert(self, monkeypatch, tmp_path):
+        prices = self._mixed_prices()
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False,
+                              use_negative_universe_cash_filter=True)
+        orders = live_signal.run(
+            tickers=["A", "B"], current_holdings={}, total_value=1000.0, cfg=cfg,
+            top_n=1, lookback_period=1.0, dry_run=True, **self._run_kwargs(tmp_path),
+        )
+
+        assert "B" in orders  # the rising ticker still gets picked normally
+        assert orders.picks_were_empty is False
+        # No alert should have fired at all, the file may not even exist yet.
+        alerts_path = tmp_path / "alerts_log.csv"
+        if alerts_path.exists():
+            assert "MARKET_WIDE_NEGATIVE_MOMENTUM_CASH" not in alerts_path.read_text()
+
+    def test_flag_off_is_byte_identical_even_when_all_negative(self, monkeypatch, tmp_path):
+        prices = self._all_negative_prices()
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False)  # flag omitted, default False
+        orders = live_signal.run(
+            tickers=["A", "B"], current_holdings={}, total_value=1000.0, cfg=cfg,
+            top_n=1, lookback_period=1.0, dry_run=True, **self._run_kwargs(tmp_path),
+        )
+
+        # B declines less steeply than A, still the "least bad" pick under default behavior.
+        assert set(orders.keys()) == {"B"}
+        assert orders.picks_were_empty is False
+
+
 class TestLogSignalRankings:
     """
     log_signal_rankings() writes one hash-chained row per full_signal_universe ticker, a

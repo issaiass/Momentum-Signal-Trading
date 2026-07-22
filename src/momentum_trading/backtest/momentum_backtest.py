@@ -138,6 +138,30 @@ class BacktestConfig:
                                              # treasuries). Must be priced alongside the portfolio's
                                              # own tickers for this to work (add it to that
                                              # portfolio's own tickers: list in config.yaml).
+    use_negative_universe_cash_filter: bool = False  # LIVE + BACKTEST (Epic 6, "Rebalance
+                                             # Reporting Clarity & Selection-Logic Fixes" plan): a
+                                             # whole-book constraint, distinct from
+                                             # use_absolute_momentum above (which swaps an
+                                             # INDIVIDUAL negative pick for defensive_ticker, still
+                                             # ending up invested). When True and EVERY ticker in
+                                             # the eligible universe has a non-positive trailing
+                                             # score this rebalance, holds literal CASH (0%
+                                             # invested) instead of picking the "least bad"
+                                             # top_n or swapping to a single defensive ticker.
+                                             # Takes precedence over strategy_type=="absolute_momentum"'s
+                                             # own defensive_ticker fallback when both trigger at
+                                             # once. Default False, deliberately opt-in like
+                                             # skip_month_guardrail/use_absolute_momentum above:
+                                             # enabling it changes what the SAME scores actually
+                                             # resolve to each rebalance, a real signal-construction
+                                             # change, not just a new warning. Wired into
+                                             # core/strategy_signals.py's resolve_strategy_picks(),
+                                             # the single shared function both execution/
+                                             # live_signal.py's run() and
+                                             # generate_strategy_monthly_picks() call, guaranteeing
+                                             # live/backtest parity by construction. See
+                                             # docs/RISK_CONSTRAINTS.md's "Whole-Book Negative
+                                             # Momentum Cash Filter".
     persist_dry_run_state: bool = False     # DRY-RUN-ONLY, no effect in --live (the broker is
                                              # always the source of truth there). Default False
                                              # preserves dry-run's existing behavior exactly:

@@ -99,7 +99,14 @@ README says so on purpose.
   regime scalar, so a bullish-but-suddenly-volatile market also gets throttled, not just a
   bearish one, with a dedicated `MARKET_VOLATILITY_REGIME_DEFENSIVE` alert when volatility alone
   is what triggered it, see `docs/RISK_CONSTRAINTS.md`'s "Regime Filter: Volatility Dimension"
-  section. Restart-safe by
+  section. Whole-book negative momentum cash filter (`use_negative_universe_cash_filter`,
+  opt-in, LIVE + BACKTEST): holds literal cash instead of the "least bad" pick or a
+  defensive-ticker swap when NOTHING in the eligible universe shows positive momentum, distinct
+  from and takes precedence over `use_absolute_momentum`'s per-ticker swap when both trigger at
+  once, with a dedicated `MARKET_WIDE_NEGATIVE_MOMENTUM_CASH` alert, see
+  `docs/RISK_CONSTRAINTS.md`'s "Whole-Book Negative Momentum Cash Filter" section. Also a
+  distinct `NO_ELIGIBLE_TICKERS` alert (any cause) plus a differently-worded no-action email when
+  zero tickers pass selection, see `docs/ALERT_LOG.md`. Restart-safe by
   construction in `--live` mode (broker-sourced
   holdings, calendar-derived scheduling, persisted local/bind-mounted state, both native Python
   and Docker), plus a non-blocking `MISSED_REBALANCE_DAY` warning if a scheduled rebalance was

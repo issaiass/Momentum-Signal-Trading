@@ -2392,7 +2392,7 @@ def run(
     # FROM this module (core/'s deliberate one-directional exception, see that module's own
     # docstring), so a top-level import here would be circular. Importing inside the function
     # body breaks the cycle, the same established pattern this file already uses for ibapi.
-    from ..core.strategy_signals import resolve_strategy_scores, resolve_strategy_picks
+    from ..core.strategy_signals import resolve_strategy_scores, resolve_strategy_picks, is_universe_negative
 
     price_tickers = tickers if not extra_price_tickers else list(dict.fromkeys(list(tickers) + list(extra_price_tickers)))
     if daily_prices is not None and not daily_prices.empty and set(price_tickers).issubset(daily_prices.columns):
@@ -2499,12 +2499,26 @@ def run(
     picks = resolve_strategy_picks(latest_scores, latest_ranks_row, tickers, cfg, top_n)
     logger.info("Today's signal picks (top %d, strategy_type=%s): %s", top_n, cfg.strategy_type, picks)
 
+    # --- Whole-book negative momentum cash filter (Epic 6, "Rebalance Reporting Clarity &
+    #     Selection-Logic Fixes" plan): recomputed here (not read off `picks` alone) so it can
+    #     be distinguished from an UNRELATED cause of empty picks (e.g. liquidity filtering)
+    #     for both the overlay guard right below and the dedicated alert further down. ---
+    market_wide_negative = cfg.use_negative_universe_cash_filter and is_universe_negative(latest_scores, tickers)
+
     # --- Absolute Momentum (Macro) overlay: any pick with negative OWN trailing momentum
     #     (not just its rank relative to other picks) gets swapped for cfg.defensive_ticker,
     #     BEFORE signal_context/sizing/vol-scaling/regime-filtering, so every downstream step
     #     acts on the FINAL pick list. Opt-in, byte-identical to before this feature when
-    #     disabled (default). See apply_absolute_momentum_filter(). ---
-    if cfg.use_absolute_momentum:
+    #     disabled (default). See apply_absolute_momentum_filter().
+    #     Skipped when market_wide_negative already forced `picks` empty: a real, confirmed
+    #     interaction bug found while implementing Epic 6, core/functions_quant_extensions.py's
+    #     absolute_momentum_overlay() falls back to `[defensive_ticker]` whenever handed an
+    #     EMPTY picks list (`kept if kept else [defensive_ticker]`), which would silently
+    #     re-inject a real position and completely defeat use_negative_universe_cash_filter's
+    #     entire point (literal cash, not a defensive-ticker swap) whenever both flags are on
+    #     at once. An UNRELATED empty-picks cause (e.g. liquidity filtering, market_wide_negative
+    #     False) still gets the overlay applied exactly as before, unchanged. ---
+    if cfg.use_absolute_momentum and not market_wide_negative:
         filtered_picks = apply_absolute_momentum_filter(picks, latest_scores, cfg.defensive_ticker)
         if filtered_picks != picks:
             logger.info("Absolute momentum filter: %s -> %s", picks, filtered_picks)
@@ -2514,11 +2528,13 @@ def run(
     #     Selection-Logic Fixes" plan): distinct from the INSUFFICIENT_PRICE_HISTORY case above
     #     (scores.empty, no score could even be computed), this fires when scores/ranks were
     #     computed fine but nothing survived SELECTION, e.g. use_liquidity_filter zeroing every
-    #     ticker's rank. picks_were_empty is only ever True here, never for
-    #     strategy_type == "absolute_momentum" (select_absolute_momentum_picks() always falls
-    #     back to [defensive_ticker], never an empty list). The rebalance still proceeds safely:
-    #     generate_orders() sells any currently-held position down to cash and buys nothing, no
-    #     crash, this block is alerting/reporting only, not new sizing logic. ---
+    #     ticker's rank, OR market_wide_negative above. picks_were_empty is only ever True here,
+    #     never for strategy_type == "absolute_momentum" alone (select_absolute_momentum_picks()
+    #     always falls back to [defensive_ticker], never an empty list, UNLESS overridden by
+    #     market_wide_negative, see resolve_strategy_picks()'s own precedence). The rebalance
+    #     still proceeds safely: generate_orders() sells any currently-held position down to
+    #     cash and buys nothing, no crash, this block is alerting/reporting only, not new sizing
+    #     logic. ---
     picks_were_empty = not picks
     if picks_were_empty:
         logger.warning(
@@ -2529,6 +2545,24 @@ def run(
         log_alert(
             portfolio, "NO_ELIGIBLE_TICKERS", "WARNING",
             "No tickers passed selection this rebalance, holding cash.",
+            log_path=alerts_log_path,
+        )
+
+    # --- Market-wide negative momentum, specifically (Epic 6): fires ONLY when THIS
+    #     constraint, not an unrelated cause, is what emptied `picks`, distinct from the more
+    #     generic NO_ELIGIBLE_TICKERS above (both fire together in this case, that's fine, they
+    #     mean different things: one says "nothing was eligible", this one says "specifically,
+    #     the whole market looked bad"). ---
+    if market_wide_negative:
+        logger.warning(
+            "[%s] MARKET-WIDE NEGATIVE MOMENTUM: every ticker in the eligible universe has "
+            "non-positive trailing momentum, holding literal cash (use_negative_universe_cash_filter).",
+            portfolio,
+        )
+        log_alert(
+            portfolio, "MARKET_WIDE_NEGATIVE_MOMENTUM_CASH", "WARNING",
+            "Every ticker in the eligible universe has non-positive trailing momentum, "
+            "holding cash.",
             log_path=alerts_log_path,
         )
 

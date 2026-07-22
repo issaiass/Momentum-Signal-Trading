@@ -228,6 +228,78 @@ work (add it to that portfolio's own `tickers:` list in `config.yaml`), there is
 widening of the price fetch for it, unlike the orphaned-ticker reconciliation's
 `extra_price_tickers` mechanism (a deliberately different, narrower feature).
 
+## Whole-Book Negative Momentum Cash Filter [New, LIVE + BACKTEST, opt-in]
+
+`use_negative_universe_cash_filter` (default `false`): when EVERY ticker in the eligible
+universe has a non-positive trailing score this rebalance, holds literal CASH (0% invested)
+instead of picking the "least bad" `top_n` (the default behavior, `nsmallest()`-based selection
+picks the strongest of a bad bunch regardless of sign) or swapping to `defensive_ticker`
+(`use_absolute_momentum`, above, which still ends up invested).
+
+```yaml
+risk_overrides:
+  use_negative_universe_cash_filter: true
+```
+
+**Distinct from `use_absolute_momentum`, not a replacement for it**: that constraint swaps
+INDIVIDUAL negative picks for `defensive_ticker`, a per-ticker decision, the book stays fully
+invested (just in a different name). This constraint is a WHOLE-BOOK decision, literal cash,
+triggered only when NOTHING in the universe shows positive momentum, a much rarer, more extreme
+condition than any single pick being negative. The two are complementary and can both be
+enabled at once; **when both trigger simultaneously, this constraint takes precedence**, forcing
+literal cash rather than a defensive-ticker swap, see the real interaction bug below.
+
+**Implementation, guaranteeing live/backtest parity by construction**: `is_universe_negative(scores_row,
+tickers)` (`core/strategy_signals.py`) is the shared predicate (every valid, non-NaN score `<=
+0`, a zero score is not positive, same convention `select_absolute_momentum_picks()` already
+uses). `resolve_strategy_picks()`, the SINGLE function both `execution/live_signal.py`'s `run()`
+(live) and `generate_strategy_monthly_picks()` (backtest) call for final pick selection, checks
+this FIRST, before the `strategy_type` dispatch, forcing an empty pick list immediately when it
+triggers, so it correctly overrides `absolute_momentum`'s own `select_absolute_momentum_picks()`
+(which never itself returns empty, always falls back to `[defensive_ticker]`). Reuses the
+already-confirmed-safe "empty picks -> `generate_orders()` sells any current holdings to cash
+and buys nothing, no crash" code path (see `docs/ALERT_LOG.md`'s `NO_ELIGIBLE_TICKERS` row), no
+new sizing-path risk introduced.
+
+**A real, confirmed interaction bug, found and fixed while implementing this constraint**:
+`core/functions_quant_extensions.py`'s `absolute_momentum_overlay()` (the function backing the
+SEPARATE `use_absolute_momentum` overlay toggle, applied AFTER `resolve_strategy_picks()`
+returns) falls back to `[defensive_ticker]` whenever handed an ALREADY-empty picks list
+(`kept if kept else [defensive_ticker]`), its own designed behavior for "never leave the
+portfolio in a naked empty state." With both `use_negative_universe_cash_filter` and
+`use_absolute_momentum` enabled at once, this would have silently RE-INJECTED
+`defensive_ticker`, completely defeating this constraint's whole point. `execution/
+live_signal.py`'s `run()` now recomputes `is_universe_negative()` itself right after
+`resolve_strategy_picks()` returns, and skips the `use_absolute_momentum` overlay call entirely
+when this constraint (not an unrelated cause like liquidity filtering) is what produced the
+empty picks, letting literal cash actually win.
+
+**New alert, `MARKET_WIDE_NEGATIVE_MOMENTUM_CASH`** (WARNING, `log_alert()`): fires specifically
+when THIS constraint, not an unrelated cause, emptied `picks`. Distinct from the more generic
+`NO_ELIGIBLE_TICKERS` alert (`docs/ALERT_LOG.md`), which also fires in this case (both alerts
+fire together, that's fine, they mean different things: one says "nothing was eligible this
+rebalance", this one says "specifically, the whole market looked bad").
+
+**Backtest note, an honest scope caveat, not overclaiming**: fixing this at the SELECTION layer
+(`resolve_strategy_picks()`) also surfaced and fixed a real, confirmed parity gap in
+`generate_strategy_monthly_picks()`: a date where a real "hold cash" decision was made (empty
+picks, e.g. from this constraint or the liquidity filter) used to be silently SKIPPED from the
+returned `monthly_picks` series entirely, exactly like the "no signal at all yet" case (start of
+history, lookback not satisfied), even though it's a genuinely different situation. That skip
+meant `run_risk_managed_backtest()`'s `monthly_picks.get(date, [])` lookup for the NEXT
+rebalance would silently fall through to a STALE prior period's picks instead of correctly
+seeing "nothing was eligible then." Fixed: such a date is now included with an explicit `[]`,
+so subsequent lookups see the correct, current decision, not stale data. This does NOT, by
+itself, make `run_risk_managed_backtest()` actively LIQUIDATE existing holdings to cash the
+moment this constraint triggers, that engine's own rebalance-trigger condition
+(`if target_tickers and not circuit_breaker_halted:`) currently treats an empty `target_tickers`
+as "nothing to rebalance this period, hold whatever is currently held" rather than "force-sell
+everything," a narrower, pre-existing characteristic of the backtest EXECUTION engine itself,
+distinct from the SELECTION layer this constraint lives in, deliberately left alone here rather
+than risking a larger, unrequested change to a heavily-tested, financially-significant
+simulation loop. Live's `execution/live_signal.py`'s `run()` has no such gap, `generate_orders()`
+genuinely sells any current holdings to cash immediately once `picks` comes back empty.
+
 ## Broker-Side Protective Stop [New, LIVE-ONLY, opt-in]
 
 `attach_broker_stop_loss` (default `false`): a REAL IBKR bracket order attached at BUY time,

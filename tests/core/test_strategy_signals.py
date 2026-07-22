@@ -17,7 +17,7 @@ import pytest
 from momentum_trading.backtest.momentum_backtest import BacktestConfig
 from momentum_trading.core.strategy_signals import (
     resolve_strategy_scores, generate_strategy_monthly_picks,
-    select_absolute_momentum_picks, resolve_strategy_picks,
+    select_absolute_momentum_picks, resolve_strategy_picks, is_universe_negative,
     resolve_residual_momentum_scores, resolve_path_dependent_momentum_scores,
     resolve_hybrid_multi_factor_scores,
 )
@@ -378,6 +378,73 @@ class TestResolveStrategyPicks:
         result = resolve_strategy_picks(scores_row, ranks_row, ["A", "B"], cfg, top_n=2)
         assert result == []
 
+    def test_negative_universe_cash_filter_forces_empty_picks(self):
+        # Epic 6: every ticker non-positive, flag on -> literal cash, not the "least bad" pick.
+        scores_row = pd.Series({"A": -0.05, "B": -0.02})
+        ranks_row = pd.Series({"A": 1.0, "B": 2.0})
+        cfg = BacktestConfig(holding_period=1, use_negative_universe_cash_filter=True)
+        result = resolve_strategy_picks(scores_row, ranks_row, ["A", "B"], cfg, top_n=1)
+        assert result == []
+
+    def test_negative_universe_cash_filter_overrides_absolute_momentum_fallback(self):
+        # Epic 6's key precedence requirement: absolute_momentum's own
+        # select_absolute_momentum_picks() NEVER returns empty (always falls back to
+        # defensive_ticker), but the cash filter must win when both trigger at once, forcing
+        # a literal empty list instead of [defensive_ticker].
+        scores_row = pd.Series({"A": -0.05, "B": -0.02})
+        cfg = BacktestConfig(holding_period=1, use_negative_universe_cash_filter=True,
+                              strategy_type="absolute_momentum", defensive_ticker="BIL")
+        result = resolve_strategy_picks(scores_row, None, ["A", "B"], cfg, top_n=1)
+        assert result == []
+
+    def test_negative_universe_cash_filter_unaffected_when_one_score_positive(self):
+        # At least one positive score present -> normal selection proceeds unaffected.
+        scores_row = pd.Series({"A": -0.05, "B": 0.02})
+        ranks_row = pd.Series({"A": 2.0, "B": 1.0})
+        cfg = BacktestConfig(holding_period=1, use_negative_universe_cash_filter=True)
+        result = resolve_strategy_picks(scores_row, ranks_row, ["A", "B"], cfg, top_n=1)
+        assert result == ["B"]
+
+    def test_negative_universe_cash_filter_off_is_byte_identical(self):
+        # Flag off (default) -> byte-identical to today regardless of scores, even an
+        # all-negative universe still falls through to normal nsmallest() selection.
+        scores_row = pd.Series({"A": -0.05, "B": -0.02})
+        ranks_row = pd.Series({"A": 2.0, "B": 1.0})
+        cfg = BacktestConfig(holding_period=1)  # flag omitted, default False
+        result = resolve_strategy_picks(scores_row, ranks_row, ["A", "B"], cfg, top_n=1)
+        assert result == ["B"]
+
+
+class TestIsUniverseNegative:
+    """
+    is_universe_negative() (Epic 6): the shared predicate resolve_strategy_picks() uses to
+    decide whether to force empty picks, and execution/live_signal.py's run() reuses
+    identically to detect (after the fact) whether THIS specific constraint, not an unrelated
+    cause, is what emptied `picks`, for the dedicated MARKET_WIDE_NEGATIVE_MOMENTUM_CASH alert.
+    """
+
+    def test_all_negative_is_true(self):
+        assert is_universe_negative(pd.Series({"A": -0.1, "B": -0.05}), ["A", "B"]) is True
+
+    def test_all_zero_is_true(self):
+        # A zero score is not positive, matches select_absolute_momentum_picks()'s convention.
+        assert is_universe_negative(pd.Series({"A": 0.0, "B": 0.0}), ["A", "B"]) is True
+
+    def test_one_positive_is_false(self):
+        assert is_universe_negative(pd.Series({"A": -0.1, "B": 0.05}), ["A", "B"]) is False
+
+    def test_none_scores_row_is_false(self):
+        assert is_universe_negative(None, ["A", "B"]) is False
+
+    def test_all_nan_scores_is_false(self):
+        # Nothing to judge either way, a different failure mode (INSUFFICIENT_PRICE_HISTORY).
+        assert is_universe_negative(pd.Series({"A": np.nan, "B": np.nan}), ["A", "B"]) is False
+
+    def test_only_scoped_to_given_tickers(self):
+        # A ticker outside `tickers` with a positive score must not save the verdict.
+        scores_row = pd.Series({"A": -0.1, "B": -0.05, "OTHER": 0.5})
+        assert is_universe_negative(scores_row, ["A", "B"]) is True
+
 
 class TestGenerateStrategyMonthlyPicks:
     """
@@ -450,3 +517,34 @@ class TestGenerateStrategyMonthlyPicks:
         assert not picks.empty
         for tickers in picks.values:
             assert "C" not in tickers
+
+    def test_all_illiquid_dates_included_with_explicit_empty_list_not_skipped(self):
+        # Real, confirmed parity gap, fixed via Epic 6: a date where scores/ranks were computed
+        # but liquidity filtering zeroed every ticker's rank used to be silently SKIPPED (as if
+        # no signal existed at all), letting a LATER rebalance's monthly_picks.get(date, [])
+        # lookup silently fall back to a STALE prior period's picks instead of correctly seeing
+        # "nothing was eligible." Now correctly included with an explicit [] (a real decision).
+        prices = _synthetic_prices()
+        volume = pd.DataFrame({t: np.full(len(prices), 10.0) for t in ["A", "B", "C"]}, index=prices.index)
+        cfg = BacktestConfig(holding_period=1, lookback_period=3, use_liquidity_filter=True,
+                              min_avg_dollar_volume=1_000_000.0)  # every ticker illiquid, always
+        picks = generate_strategy_monthly_picks(prices, ["A", "B", "C"], cfg, cfg.lookback_period,
+                                                  top_n=2, daily_volume=volume)
+        assert not picks.empty  # dates WERE recorded, not silently dropped from the Series
+        for tickers in picks.values:
+            assert tickers == []  # every date correctly recorded as an explicit "hold cash" decision
+
+    def test_negative_universe_cash_filter_produces_explicit_empty_picks(self):
+        # Epic 6, backtest side: a synthetic universe with a strong, consistent NEGATIVE drift
+        # (every trailing window's return negative) must produce explicit [] entries, not
+        # silently skip those dates or fall back to a stale prior period's picks.
+        dates = pd.bdate_range("2023-01-01", periods=400)
+        rng = np.random.default_rng(11)
+        prices = pd.DataFrame({
+            "A": 100 * np.cumprod(1 + rng.normal(-0.01, 0.005, 400)),
+            "B": 100 * np.cumprod(1 + rng.normal(-0.008, 0.005, 400)),
+        }, index=dates)
+        cfg = BacktestConfig(holding_period=1, lookback_period=3, use_negative_universe_cash_filter=True)
+        picks = generate_strategy_monthly_picks(prices, ["A", "B"], cfg, cfg.lookback_period, top_n=1)
+        assert not picks.empty
+        assert any(tickers == [] for tickers in picks.values)

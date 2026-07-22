@@ -538,6 +538,20 @@ that tests enforce, don't casually violate these when editing:
   break every existing call site's unpacking; deliberately NOT merged into `signal_context`/the
   trade log either, per an explicit design decision to keep that log's "decisions actually made"
   meaning uncontaminated by tickers nothing was ever decided about.
+  `OrdersResult` also gained a `.picks_were_empty: bool = False` attribute (Epic 5, "Rebalance
+  Reporting Clarity & Selection-Logic Fixes" plan), set right after `picks` is finalized (post
+  absolute-momentum swap): `True` when `not picks`, i.e. no ticker survived selection this
+  rebalance even though scores/ranks were computed fine (e.g. `use_liquidity_filter` zeroed
+  every rank), distinct from an empty `orders` dict for an unrelated reason like
+  `AGGREGATE_DRIFT_SKIP` (eligible tickers existed, drift was just trivial). Fires a new
+  `NO_ELIGIBLE_TICKERS` `WARNING` alert (`log_alert()`) at the point of detection, and is carried
+  through on both the final `result` and the `AGGREGATE_DRIFT_SKIP` early-return `skip_result`
+  (so the flag survives even when that later skip check also triggers). Purely alerting/
+  reporting, no new sizing logic: `generate_orders()` already safely sold any current holdings
+  to cash and bought nothing when `target_weights` was empty, this just makes that specific
+  cause visible instead of looking identical to a routine no-action rebalance. Read by
+  `daily_runner.py`'s no-action email branch (see `interfaces/notifications.py`'s
+  `build_no_action_summary_html()` bullet).
   `compute_stop_loss_price(action, cfg, latest_price, avg_entry_price=None)` surfaces the
   EXISTING fixed-from-entry `stop_loss_pct` mechanism (see `docs/RISK_CONSTRAINTS.md`'s
   "Stop-Loss Width", still not trailing) for reporting: an ESTIMATE
@@ -748,6 +762,23 @@ that tests enforce, don't casually violate these when editing:
   consistent with every other portfolio email. Does NOT fire on a non-rebalance day (the daily
   snapshot/stop-loss block runs regardless but was never gated by `orders_result` and stays
   silent by design, this isn't a new daily-cron email).
+  `build_no_action_summary_html()` gained an optional `picks_were_empty: bool = False` param
+  (Epic 5, "Rebalance Reporting Clarity & Selection-Logic Fixes" plan, `False` byte-identical to
+  before this param existed): when `execution/live_signal.py`'s `run()`'s new
+  `OrdersResult.picks_were_empty` is `True` (NO ticker survived selection this rebalance,
+  scores/ranks were computed fine but nothing passed filtering, e.g. `use_liquidity_filter`
+  zeroed every rank), the email shows a distinct "no tickers passed selection... holding cash"
+  message instead of the generic "no order changes" text, previously indistinguishable from a
+  routine trivial-drift skip (`AGGREGATE_DRIFT_SKIP`). `daily_runner.py`'s call site passes
+  `orders_result.picks_were_empty` straight through, no new plumbing needed. A new
+  `NO_ELIGIBLE_TICKERS` `WARNING` (`log_alert()`, same pattern as every other advisory alert)
+  fires from `run()` itself right after `picks` is finalized (post absolute-momentum swap, which
+  never itself returns empty, `select_absolute_momentum_picks()` always falls back to
+  `[defensive_ticker]`), distinct from `INSUFFICIENT_PRICE_HISTORY` (a different, EARLIER
+  failure mode, `scores.empty`, no score could even be computed). This is alerting/reporting
+  only, no new sizing logic: `generate_orders()` already safely sells any current holdings to
+  cash and buys nothing when `target_weights` is empty, confirmed real behavior, not new here.
+  See `docs/ALERT_LOG.md`'s `NO_ELIGIBLE_TICKERS` row.
   `notifications.py`'s `build_signal_universe_html(full_signal_universe, orders, top_n,
   strategy_type, dry_run=False)` builds the second "Full Signal Universe" table appended below
   `build_rebalance_summary_html()`'s existing table in the same rebalance email, reading

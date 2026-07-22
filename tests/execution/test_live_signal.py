@@ -912,6 +912,7 @@ class TestRunLiquidityFilter:
         return dict(
             log_path=str(tmp_path / "trade_log.csv"),
             signal_rankings_log_path=str(tmp_path / "signal_rankings_log.csv"),
+            alerts_log_path=str(tmp_path / "alerts_log.csv"),
         )
 
     def test_illiquid_top_ranked_ticker_is_never_selected(self, monkeypatch, tmp_path):
@@ -931,6 +932,8 @@ class TestRunLiquidityFilter:
         # A is the real next-best liquid ticker, not B.
         assert "C" not in orders  # never picked despite being the strongest signal
         assert set(orders.keys()) == {"A"}
+        # A real pick still made it through, this is NOT the "zero eligible tickers" case.
+        assert orders.picks_were_empty is False
 
     def test_default_disabled_is_byte_identical(self, monkeypatch, tmp_path):
         prices = self._ranked_prices()
@@ -1015,6 +1018,13 @@ class TestRunLiquidityFilter:
         universe = orders.full_signal_universe
         assert universe["A"]["selection_status"] == "Excluded (Illiquid)"
         assert universe["B"]["selection_status"] == "Excluded (Illiquid)"
+
+        # Epic 5: zero eligible tickers this rebalance is now distinctly flagged, not just a
+        # silently empty `orders` dict indistinguishable from a routine no-drift skip.
+        assert orders.picks_were_empty is True
+        with open(str(tmp_path / "alerts_log.csv")) as f:
+            alerts_content = f.read()
+        assert "NO_ELIGIBLE_TICKERS" in alerts_content
 
     def test_no_volume_data_available_logs_warning_and_does_not_crash(self, monkeypatch, tmp_path, caplog):
         prices = self._ranked_prices()

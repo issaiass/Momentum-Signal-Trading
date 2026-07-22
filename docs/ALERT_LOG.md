@@ -30,6 +30,13 @@ run" than reconstructing it from N separate files, and some alert types (`TICKER
 `CAPITAL_ALLOCATION_ERROR`, `OVER_ALLOCATION`) are inherently cross-portfolio and logged under
 the pseudo-portfolio name `"ALL"` rather than any single real portfolio.
 
+**A REJECTED or ERROR email command (e.g. a LIQUIDATE with a wrong `confirmation_phrase`) is
+NEVER written here**, regardless of severity, only to `logs/email_commands_log.csv`'s own
+`reason` column (or the REJECTED/ERROR reply email, if `notifications.send_email_command_
+feedback` is on), a real point of confusion worth calling out explicitly, not just implied by
+the table above: these are two structurally separate logs with different schemas, an email
+command's outcome doesn't automatically become an "alert."
+
 ## Schema
 
 ```
@@ -80,6 +87,7 @@ trade log.
 | `STALE_PRICE_FEED` | CRITICAL | `daily_runner.py` (main loop) | Latest price data is older than `max_price_staleness_minutes` allows; that portfolio's run was skipped |
 | `HOLDING_PERIOD_TOO_FREQUENT` | WARNING | `daily_runner.py` (main loop) | That portfolio's `holding_period` is below `0.25` (faster than weekly), run proceeds normally, never blocked |
 | `SLIPPAGE_TOLERANCE_EXCEEDED` | WARNING | `execution/live_signal.py::place_orders_ibkr()` | A fill's price deviated from the expected price by more than `max_slippage_tolerance_pct`, the fill already executed, this is informational only |
+| `NO_ELIGIBLE_TICKERS` | WARNING | `execution/live_signal.py::run()` | Scores/ranks were computed fine, but NO ticker survived selection this rebalance (e.g. `use_liquidity_filter` zeroed every rank); the rebalance still proceeds safely (sells any current holdings to cash, buys nothing), distinct from `INSUFFICIENT_PRICE_HISTORY` (no score could even be computed) or `AGGREGATE_DRIFT_SKIP` (eligible tickers existed, drift was just trivial) |
 
 **`TICKER_OVERLAP` is not just a theoretical warning**, observed directly in a real paper run:
 a portfolio inherited a stray position in a ticker *outside its own configured universe*

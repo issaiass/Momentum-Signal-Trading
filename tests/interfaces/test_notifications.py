@@ -16,7 +16,7 @@ import pytest
 from momentum_trading.interfaces.notifications import (
     NotificationCategory, should_send, send_action_email,
     build_rebalance_summary_html, build_monthly_report_html, build_daily_report_html,
-    build_comparison_bar_chart, build_signal_universe_html,
+    build_comparison_bar_chart, build_signal_universe_html, build_no_action_summary_html,
 )
 
 
@@ -416,6 +416,32 @@ class TestHTMLGeneration:
             "portfolio1", snap, {"error": "no data"}, position_performance={},
         )
         assert "Position Performance" not in html
+
+
+class TestBuildNoActionSummaryHtml:
+    """
+    Sent when a rebalance ran to completion but produced zero orders. Epic 5 of the
+    "Rebalance Reporting Clarity & Selection-Logic Fixes" plan adds picks_were_empty, so "no
+    tickers passed selection" (e.g. every ticker filtered by the liquidity filter) reads
+    distinctly from a routine "drift too small to trade" skip, previously indistinguishable.
+    """
+
+    def test_default_shows_generic_no_changes_message(self):
+        html = build_no_action_summary_html("portfolio1")
+        assert "portfolio1" in html
+        assert "no order changes" in html
+        assert "no tickers passed selection" not in html
+
+    def test_picks_were_empty_shows_distinct_message(self):
+        html = build_no_action_summary_html("portfolio1", picks_were_empty=True)
+        assert "portfolio1" in html
+        assert "no tickers passed selection" in html
+        assert "holding cash" in html
+        assert "NO_ELIGIBLE_TICKERS" in html
+
+    def test_picks_were_empty_false_is_byte_identical_to_default(self):
+        assert build_no_action_summary_html("portfolio1") == build_no_action_summary_html(
+            "portfolio1", picks_were_empty=False)
 
 
 class TestBuildSignalUniverseHtml:

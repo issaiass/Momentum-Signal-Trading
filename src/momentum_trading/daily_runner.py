@@ -1726,7 +1726,7 @@ def main():
                 else:
                     send_standard_action(
                         f"Rebalance checked, no changes: {name}",
-                        build_no_action_summary_html(name),
+                        build_no_action_summary_html(name, picks_were_empty=orders_result.picks_were_empty),
                         notification_cfg,
                     )
 

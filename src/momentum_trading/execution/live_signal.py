@@ -2322,8 +2322,18 @@ class OrdersResult(dict):
     build_signal_universe_html()) or otherwise inspect ranking data beyond what made it into an
     actual order decision. Deliberately NOT a second return value (`orders, universe = run(...)`)
     since that would be a breaking signature change for every existing call site/test/notebook.
+
+    .picks_were_empty (Epic 5, "Rebalance Reporting Clarity & Selection-Logic Fixes" plan): True
+    when NO ticker survived selection this rebalance (scores/ranks were computed fine, but
+    nothing passed filtering, e.g. use_liquidity_filter zeroing every ticker's rank), distinct
+    from an empty `orders` dict for an unrelated reason (e.g. AGGREGATE_DRIFT_SKIP, nothing to
+    trade because drift was trivial, tickers WERE eligible). daily_runner.py's no-action email
+    branch reads this to show a distinctly-worded message rather than the generic "ran to
+    completion with no order changes" text. Default False, byte-identical for every existing
+    caller that never sets it.
     """
     full_signal_universe: dict = {}
+    picks_were_empty: bool = False
 
 
 def run(
@@ -2500,6 +2510,28 @@ def run(
             logger.info("Absolute momentum filter: %s -> %s", picks, filtered_picks)
         picks = filtered_picks
 
+    # --- Zero eligible tickers this rebalance (Epic 5, "Rebalance Reporting Clarity &
+    #     Selection-Logic Fixes" plan): distinct from the INSUFFICIENT_PRICE_HISTORY case above
+    #     (scores.empty, no score could even be computed), this fires when scores/ranks were
+    #     computed fine but nothing survived SELECTION, e.g. use_liquidity_filter zeroing every
+    #     ticker's rank. picks_were_empty is only ever True here, never for
+    #     strategy_type == "absolute_momentum" (select_absolute_momentum_picks() always falls
+    #     back to [defensive_ticker], never an empty list). The rebalance still proceeds safely:
+    #     generate_orders() sells any currently-held position down to cash and buys nothing, no
+    #     crash, this block is alerting/reporting only, not new sizing logic. ---
+    picks_were_empty = not picks
+    if picks_were_empty:
+        logger.warning(
+            "[%s] No tickers passed selection this rebalance (scores/ranks were computed, but "
+            "nothing survived filtering/selection, e.g. the liquidity filter), holding cash.",
+            portfolio,
+        )
+        log_alert(
+            portfolio, "NO_ELIGIBLE_TICKERS", "WARNING",
+            "No tickers passed selection this rebalance, holding cash.",
+            log_path=alerts_log_path,
+        )
+
     # Capture rank/score context so a trade can be reviewed
     # later with "why" (e.g. "XLK was rank 2 of 10"), not just "what" was traded.
     signal_context = {}
@@ -2582,6 +2614,7 @@ def run(
                       log_path=alerts_log_path)
             skip_result = OrdersResult()
             skip_result.full_signal_universe = full_signal_universe
+            skip_result.picks_were_empty = picks_were_empty
             return skip_result
 
     orders = generate_orders(current_holdings, weights, gross_exposure, total_value, latest_prices, cfg,
@@ -2643,6 +2676,7 @@ def run(
 
     result = OrdersResult(orders)
     result.full_signal_universe = full_signal_universe
+    result.picks_were_empty = picks_were_empty
     return result
 
 

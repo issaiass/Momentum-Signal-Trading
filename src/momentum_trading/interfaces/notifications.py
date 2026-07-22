@@ -364,7 +364,7 @@ def build_signal_universe_html(full_signal_universe: dict, orders: dict, top_n: 
     """
 
 
-def build_no_action_summary_html(portfolio_name: str) -> str:
+def build_no_action_summary_html(portfolio_name: str, picks_were_empty: bool = False) -> str:
     """
     Standard-category HTML notice for a rebalance day (or --force-rebalance) that ran to
     completion but produced zero orders (e.g. AGGREGATE_DRIFT_SKIP, or every computed drift
@@ -373,13 +373,27 @@ def build_no_action_summary_html(portfolio_name: str) -> str:
     "we checked, nothing to report" confirmation reads consistently with every other
     portfolio email. The specific reason (if any) is already in logs/alerts_log.csv via
     log_alert(), not repeated here.
+
+    picks_were_empty (Epic 5, "Rebalance Reporting Clarity & Selection-Logic Fixes" plan): True
+    when execution/live_signal.py's run()'s OrdersResult.picks_were_empty was set, i.e. NO
+    ticker survived selection this rebalance (e.g. the liquidity filter zeroed every rank), a
+    genuinely different situation from "eligible tickers existed but drift was trivial"
+    (AGGREGATE_DRIFT_SKIP), gets its own distinctly-worded message instead of the generic one.
+    Default False, byte-identical to before this param existed.
     """
-    return f"""
-    <h3>Rebalance Summary: {portfolio_name}</h3>
-    <p>This portfolio's rebalance ran to completion today with no order changes, every
+    if picks_were_empty:
+        body = """This portfolio's rebalance ran to completion today, but no tickers passed selection this cycle (scores/ranks were computed fine, but nothing survived filtering, e.g.
+    the liquidity filter), so no new positions were opened, holding cash. See
+    logs/alerts_log.csv (NO_ELIGIBLE_TICKERS) and logs/signal_rankings_log_<portfolio>.csv for
+    the full ranked universe and why each ticker was excluded."""
+    else:
+        body = """This portfolio's rebalance ran to completion today with no order changes, every
     computed drift was either zero or below the configured trading thresholds. See
     logs/alerts_log.csv for this portfolio if a specific skip reason (e.g. aggregate drift
-    below threshold) was logged.</p>
+    below threshold) was logged."""
+    return f"""
+    <h3>Rebalance Summary: {portfolio_name}</h3>
+    <p>{body}</p>
     """
 
 

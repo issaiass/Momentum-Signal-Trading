@@ -255,6 +255,19 @@ that tests enforce, don't casually violate these when editing:
   an explicit ask), `position_vol_budget` (default `None`, the per-ticker vol-budget cap applied
   in `resolve_target_weights()` via `_apply_volatility_budget_caps()`, AFTER the flat
   `max_position_weight` cap, complementary not redundant with it).
+  `_apply_position_caps()` (the `max_position_weight` cap-and-redistribute pass
+  `resolve_target_weights()` applies unconditionally) had a real, confirmed bug, fixed via Epic 4
+  of the "Rebalance Reporting Clarity & Selection-Logic Fixes" plan: when a ticker over the cap
+  has no ticker left under it to redistribute the excess into (a single-ticker portfolio hitting
+  the cap, or every picked ticker simultaneously over cap), the loop correctly `break`s without
+  redistributing, but the OLD code's final renormalize-to-`1.0` step then unconditionally
+  rescaled every weight back up, silently defeating the cap (a single ticker capped to `0.35`
+  ended back at `1.0`). A new `redistribution_incomplete` flag tracks exactly this case and skips
+  the renormalize, correctly leaving weights summing to LESS than `1.0`, the undistributable
+  excess genuinely unallocated (cash) rather than invested anyway. Real downstream consequence:
+  `generate_orders()`'s `money_invested` sums-to-`total_value * gross_exposure` invariant now
+  only holds when the cap never has to leave a shortfall, see that function's own docstring and
+  `docs/RISK_CONSTRAINTS.md`'s "Position Size Hard-Cap".
   `compute_vol_scalar(realized_vol, target_portfolio_vol, min_gross_exposure,
   max_gross_exposure)` is the "Volatility Scaling" (Mandatory tier) portfolio-level formula,
   extracted from `run_risk_managed_backtest()`'s previously-inline logic specifically so

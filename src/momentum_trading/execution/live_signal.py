@@ -792,8 +792,14 @@ def generate_orders(
     weights()/compute_target_weights() already produce), NOT the incremental drift_dollar used
     for the BUY/SELL decision itself, distinct concepts: a HOLD ticker still has a real target
     allocation (money_invested > 0) even though nothing traded. Summed across every ticker this
-    function returns, money_invested totals exactly total_value * gross_exposure (a ticker being
-    sold out of the target universe entirely contributes 0, correctly excluded). Set uniformly on
+    function returns, money_invested totals total_value * gross_exposure * sum(target_weights)
+    (a ticker being sold out of the target universe entirely contributes 0, correctly excluded).
+    This equals total_value * gross_exposure exactly ONLY when target_weights itself sums to
+    1.0, which is the common case but not universal: _apply_position_caps()
+    (momentum_backtest.py) can leave weights summing to LESS than 1.0 when max_position_weight
+    has no ticker left to redistribute an over-cap ticker's excess into (see
+    docs/RISK_CONSTRAINTS.md's "Position Size Hard-Cap"), by design, the shortfall is genuinely
+    unallocated capital for that rebalance, not a bug in this function. Set uniformly on
     every order (BUY/SELL/HOLD, every HOLD reason including "no live price available") via
     _with_context() below, so the rebalance summary email/log can show "how much of this
     period's capital is allocated here" for every row, not just the ones that traded.

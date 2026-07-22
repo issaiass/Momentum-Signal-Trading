@@ -378,17 +378,20 @@ class TestResolveTargetWeights:
     def test_custom_weights_capped_when_infeasible(self, synthetic_daily_prices):
         # 2 assets * 0.35 cap = 0.7 max achievable, but weights must sum to 1.0,
         # mathematically infeasible to respect both the cap and the requested
-        # 0.8/0.2 split. This documents the ACTUAL (somewhat surprising)
-        # behavior in that case: the capping algorithm's iterative redistribution
-        # converges to an equal 50/50 split, not an error and not a silent
-        # violation of the cap. Discovered as a real edge case during manual
-        # testing earlier in this project, worth pinning down explicitly so
-        # a future change to the capping algorithm doesn't silently alter it.
+        # 0.8/0.2 split. Both tickers correctly converge to EXACTLY the cap
+        # (0.35 each), leaving the undistributable 0.30 unallocated (cash), rather than
+        # violating the cap. This was previously a real, confirmed bug (Epic 4 of the
+        # "Rebalance Reporting Clarity & Selection-Logic Fixes" plan): _apply_position_caps()'s
+        # old unconditional final renormalize-to-1.0 silently rescaled both tickers BACK UP to
+        # an equal 50/50 split (0.5/0.5), quietly violating the 0.35 cap it had just enforced.
+        # Fixed by skipping that renormalize whenever redistribution couldn't fully complete.
         cfg = BacktestConfig(max_position_weight=0.35)  # 2 * 0.35 = 0.7 < 1.0, infeasible for 2 assets
         as_of = synthetic_daily_prices.index[-1]
         weights = resolve_target_weights(["SPY", "QQQ"], synthetic_daily_prices, as_of, cfg,
                                           custom_weights={"SPY": 0.8, "QQQ": 0.2})
-        assert weights["SPY"] <= 0.5 + 1e-6  # symmetric infeasibility converges to equal split
+        assert weights["SPY"] == pytest.approx(0.35)
+        assert weights["QQQ"] == pytest.approx(0.35)
+        assert sum(weights.values()) == pytest.approx(0.70)
 
     def test_correlation_penalty_downweights_correlated_pair(self):
         # Builds A and B as near-duplicates (same underlying shock + tiny
@@ -551,6 +554,32 @@ class TestApplyPositionCaps:
         result = _apply_position_caps(weights, max_weight=0.5)
         for t in weights:
             assert result[t] == pytest.approx(weights[t])
+
+    def test_single_ticker_cap_is_not_defeated_by_renormalization(self):
+        # Real, confirmed bug (Epic 4, found via a single-ticker portfolio): with no other
+        # ticker to redistribute the excess into, the old code renormalized the capped weight
+        # right back to 1.0, silently defeating the cap entirely. Must now stay AT the cap.
+        from momentum_trading.backtest.momentum_backtest import _apply_position_caps
+        result = _apply_position_caps({"A": 1.0}, max_weight=0.35)
+        assert result["A"] == pytest.approx(0.35)
+
+    def test_multiple_tickers_all_over_cap_leaves_excess_unallocated(self):
+        # Two tickers, both want more than the cap, neither has any headroom to absorb the
+        # other's excess: both must land exactly at the cap, total < 1.0 (the undistributable
+        # excess stays as cash), NOT renormalized back to 50/50.
+        from momentum_trading.backtest.momentum_backtest import _apply_position_caps
+        result = _apply_position_caps({"A": 0.6, "B": 0.6}, max_weight=0.35)
+        assert result["A"] == pytest.approx(0.35)
+        assert result["B"] == pytest.approx(0.35)
+        assert sum(result.values()) == pytest.approx(0.70)
+
+    def test_successful_redistribution_still_renormalizes_to_one(self):
+        # Regression guard: the existing multi-ticker path (some room to redistribute into)
+        # must remain byte-identical, still summing to 1.0, not accidentally short-circuited
+        # by the new redistribution_incomplete tracking.
+        from momentum_trading.backtest.momentum_backtest import _apply_position_caps
+        result = _apply_position_caps({"A": 0.6, "B": 0.4}, max_weight=0.5)
+        assert sum(result.values()) == pytest.approx(1.0)
 
 
 class TestComputeVolScalar:

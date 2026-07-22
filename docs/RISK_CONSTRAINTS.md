@@ -522,14 +522,28 @@ comment, not a documented constraint in its own right).
 Implemented by `_apply_position_caps()` (`backtest/momentum_backtest.py`), an iterative
 cap-and-redistribute pass (not a full LP solve): any ticker over the cap is clamped to it, the
 excess is redistributed proportionally across every under-cap ticker, repeated up to 10 passes,
-then renormalized to sum to `1.0`. Applied unconditionally inside `resolve_target_weights()`
-(the single shared sizing function both the backtest engine and `execution/live_signal.py`'s
-`compute_target_weights()` call), so the cap is genuinely identical live and backtested, not a
-parallel reimplementation. Applies even when `custom_weights` is supplied (a hand-specified
-allocation can still get capped, see `TestResolveTargetWeights::test_custom_weights_capped_when_infeasible`'s
-documented edge case: when the cap makes the requested split mathematically infeasible, e.g. 2
-assets and a 0.35 cap can sum to at most 0.70, the iterative algorithm converges to an equal
-split rather than erroring or silently violating the cap).
+then renormalized to sum to `1.0` **only if that redistribution fully succeeded**. Applied
+unconditionally inside `resolve_target_weights()` (the single shared sizing function both the
+backtest engine and `execution/live_signal.py`'s `compute_target_weights()` call), so the cap is
+genuinely identical live and backtested, not a parallel reimplementation. Applies even when
+`custom_weights` is supplied (a hand-specified allocation can still get capped, see
+`TestResolveTargetWeights::test_custom_weights_capped_when_infeasible`'s documented edge case:
+when the cap makes the requested split mathematically infeasible, e.g. 2 assets and a 0.35 cap
+can sum to at most 0.70).
+
+**A real, confirmed bug, fixed via Epic 4 of the "Rebalance Reporting Clarity &
+Selection-Logic Fixes" plan**: when there's genuinely no ticker under the cap left to absorb the
+excess (a single-ticker portfolio hitting the cap, or every picked ticker simultaneously over
+cap, like the infeasible-split example above), the OLD code renormalized anyway, silently
+rescaling the just-capped ticker(s) back up past the cap (a single ticker capped to `0.35`
+ended up back at `1.0`, and the two-asset infeasible-split example above ended up at an equal
+`0.5`/`0.5` split, both defeating the cap this constraint exists to enforce). Fixed: when
+redistribution can't fully complete, the weights are returned AS CAPPED, summing to LESS than
+`1.0` (`0.70` for the two examples above), the shortfall is left as genuinely unallocated
+capital/cash for that rebalance, not silently invested anyway. One real downstream consequence,
+worth knowing: `generate_orders()`'s documented invariant ("`money_invested` totals exactly
+`total_value * gross_exposure`") now only holds when the cap never has to leave a shortfall;
+when it does, the sum is correspondingly smaller, by design, not a bug.
 
 Your own tier description's 5-10% example is achievable by simply setting a tighter
 `max_position_weight`, this isn't a missing feature, the default (`0.35`) is just a looser

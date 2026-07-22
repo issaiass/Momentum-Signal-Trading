@@ -771,8 +771,24 @@ def _inverse_vol_weights(
 
 
 def _apply_position_caps(weights: dict, max_weight: float) -> dict:
-    """Cap any single position and redistribute the excess proportionally."""
+    """
+    Cap any single position and redistribute the excess proportionally.
+
+    A real, confirmed bug (found via Epic 4 of the "Rebalance Reporting Clarity &
+    Selection-Logic Fixes" plan, exposed by a single-ticker portfolio): when EVERY ticker over
+    max_weight has no ticker under the cap to redistribute the excess into (a single-ticker
+    portfolio, or every picked ticker simultaneously over cap), this loop correctly `break`s
+    without redistributing, but the OLD code then unconditionally renormalized every weight
+    back to sum to 1.0, silently rescaling the just-capped ticker(s) back up past the cap (a
+    single ticker capped to 0.35 ended up back at 1.0, defeating the cap entirely).
+    `redistribution_incomplete` tracks exactly this case (the loop broke at `under_sum <= 0`
+    while `over` was still non-empty, as opposed to the normal case where `over` becomes empty
+    because capping+redistribution fully succeeded) and skips the final renormalize, correctly
+    leaving the undistributable excess as unallocated capital/cash, the whole point of a
+    position cap. The normal multi-ticker successful-redistribution path is unchanged.
+    """
     weights = dict(weights)
+    redistribution_incomplete = False
     for _ in range(10):  # a few passes converges caps without a full LP solve
         over = {t: w for t, w in weights.items() if w > max_weight}
         if not over:
@@ -783,9 +799,12 @@ def _apply_position_caps(weights: dict, max_weight: float) -> dict:
         under = {t: w for t, w in weights.items() if w < max_weight}
         under_sum = sum(under.values())
         if under_sum <= 0:
+            redistribution_incomplete = True
             break
         for t in under:
             weights[t] += excess * (weights[t] / under_sum)
+    if redistribution_incomplete:
+        return weights
     total = sum(weights.values())
     if total > 0:
         weights = {t: w / total for t, w in weights.items()}

@@ -96,7 +96,10 @@ reaches your inbox:
 
 **STANDARD (rebalance summary)**, an HTML table per portfolio, sent after each rebalance, headed
 by a **"Capital allocated this rebalance"** line (the sum of every row's "Money Invest" below,
-equal to `total_value * gross_exposure` for that rebalance), showing ticker / action / **money
+normally equal to `total_value * gross_exposure` for that rebalance, though a position cap
+(`max_position_weight`) with nowhere left to redistribute an over-cap ticker's excess into can
+leave this sum genuinely smaller, by design, see `docs/RISK_CONSTRAINTS.md`'s "Position Size
+Hard-Cap"), showing ticker / action / **money
 invest** / **% money invest** / shares / **transaction $** / reason for every position considered
 that cycle (including HOLDs, so you can see what *wasn't* traded and why), plus a **"What
 Actually Happened"** column showing the REAL execution outcome per ticker, distinct from the

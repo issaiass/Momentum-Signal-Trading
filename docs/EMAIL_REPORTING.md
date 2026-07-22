@@ -97,14 +97,18 @@ reaches your inbox:
 **STANDARD (rebalance summary)**, an HTML table per portfolio, sent after each rebalance, headed
 by a **"Capital allocated this rebalance"** line (the sum of every row's "Money Invest" below,
 equal to `total_value * gross_exposure` for that rebalance), showing ticker / action / **money
-invest** / **% money invest** / shares / reason for every position considered that cycle
-(including HOLDs, so you can see what *wasn't* traded and why), plus a **"What Actually
-Happened"** column showing the REAL execution outcome per ticker, distinct from the signal's
-intended action, since an intended BUY/SELL doesn't always actually fill. "Money Invest"/"%
-Money Invest" are `execution/live_signal.py`'s `generate_orders()`'s `money_invested`/
+invest** / **% money invest** / shares / **transaction $** / reason for every position considered
+that cycle (including HOLDs, so you can see what *wasn't* traded and why), plus a **"What
+Actually Happened"** column showing the REAL execution outcome per ticker, distinct from the
+signal's intended action, since an intended BUY/SELL doesn't always actually fill. "Money
+Invest"/"% Money Invest" are `execution/live_signal.py`'s `generate_orders()`'s `money_invested`/
 `pct_money_invested`, each ticker's TARGET dollar allocation this rebalance (not the incremental
 drift the BUY/SELL decision itself is based on), set on every row including HOLDs, so a
-currently-held, not-traded position still shows its real target allocation. Reporting-only:
+currently-held, not-traded position still shows its real target allocation. "Transaction $" is
+`transaction_amount`, the ACTUAL dollar amount bought/sold THIS transaction (`shares * price`),
+`$0.00` for every HOLD, a real, confirmed distinct concept from "Money Invest": a full-exit SELL
+shows `$0.00` Money Invest (correct, the post-rebalance target) but a real, non-zero Transaction
+$ (what was actually sold). Reporting-only:
 IBKR has no dollar-denominated order type for equities/ETFs (`cashQty` only works for forex/CASH
 pairs, confirmed empirically, see `README.md`'s Known Gaps), the actual order submitted is still
 sized in whole shares regardless. Built by `build_rebalance_summary_html()` from
@@ -130,13 +134,18 @@ the SAME rebalance email whenever there's at least one order, built by
 `build_signal_universe_html()` from `execution/live_signal.py`'s `run()`'s new
 `OrdersResult.full_signal_universe` attribute. Covers every configured ticker with a valid
 momentum score this rebalance, not just the ones the first table shows (which stays scoped to
-real BUY/SELL/HOLD decisions only): Ticker / Action (or `"WATCHLIST"` for a ranked-but-not-
-selected ticker) / **Momentum Rank** / **Lookback Return (%)** / **Current Close Price** /
-**Selection Status** (`"Top N (Selected)"`, `"Selected (Absolute Momentum)"`, or `"Watchlist /
-Reserve"`) / Money Invest / % Money Invest / Shares / **Stop-Loss Price** / Reason / What
-Actually Happened. A watchlist row shows `$0.00`/`0.00%` money and `"N/A"` for its stop-loss
-price, since no position was ever opened for it. "Lookback Return (%)" is footnoted "(composite
-score)" for the 4 `strategy_type`s whose score isn't a literal price return
+real BUY/SELL/HOLD decisions only): Ticker / Action / **Momentum Rank** / **Lookback Return (%)**
+/ **Current Close Price** / **Selection Status** / Money Invest / % Money Invest / Shares /
+**Stop-Loss Price** / Reason / What Actually Happened. Rows are sorted by Momentum Rank ascending
+(1 = best), a ticker with no rank sorts after every ranked ticker, ordered by Lookback Return
+descending among themselves. Action is `"BUY"`/`"SELL"`/`"HOLD"` for a ticker with a real order
+this rebalance, `"WATCHLIST"` (still-positive momentum, simply outranked) or `"EXCLUDED"`
+(negative momentum, or filtered by the liquidity filter) otherwise, matching one of Selection
+Status's five values: `"Top N (Selected)"`, `"Selected (Absolute Momentum)"`, `"Watchlist /
+Reserve"`, `"Excluded (Negative Momentum)"`, or `"Excluded (Illiquid)"`. A non-order row (
+WATCHLIST/EXCLUDED) shows `$0.00`/`0.00%` money and `"N/A"` for its stop-loss price, since no
+position was ever opened for it. "Lookback Return (%)" is footnoted "(composite score)" for the
+4 `strategy_type`s whose score isn't a literal price return
 (`multi_timeframe_composite`/`residual_momentum`/`path_dependent_momentum`/
 `hybrid_multi_factor`), see `docs/SIGNAL_RANKINGS_LOG.md`. Stop-Loss Price is fixed-from-entry,
 NOT trailing (see `docs/RISK_CONSTRAINTS.md`'s "Stop-Loss Width"): an estimate based on today's

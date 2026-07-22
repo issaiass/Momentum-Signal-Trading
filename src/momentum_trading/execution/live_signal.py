@@ -778,7 +778,8 @@ def generate_orders(
     """
     Returns {ticker: {'action': 'BUY'|'SELL'|'HOLD', 'shares': int, 'reason': str,
                        'rank': int|None, 'signal_score': float|None, 'money_invested': float,
-                       'pct_money_invested': float, 'stop_loss_price': float|None}}
+                       'pct_money_invested': float, 'transaction_amount': float,
+                       'stop_loss_price': float|None}}
     Applies the same drift_threshold / min_trade_size filtering as the backtest,
     so live turnover matches the cost assumptions the backtest validated against.
 
@@ -796,6 +797,12 @@ def generate_orders(
     every order (BUY/SELL/HOLD, every HOLD reason including "no live price available") via
     _with_context() below, so the rebalance summary email/log can show "how much of this
     period's capital is allocated here" for every row, not just the ones that traded.
+
+    transaction_amount is the ACTUAL dollar amount bought/sold THIS transaction (shares * price),
+    a real, confirmed distinct concept from money_invested: for a full-exit SELL (the ticker is
+    no longer in the target universe at all), money_invested is $0 (correctly reflecting the
+    post-rebalance target), but transaction_amount reflects the real dollar amount transacted.
+    0.0 for every HOLD, including "no live price available".
 
     stop_loss_price (see compute_stop_loss_price()) is set the same uniform way, None default
     (unchanged behavior) when current_avg_entry_prices isn't passed.
@@ -816,6 +823,15 @@ def generate_orders(
         order["stop_loss_pct"] = resolve_ticker_stop_loss_pct(ticker, cfg)
         order["stop_loss_price"] = compute_stop_loss_price(
             order["action"], cfg, price, current_avg_entry_prices.get(ticker), ticker=ticker,
+        )
+        # The actual dollar amount bought/sold THIS transaction (shares * price), distinct from
+        # money_invested above (the post-rebalance TARGET allocation, $0 for a full exit SELL).
+        # A real, confirmed source of confusion this fixes: a full-exit SELL previously showed
+        # "Money Invest" as $0.00 with no way to see what was actually sold in dollar terms
+        # anywhere but the free-text `reason` string. 0.0 for every HOLD (nothing transacted,
+        # including "no live price available" where price is None).
+        order["transaction_amount"] = (
+            round(order.get("shares", 0) * price, 2) if price and order["action"] in ("BUY", "SELL") else 0.0
         )
         return order
 
@@ -869,6 +885,7 @@ def generate_orders(
             if extra_shares >= 1:
                 orders[top_ticker]["shares"] += extra_shares
                 orders[top_ticker]["reason"] += f" + {extra_shares} extra share(s) from flooring remainder"
+                orders[top_ticker]["transaction_amount"] = round(orders[top_ticker]["shares"] * top_price, 2)
 
     return orders
 
@@ -1000,16 +1017,19 @@ def verify_log_integrity(path: str) -> dict:
 def log_orders(orders: dict, latest_prices: dict, dry_run: bool, path: str = TRADE_LOG_PATH,
                 cfg=None) -> None:
     """
-    NOTE on schema evolution: this adds 'rank', 'signal_score', 'money_invested', and
-    'pct_money_invested' columns. If you have an existing log file from before this change, its
-    header won't have these columns, appending new-schema rows to an old-schema file will
-    misalign columns. Archive/rename any pre-existing live_trades_log_*.csv before your first
-    run after upgrading, so a fresh file with the new header gets created.
+    NOTE on schema evolution: this adds 'rank', 'signal_score', 'money_invested',
+    'pct_money_invested', and 'transaction_amount' columns. If you have an existing log file from
+    before this change, its header won't have these columns, appending new-schema rows to an
+    old-schema file will misalign columns. Archive/rename any pre-existing live_trades_log_*.csv
+    before your first run after upgrading, so a fresh file with the new header gets created.
 
     money_invested/pct_money_invested are generate_orders()' TARGET dollar allocation for this
     ticker this rebalance (see that function's own docstring), not the incremental drift; set on
     every order including HOLDs, so the log answers "how much of this period's capital was
     allocated here" for every row, matching the same columns in the rebalance summary email.
+    transaction_amount is the ACTUAL dollar amount bought/sold this transaction (shares * price),
+    0.0 for every HOLD, distinct from money_invested's target-allocation meaning, see that
+    function's own docstring for the full "why two separate columns" rationale.
 
     The read-last-hash-then-append critical section is guarded by core/audit_log.py's
     acquire_log_lock()/release_log_lock() (same helper the alert log and signal rankings log
@@ -1028,14 +1048,14 @@ def log_orders(orders: dict, latest_prices: dict, dry_run: bool, path: str = TRA
             if not file_exists:
                 writer.writerow(["timestamp", "ticker", "action", "shares", "price", "reason",
                                   "rank", "signal_score", "money_invested", "pct_money_invested",
-                                  "dry_run", "config_hash", "row_hash"])
+                                  "dry_run", "config_hash", "transaction_amount", "row_hash"])
             ts = datetime.now().isoformat()
             for ticker, order in orders.items():
                 row_fields = [
                     ts, ticker, order["action"], order["shares"], latest_prices.get(ticker, ""),
                     order["reason"], order.get("rank", ""), order.get("signal_score", ""),
                     order.get("money_invested", ""), order.get("pct_money_invested", ""),
-                    dry_run, config_hash,
+                    dry_run, config_hash, order.get("transaction_amount", ""),
                 ]
                 row_hash = _compute_row_hash(prev_hash, row_fields)
                 writer.writerow(row_fields + [row_hash])
@@ -1048,7 +1068,7 @@ def log_orders(orders: dict, latest_prices: dict, dry_run: bool, path: str = TRA
 SIGNAL_RANKINGS_LOG_HEADER = [
     "timestamp", "ticker", "action", "momentum_rank", "signal_score", "close_price",
     "selection_status", "money_invested", "pct_money_invested", "shares", "stop_loss_price",
-    "reason", "dry_run", "config_hash", "row_hash",
+    "reason", "dry_run", "config_hash", "transaction_amount", "row_hash",
 ]
 
 
@@ -1097,16 +1117,18 @@ def log_signal_rankings(full_signal_universe: dict, orders: dict, dry_run: bool,
             money_invested = order.get("money_invested", 0.0)
             pct_money_invested = order.get("pct_money_invested", 0.0)
             stop_loss_price = order.get("stop_loss_price")
+            transaction_amount = order.get("transaction_amount", 0.0)
         else:
             is_excluded = str(info.get("selection_status", "")).startswith("Excluded")
             action, reason, shares = ("EXCLUDED" if is_excluded else "WATCHLIST"), "", 0
             money_invested, pct_money_invested, stop_loss_price = 0.0, 0.0, None
+            transaction_amount = 0.0
         row_fields = [
             ts, ticker, action, info.get("rank", ""), info.get("signal_score", ""),
             info.get("close_price", ""), info.get("selection_status", ""),
             money_invested, pct_money_invested, shares,
             stop_loss_price if stop_loss_price is not None else "",
-            reason, dry_run, config_hash,
+            reason, dry_run, config_hash, transaction_amount,
         ]
         append_hash_chained_row(path, SIGNAL_RANKINGS_LOG_HEADER, row_fields)
     logger.info("Logged %d signal-universe rankings to %s (config_hash=%s)",

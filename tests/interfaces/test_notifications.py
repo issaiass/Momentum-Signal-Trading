@@ -112,6 +112,27 @@ class TestHTMLGeneration:
         assert "$600.00" in html and "60.0%" in html
         assert "$400.00" in html and "40.0%" in html
 
+    def test_rebalance_summary_shows_transaction_amount_column(self):
+        # Epic 3: a full-exit SELL shows $0.00 Money Invest (correct, target allocation) but a
+        # real, non-zero Transaction $ (the actual dollar amount sold), the distinction that
+        # motivated this column existing at all.
+        orders = {"SPY": {"action": "BUY", "shares": 2, "reason": "drift",
+                           "money_invested": 600.0, "pct_money_invested": 0.6,
+                           "transaction_amount": 550.0},
+                  "OLD": {"action": "SELL", "shares": 5, "reason": "drift",
+                           "money_invested": 0.0, "pct_money_invested": 0.0,
+                           "transaction_amount": 500.0}}
+        html = build_rebalance_summary_html("portfolio1", orders)
+        assert "Transaction $" in html
+        assert "$550.00" in html
+        assert "$0.00" in html and "$500.00" in html
+
+    def test_rebalance_summary_missing_transaction_amount_defaults_to_zero(self):
+        orders = {"SPY": {"action": "HOLD", "shares": 0, "reason": "no drift"}}
+        html = build_rebalance_summary_html("portfolio1", orders)
+        assert "Transaction $" in html
+        assert "$0.00" in html
+
     def test_rebalance_summary_capital_header_sums_money_invested(self):
         orders = {"SPY": {"action": "BUY", "shares": 2, "reason": "drift",
                            "money_invested": 600.0, "pct_money_invested": 0.6},

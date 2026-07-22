@@ -206,6 +206,13 @@ def build_rebalance_summary_html(portfolio_name: str, orders: dict, dry_run: boo
     equals total_value * gross_exposure for this rebalance, IBKR has no dollar-denominated
     order type for equities/ETFs (confirmed, cashQty only works for forex/CASH pairs), so this
     is reporting-only, the actual order submitted is still sized in shares.
+
+    "Transaction $" is the ACTUAL dollar amount bought/sold THIS transaction (shares * price,
+    generate_orders()'s transaction_amount), a real, confirmed distinct concept from "Money
+    Invest": for a full-exit SELL (the ticker leaves the target universe entirely), "Money
+    Invest" is $0.00 (correctly reflecting the post-rebalance target), previously the ONLY way
+    to see what was actually sold in dollar terms was the free-text Reason column, this column
+    makes it a first-class, always-visible figure. 0.0 for every HOLD.
     """
     capital_this_rebalance = sum(o.get("money_invested", 0.0) for o in orders.values())
     rows = ""
@@ -218,6 +225,7 @@ def build_rebalance_summary_html(portfolio_name: str, orders: dict, dry_run: boo
             f"<td style='padding:4px 8px;'>${order.get('money_invested', 0.0):,.2f}</td>"
             f"<td style='padding:4px 8px;'>{order.get('pct_money_invested', 0.0):.1%}</td>"
             f"<td style='padding:4px 8px;'>{order.get('shares', 0)}</td>"
+            f"<td style='padding:4px 8px;'>${order.get('transaction_amount', 0.0):,.2f}</td>"
             f"<td style='padding:4px 8px;'>{order.get('reason', '')}</td>"
             f"<td style='padding:4px 8px; color:{outcome_color};'>{outcome_text}</td></tr>"
         )
@@ -230,6 +238,7 @@ def build_rebalance_summary_html(portfolio_name: str, orders: dict, dry_run: boo
           <th style='padding:4px 8px; text-align:left;'>Money Invest</th>
           <th style='padding:4px 8px; text-align:left;'>% Money Invest</th>
           <th style='padding:4px 8px; text-align:left;'>Shares</th>
+          <th style='padding:4px 8px; text-align:left;'>Transaction $</th>
           <th style='padding:4px 8px; text-align:left;'>Reason</th>
           <th style='padding:4px 8px; text-align:left;'>What Actually Happened</th></tr>
       {rows}

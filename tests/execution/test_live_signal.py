@@ -1482,7 +1482,7 @@ class TestLogSignalRankings:
     def _orders(self):
         return {
             "A": {"action": "BUY", "shares": 5, "reason": "drift $500.00", "money_invested": 500.0,
-                  "pct_money_invested": 1.0, "stop_loss_price": 90.0},
+                  "pct_money_invested": 1.0, "stop_loss_price": 90.0, "transaction_amount": 480.0},
         }
 
     def test_writes_expected_schema(self, tmp_path):
@@ -1503,6 +1503,15 @@ class TestLogSignalRankings:
         assert row["shares"] == 5
         assert row["money_invested"] == pytest.approx(500.0)
         assert row["stop_loss_price"] == pytest.approx(90.0)
+        assert row["transaction_amount"] == pytest.approx(480.0)
+
+    def test_watchlist_ticker_gets_zeroed_transaction_amount(self, tmp_path):
+        path = str(tmp_path / "signal_rankings_log.csv")
+        log_signal_rankings(self._universe(), self._orders(), dry_run=True, path=path)
+        import pandas as pd
+        df = pd.read_csv(path)
+        row = df[df["ticker"] == "B"].iloc[0]
+        assert row["transaction_amount"] == pytest.approx(0.0)
 
     def test_watchlist_ticker_gets_zeroed_action_and_money(self, tmp_path):
         path = str(tmp_path / "signal_rankings_log.csv")
@@ -1892,6 +1901,10 @@ class TestGenerateOrders:
     def test_sold_out_ticker_has_zero_money_invested(self):
         # A ticker held but no longer in the target universe at all (full exit) correctly
         # contributes $0 to money_invested, it's not part of this rebalance's allocation.
+        # But it must still show a real, non-zero transaction_amount (Epic 3): money_invested
+        # being $0 here was the real, confirmed source of confusion Epic 3 fixes, transaction_
+        # amount is what actually got sold in dollar terms, distinct from the target-allocation
+        # concept money_invested represents.
         cfg = BacktestConfig(drift_threshold=0.0, min_trade_size=1.0)
         orders = generate_orders(
             current_holdings={"OLD": 5.0}, target_weights={"SPY": 1.0}, gross_exposure=1.0,
@@ -1899,6 +1912,7 @@ class TestGenerateOrders:
         )
         assert orders["OLD"]["action"] == "SELL"
         assert orders["OLD"]["money_invested"] == pytest.approx(0.0)
+        assert orders["OLD"]["transaction_amount"] == pytest.approx(500.0)  # 5 shares * $100
 
     def test_money_invested_sums_to_capital_this_rebalance(self):
         # Summed across every ticker generate_orders() returns, money_invested totals exactly
@@ -1913,6 +1927,63 @@ class TestGenerateOrders:
         )
         total_invested = sum(o["money_invested"] for o in orders.values())
         assert total_invested == pytest.approx(1000.0 * 0.8)
+
+
+class TestTransactionAmount:
+    """
+    transaction_amount (Epic 3 of the "Rebalance Reporting Clarity & Selection-Logic Fixes"
+    plan): the ACTUAL dollar amount bought/sold this transaction (shares * price), distinct
+    from money_invested's TARGET-allocation meaning. See test_sold_out_ticker_has_zero_money_
+    invested above (TestGenerateOrders) for the full-exit-SELL case that motivated this.
+    """
+
+    def test_buy_transaction_amount_matches_shares_times_price(self):
+        cfg = BacktestConfig(drift_threshold=0.0, min_trade_size=1.0)
+        orders = generate_orders(
+            current_holdings={}, target_weights={"XLK": 1.0}, gross_exposure=1.0,
+            total_value=1000.0, latest_prices={"XLK": 220.0}, cfg=cfg,
+        )
+        assert orders["XLK"]["action"] == "BUY"
+        assert orders["XLK"]["transaction_amount"] == pytest.approx(orders["XLK"]["shares"] * 220.0)
+
+    def test_sell_transaction_amount_matches_shares_times_price(self):
+        cfg = BacktestConfig(drift_threshold=0.0, min_trade_size=1.0)
+        orders = generate_orders(
+            current_holdings={"SPY": 10.0}, target_weights={}, gross_exposure=1.0,
+            total_value=1000.0, latest_prices={"SPY": 500.0}, cfg=cfg,
+        )
+        assert orders["SPY"]["action"] == "SELL"
+        assert orders["SPY"]["transaction_amount"] == pytest.approx(orders["SPY"]["shares"] * 500.0)
+
+    def test_hold_transaction_amount_is_zero_below_min_trade_size(self):
+        cfg = BacktestConfig(drift_threshold=0.0, min_trade_size=1000.0)
+        orders = generate_orders(
+            current_holdings={}, target_weights={"SPY": 1.0}, gross_exposure=1.0,
+            total_value=100.0, latest_prices={"SPY": 550.0}, cfg=cfg,
+        )
+        assert orders["SPY"]["action"] == "HOLD"
+        assert orders["SPY"]["transaction_amount"] == pytest.approx(0.0)
+
+    def test_hold_transaction_amount_is_zero_no_live_price(self):
+        # The earliest-return HOLD branch (price is None) must never crash trying to multiply
+        # by a missing price, and must report 0.0, not None or a KeyError.
+        cfg = BacktestConfig(drift_threshold=0.0, min_trade_size=1.0)
+        orders = generate_orders(
+            current_holdings={}, target_weights={"SPY": 0.5, "GHOST": 0.5}, gross_exposure=1.0,
+            total_value=1000.0, latest_prices={"SPY": 500.0}, cfg=cfg,  # GHOST has no price
+        )
+        assert orders["GHOST"]["action"] == "HOLD"
+        assert orders["GHOST"]["transaction_amount"] == pytest.approx(0.0)
+
+    def test_hold_transaction_amount_is_zero_within_drift_threshold(self):
+        cfg = BacktestConfig(drift_threshold=0.5, min_trade_size=1.0)
+        orders = generate_orders(
+            current_holdings={"SPY": 1.0}, target_weights={"SPY": 0.5, "XLK": 0.5},
+            gross_exposure=1.0, total_value=1000.0,
+            latest_prices={"SPY": 500.0, "XLK": 220.0}, cfg=cfg,
+        )
+        assert orders["SPY"]["action"] == "HOLD"
+        assert orders["SPY"]["transaction_amount"] == pytest.approx(0.0)
 
 
 class TestFlooringRemainderRedeployment:
@@ -1959,6 +2030,9 @@ class TestFlooringRemainderRedeployment:
         assert orders["A"]["shares"] == 2  # 1 original + 1 redeployed
         assert orders["B"]["shares"] == 3  # unchanged
         assert "extra share" in orders["A"]["reason"]
+        # transaction_amount (Epic 3) must stay in sync with the redeployed share count, not
+        # the stale pre-redeployment value _with_context() originally computed.
+        assert orders["A"]["transaction_amount"] == pytest.approx(2 * 270.0)
 
     def test_remainder_too_small_for_even_one_extra_share_is_a_noop(self):
         cfg = self._cfg()

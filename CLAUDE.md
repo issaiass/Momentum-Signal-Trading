@@ -494,6 +494,21 @@ that tests enforce, don't casually violate these when editing:
   (`cashQty` only works for forex/CASH pairs, confirmed empirically, see `README.md`'s Known
   Gaps), the actual order submitted to `place_orders_ibkr()` is still sized in whole shares
   regardless of this.
+  `_with_context()` also sets `transaction_amount` on every order (Epic 3 of the "Rebalance
+  Reporting Clarity & Selection-Logic Fixes" plan), the ACTUAL dollar amount bought/sold THIS
+  transaction (`shares * price`), `0.0` for every HOLD. Fixes a real, confirmed source of
+  confusion: a full-exit SELL (a ticker leaving the target universe entirely) has
+  `money_invested = 0` (correctly reflecting the post-rebalance TARGET, which for that ticker is
+  zero), previously the ONLY way to see what was actually sold in dollar terms was the free-text
+  `reason` string. The flooring-remainder-redeployment block (right below, `redeploy_flooring_
+  remainder`) mutates `shares` on the top-ranked BUY pick AFTER `_with_context()` already ran, so
+  it explicitly recomputes `transaction_amount` there too, or it would go stale for that one
+  order. `log_orders()` and `log_signal_rankings()` both gained a matching `transaction_amount`
+  CSV column (append-at-end, before `row_hash`, same schema-evolution caveat as every prior
+  addition, archive old log files first), and `notifications.py`'s
+  `build_rebalance_summary_html()` gained a "Transaction $" column next to "Shares", reading
+  `order.get("transaction_amount", 0.0)` the same way every other column reads straight off the
+  `orders` dict.
   `run()` now returns an `OrdersResult` (a `dict` subclass, byte-identical to a plain
   `{ticker: order}` dict for every existing caller, `.items()`/`.values()`/`len()`/`bool()`/`in`/
   equality all work unchanged) with an added `.full_signal_universe` attribute: `{ticker:

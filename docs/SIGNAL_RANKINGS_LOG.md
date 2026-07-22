@@ -36,7 +36,7 @@ ever opened or intended for it.
 ```
 timestamp, ticker, action, momentum_rank, signal_score, close_price, selection_status,
 money_invested, pct_money_invested, shares, stop_loss_price, reason, dry_run, config_hash,
-row_hash
+transaction_amount, row_hash
 ```
 
 **Row order**: sorted by `momentum_rank` ascending (1 = strongest first), same order in the CSV
@@ -75,6 +75,11 @@ every ranked ticker, ordered by `signal_score` descending among themselves.
   rebalance (`0.00`/`0.00%` for a watchlist ticker), same figures the trade log and rebalance
   email already show for selected tickers.
 - **shares**, the real computed share count (`0` for watchlist).
+- **transaction_amount**, the ACTUAL dollar amount bought/sold THIS transaction
+  (`shares * price`), `0.00` for any `HOLD`/`WATCHLIST`/`EXCLUDED` row. A real, confirmed
+  distinct concept from `money_invested` above: for a full-exit `SELL` (the ticker leaves the
+  target universe entirely), `money_invested` is `0.00` (correctly reflecting the post-rebalance
+  target), `transaction_amount` is what actually got sold.
 - **stop_loss_price**, fixed-from-entry (NOT trailing, see `docs/RISK_CONSTRAINTS.md`'s
   "Stop-Loss Width"): an ESTIMATE (`close_price * (1 - stop_loss_pct)`) for a `BUY` this
   rebalance (the real fill price isn't known yet), the REAL value
@@ -91,6 +96,13 @@ every ranked ticker, ordered by `signal_score` descending among themselves.
 
 This is a brand-new log file, not an in-place schema change to anything pre-existing, no
 archival step is needed when upgrading to pick this up.
+
+**Note on `transaction_amount`'s own schema evolution**: this column was added after this log
+already existed in production (Epic 3, "Rebalance Reporting Clarity & Selection-Logic Fixes"
+plan), same "grow at the end, before `row_hash`" precedent as the trade log's own additions
+(`docs/RUNNING.md`'s trade-log schema-evolution note). If you have an existing
+`signal_rankings_log_<portfolio>.csv` from before this change, archive/rename it before your
+first run after upgrading, appending new-schema rows to an old-schema file misaligns columns.
 
 ## Reading it
 

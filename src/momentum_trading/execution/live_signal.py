@@ -1245,6 +1245,36 @@ def get_latest_snapshot(name: str, snapshot_dir: str = str(data_dir())) -> dict 
     return df.iloc[-1].to_dict()
 
 
+def read_trade_log_with_archives(trade_log_path: str) -> pd.DataFrame | None:
+    """
+    FIFO cost-basis reconstruction (measure_live_performance(), and transitively
+    _positions_from_trade_log()/reconstruct_dry_run_positions()/derive_own_live_positions(),
+    plus derive_entry_date() separately) needs the FULL lifetime trade history to correctly
+    track a still-open position's original entry lot, even after core/audit_log.py's
+    rotate_hash_chained_log() has archived old rows out of the active trade_log_path (see
+    docs/LOG_RETENTION.md). Losing a still-open position's BUY row to rotation would silently
+    corrupt its cost basis forever, this is the fix for that risk.
+
+    Concatenates the active file with every sibling "<trade_log_path>.archive_*.csv" (the exact
+    naming pattern rotate_hash_chained_log() writes), sorted by timestamp. Zero archives found
+    (retention disabled, or no rotation has happened yet) is byte-identical in content to a plain
+    pd.read_csv(trade_log_path), the behavior every caller of this function already had before
+    rotation existed.
+
+    Returns None when neither the active file nor any archive exists, mirroring the plain
+    os.path.isfile(trade_log_path) check every caller used before archives existed.
+    """
+    import glob
+    frames = []
+    if os.path.isfile(trade_log_path):
+        frames.append(pd.read_csv(trade_log_path, parse_dates=["timestamp"]))
+    for archive_path in sorted(glob.glob(f"{trade_log_path}.archive_*.csv")):
+        frames.append(pd.read_csv(archive_path, parse_dates=["timestamp"]))
+    if not frames:
+        return None
+    return pd.concat(frames, ignore_index=True).sort_values("timestamp").reset_index(drop=True)
+
+
 def measure_live_performance(
     start_date: str, end_date: str,
     latest_prices: dict | None = None,
@@ -1284,10 +1314,9 @@ def measure_live_performance(
           connection; see notebooks/operational/portfolio_snapshot_report.ipynb),
           trade_count, per_ticker (DataFrame breakdown).
     """
-    if not os.path.isfile(log_path):
+    log = read_trade_log_with_archives(log_path)
+    if log is None:
         raise FileNotFoundError(f"No trade log found at {log_path}, nothing has been logged yet.")
-
-    log = pd.read_csv(log_path, parse_dates=["timestamp"])
     log = log[(log["timestamp"] >= start_date) & (log["timestamp"] <= end_date)]
     if dry_run is not None:
         log = log[log["dry_run"] == dry_run]
@@ -1420,10 +1449,9 @@ def derive_entry_date(ticker: str, trade_log_path: str = TRADE_LOG_PATH) -> pd.T
     Returns None if the log doesn't exist, has no rows for this ticker, or the position
     is currently flat.
     """
-    if not os.path.isfile(trade_log_path):
+    log = read_trade_log_with_archives(trade_log_path)
+    if log is None:
         return None
-
-    log = pd.read_csv(trade_log_path, parse_dates=["timestamp"])
     log = log[(log["ticker"] == ticker) & (log["action"].isin(["BUY", "SELL"]))].sort_values("timestamp")
     if log.empty:
         return None

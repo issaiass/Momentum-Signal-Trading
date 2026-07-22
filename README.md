@@ -119,6 +119,12 @@ README says so on purpose.
   separate logs, kept deliberately apart. The alert log records which outbound email account
   (`SMTP_USER`) would notify each alert, self-resolving from the environment, no call site
   changes needed, see `docs/ALERT_LOG.md`
+- Opt-in time-based log retention (`enable_log_retention`, default off, byte-identical when
+  disabled): archives, never deletes, rows older than `3*(lookback_period+holding_period)` (in
+  calendar days) out of the trade log, signal rankings log, portfolio snapshot, and (using the
+  largest window across every opted-in portfolio) the shared alert/email-command logs. A
+  still-open position's archived entry lot is never lost from FIFO P&L/cost-basis calculations,
+  and every archive remains independently hash-chain-verifiable, see `docs/LOG_RETENTION.md`
 - Categorized email notifications (CRITICAL/STANDARD/PERIODIC/DAILY/WARNING) and pydantic-
   validated, fail-safe email-commanded remote actions (pause/resume/liquidate/adjust risk
   params/report), the rebalance summary email includes a "What Actually Happened" column
@@ -199,8 +205,11 @@ momentum-trading/
 │   │                                 Rank & Sign, Hybrid Multi-Factor, Path-Dependent,
 │   │                                 Correlation-Weighted, Multi-Timeframe Composite), how
 │   │                                 presets compose, per-strategy best-parameter tables
-│   └── SIGNAL_RANKINGS_LOG.md      full ranked-universe log schema (selected + watchlist
-│                                     tickers every rebalance), how it differs from the trade log
+│   ├── SIGNAL_RANKINGS_LOG.md      full ranked-universe log schema (selected + watchlist
+│   │                                 tickers every rebalance), how it differs from the trade log
+│   └── LOG_RETENTION.md            opt-in archive-and-rotate log retention, the
+│                                     3*(lookback_period+holding_period) window formula, the
+│                                     FIFO cost-basis safety guarantee
 │
 ├── notebooks/
 │   ├── research/                  strategy design, signal research, backtesting
@@ -570,6 +579,7 @@ and multi-portfolio/Docker specifics live in `docs/RUNNING.md` and `docs/DEPLOYM
 | Understand the signal rankings log / "Full Signal Universe" email table (rank, lookback return, selection status, stop-loss price for every ranked ticker) | `docs/SIGNAL_RANKINGS_LOG.md` |
 | Understand the long-term/short-term momentum risk constraints (turnover, skip-month, vol budget) | `docs/RISK_CONSTRAINTS.md` |
 | Choose/understand a selectable momentum `strategy_type` (Dual, Residual, Absolute, Hybrid Multi-Factor, etc.), per-strategy best-parameter presets | `docs/MOMENTUM_STRATEGIES.md` |
+| Configure/understand opt-in log retention (archive-and-rotate, the retention window formula, the FIFO cost-basis safety guarantee) | `docs/LOG_RETENTION.md` |
 
 </details>
 

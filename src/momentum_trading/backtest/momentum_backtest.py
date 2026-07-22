@@ -179,6 +179,27 @@ class BacktestConfig:
                                              # already resumes correctly for the reasons
                                              # documented in docs/RUNNING.md's "Restart and
                                              # Resume Behavior" section.
+    enable_log_retention: bool = False      # LIVE-ONLY, opt-in, default False is byte-identical
+                                             # to today (every log grows unbounded forever). When
+                                             # True, daily_runner.py archives (never deletes) rows
+                                             # older than 3*(lookback_period+holding_period),
+                                             # converted to calendar days via the same month/
+                                             # week-quarter convention compute_required_lookback_
+                                             # days() already uses, out of this portfolio's own
+                                             # live_trades_log_<name>.csv, signal_rankings_log_
+                                             # <name>.csv, and portfolio_snapshot_<name>.csv, plus
+                                             # (using the largest window across every opted-in
+                                             # portfolio) the shared alerts_log.csv/email_commands_
+                                             # log.csv. Archived rows move to a sibling
+                                             # "<file>.archive_<timestamp>.csv" with its own
+                                             # freshly re-seeded, independently verifiable hash
+                                             # chain, never deleted; execution/live_signal.py's
+                                             # read_trade_log_with_archives() transparently
+                                             # includes them in FIFO cost-basis reconstruction, so
+                                             # a still-open position's archived entry lot is never
+                                             # lost. See core/audit_log.py's
+                                             # compute_retention_window_days()/rotate_hash_
+                                             # chained_log() and docs/LOG_RETENTION.md.
     initial_capital: float = 100_000.0
     commission: float = 0.0                 # flat $ per trade, BACKTEST-ONLY: only
                                              # run_risk_managed_backtest()'s simulated cash

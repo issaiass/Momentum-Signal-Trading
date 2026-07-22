@@ -183,6 +183,150 @@ def log_alert(portfolio: str, alert_type: str, severity: str, message: str,
     append_hash_chained_row(log_path, ALERTS_LOG_HEADER, fields)
 
 
+def compute_retention_window_days(lookback_period: float, holding_period: float) -> int:
+    """
+    Retention window backing time-based log rotation (see rotate_hash_chained_log()). Implements
+    3 * (lookback_period + holding_period) while reusing this codebase's EXISTING month/
+    week-quarter conventions, the same ones execution/live_signal.py's
+    resolve_momentum_scores()/compute_required_lookback_days() already established, instead of
+    inventing a new day-per-month approximation. The regime (weekly vs. monthly) is determined
+    ONCE from holding_period, exactly like resolve_momentum_scores() already does, NOT
+    independently per field, a monthly lookback_period under a weekly holding_period is still
+    expressed on the week-scale (CLAUDE.md's documented "same week-scale as its rebalance
+    cadence, not mixed months/weeks" rule): holding_period < 1 (weekly regime), both periods
+    convert via round(period * 4) weeks * 7 days; otherwise (monthly regime), both convert via
+    round(period) * 31 days. Summed, then multiplied by 3. See docs/LOG_RETENTION.md.
+    """
+    if holding_period < 1:
+        def _period_days(period: float) -> int:
+            return max(1, round(period * 4)) * 7
+    else:
+        def _period_days(period: float) -> int:
+            return round(period) * 31
+
+    return 3 * (_period_days(lookback_period) + _period_days(holding_period))
+
+
+def _atomic_write_csv(path: str, header_row: list, data_rows_out: list) -> None:
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(header_row)
+        writer.writerows(data_rows_out)
+    os.replace(tmp_path, path)
+
+
+def _unique_archive_path(log_path: str) -> str:
+    suffix = datetime.now().strftime("%Y%m%dT%H%M%S")
+    archive_path = f"{log_path}.archive_{suffix}.csv"
+    while os.path.isfile(archive_path):
+        suffix += "_1"
+        archive_path = f"{log_path}.archive_{suffix}.csv"
+    return archive_path
+
+
+def _rotate_log(log_path: str, cutoff_date: datetime, timestamp_col: str, rechain: bool) -> dict:
+    """
+    Shared split-and-archive mechanics for rotate_hash_chained_log()/rotate_plain_log() (see
+    those functions' own docstrings for the full behavior contract). `rechain` selects whether
+    each output file's row_hash column (last field) gets recomputed from a fresh "GENESIS" seed
+    (hash-chained logs) or left as plain data with no hash column at all (rechain=False, e.g.
+    data/portfolio_snapshot_<portfolio>.csv, which has no row_hash column to begin with).
+    """
+    if not os.path.isfile(log_path):
+        return {"rotated": False}
+    lock_path = acquire_log_lock(log_path)
+    try:
+        with open(log_path, "r", newline="") as f:
+            rows = list(csv.reader(f))
+        if len(rows) < 2:
+            return {"rotated": False}
+        header, data_rows = rows[0], rows[1:]
+        try:
+            ts_idx = header.index(timestamp_col)
+        except ValueError:
+            return {"rotated": False}
+
+        archive_rows, keep_rows = [], []
+        for row in data_rows:
+            parsed = None
+            if len(row) > ts_idx:
+                try:
+                    parsed = datetime.fromisoformat(row[ts_idx])
+                except ValueError:
+                    parsed = None
+            (archive_rows if parsed is not None and parsed < cutoff_date else keep_rows).append(row)
+
+        if not archive_rows:
+            return {"rotated": False}
+
+        def _rechain(data_rows_in):
+            prev_hash = "GENESIS"
+            out = []
+            for row in data_rows_in:
+                fields = row[:-1]
+                row_hash = _compute_row_hash(prev_hash, fields)
+                out.append(fields + [row_hash])
+                prev_hash = row_hash
+            return out
+
+        archive_path = _unique_archive_path(log_path)
+        _atomic_write_csv(archive_path, header, _rechain(archive_rows) if rechain else archive_rows)
+        _atomic_write_csv(log_path, header, _rechain(keep_rows) if rechain else keep_rows)
+
+        return {"rotated": True, "archived_rows": len(archive_rows),
+                "kept_rows": len(keep_rows), "archive_path": archive_path}
+    finally:
+        release_log_lock(lock_path)
+
+
+def rotate_hash_chained_log(log_path: str, cutoff_date: datetime,
+                             timestamp_col: str = "timestamp") -> dict:
+    """
+    Time-based log rotation for any hash-chained log written by append_hash_chained_row() (this
+    module's alert log and live_signal.py's signal rankings log) or the bespoke-but-identical-
+    convention writers (live_signal.py's log_orders() trade log, email_commands.py's
+    log_command_attempt() email command log): rows with timestamp_col strictly before
+    cutoff_date are moved to a new sibling "<log_path>.archive_<run_timestamp>.csv" file, never
+    deleted, see docs/LOG_RETENTION.md.
+
+    Both the archive file and the rewritten active log_path get a FRESHLY recomputed row_hash
+    chain, independently re-seeded from "GENESIS", so live_signal.py's verify_log_integrity()
+    (unchanged, already hardcodes prev_hash="GENESIS" for row 1 of any file) keeps working
+    correctly on both resulting files with zero changes to that function. The archive file's
+    row_hash values will therefore differ from what was originally written in the live file,
+    expected and harmless: tamper-evidence going FORWARD from the moment of rotation is what
+    matters, not preserving the exact original hash bytes across a legitimate, logged
+    administrative operation.
+
+    No-ops (returns {"rotated": False}) when the file doesn't exist, is empty/header-only, has
+    no timestamp_col, or nothing is older than cutoff_date, the common case on most days. A row
+    whose timestamp_col can't be parsed is conservatively KEPT (never archived), rotation should
+    never be the reason a malformed-but-real row silently disappears.
+
+    Guarded by the SAME acquire_log_lock()/release_log_lock() critical section as every append
+    to this file (see that function's own docstring for the real concurrent-write race it
+    fixes), so rotation can never race a concurrent writer into a corrupt or mis-chained file.
+    Both output files are written atomically (temp file + os.replace()), matching
+    daily_runner.py's own atomic-marker-write precedent, so a crash mid-rotation can't leave
+    either file half-written.
+    """
+    return _rotate_log(log_path, cutoff_date, timestamp_col, rechain=True)
+
+
+def rotate_plain_log(log_path: str, cutoff_date: datetime, timestamp_col: str) -> dict:
+    """
+    Time-based rotation for a plain (non-hash-chained) time-series CSV, e.g.
+    data/portfolio_snapshot_<portfolio>.csv (execution/live_signal.py's
+    write_portfolio_snapshot(), whose date column is named "date", not "timestamp", pass
+    timestamp_col="date"). Same archive-not-delete semantics, atomic writes, and
+    acquire_log_lock()/release_log_lock() discipline as rotate_hash_chained_log(), just without
+    any hash chain to preserve or recompute, this file has no row_hash column at all. See
+    docs/LOG_RETENTION.md.
+    """
+    return _rotate_log(log_path, cutoff_date, timestamp_col, rechain=False)
+
+
 def read_recent_alerts(portfolio: str = "ALL", limit: int = 10,
                         log_path: str = ALERTS_LOG_PATH) -> list[dict]:
     """

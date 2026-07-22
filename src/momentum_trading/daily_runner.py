@@ -39,7 +39,10 @@ from .execution.live_signal import (
     resolve_ticker_stop_loss_pct,
 )
 from .core.smtp_auth import authenticate as authenticate_smtp, smtp_ready, connect as smtp_connect, send_with_retry
-from .core.audit_log import log_alert, read_recent_alerts, ALERTS_LOG_PATH
+from .core.audit_log import (
+    log_alert, read_recent_alerts, ALERTS_LOG_PATH,
+    compute_retention_window_days, rotate_hash_chained_log, rotate_plain_log,
+)
 from .core.paths import data_dir, logs_dir
 from .core.technical_indicators import compute_latest_indicators
 from .core.fundamentals import get_cached_or_fetch_fundamentals
@@ -58,7 +61,7 @@ from .interfaces.notifications import (
 from .interfaces.email_commands import (
     poll_and_process_commands, PauseCommand, ResumeCommand, LiquidateCommand,
     SkipRebalanceCommand, StatusCommand, SetMaxDrawdownCommand, AlertsReportCommand,
-    log_command_attempt, build_reply_body,
+    log_command_attempt, build_reply_body, EMAIL_COMMANDS_LOG_PATH,
 )
 from .core import functions_quant_extensions as fnx
 
@@ -657,6 +660,69 @@ def _check_account_wide_drawdown_breaker_with_alert(
     )
 
 
+def _rotate_log_with_alert(name: str, log_path: str, cutoff: pd.Timestamp, plain: bool = False,
+                            timestamp_col: str = "timestamp") -> None:
+    """
+    Thin wrapper around core/audit_log.py's rotate_hash_chained_log()/rotate_plain_log(): fires
+    a LOG_ROTATED INFO alert (log_alert(), same triple-step pattern as every other advisory
+    check in this file) whenever a rotation actually moved rows, so a future drop in a log's row
+    count is self-explanatory in the audit trail rather than a mystery. See
+    docs/LOG_RETENTION.md.
+    """
+    rotate_fn = rotate_plain_log if plain else rotate_hash_chained_log
+    result = rotate_fn(log_path, cutoff.to_pydatetime(), timestamp_col=timestamp_col)
+    if result.get("rotated"):
+        logger.info("[%s] Rotated %s: archived %d rows to %s (%d rows kept)",
+                    name, log_path, result["archived_rows"], result["archive_path"], result["kept_rows"])
+        log_alert(name, "LOG_ROTATED", "INFO",
+                  f"Archived {result['archived_rows']} rows from {os.path.basename(log_path)} "
+                  f"to {os.path.basename(result['archive_path'])} ({result['kept_rows']} rows kept)",
+                  log_path=ALERTS_LOG_PATH)
+
+
+def apply_portfolio_log_retention(name: str, cfg: BacktestConfig, trade_log_path: str,
+                                   signal_rankings_log_path: str) -> None:
+    """
+    Time-based log retention (BacktestConfig.enable_log_retention, opt-in, default False is a
+    complete no-op). Archives (never deletes) rows older than
+    compute_retention_window_days(lookback_period, holding_period) out of this portfolio's own
+    trade log, signal rankings log, and portfolio snapshot, once per run, cheap no-op on every
+    run nothing is old enough to move (see core/audit_log.py's rotate_hash_chained_log()/
+    rotate_plain_log()). Shared logs (alerts_log.csv, email_commands_log.csv) are NOT rotated
+    here, they don't belong to any single portfolio, see main()'s post-loop shared-log rotation
+    instead. See docs/LOG_RETENTION.md.
+    """
+    if not cfg.enable_log_retention:
+        return
+    cutoff = pd.Timestamp.now() - pd.Timedelta(
+        days=compute_retention_window_days(cfg.lookback_period, cfg.holding_period))
+    _rotate_log_with_alert(name, trade_log_path, cutoff)
+    _rotate_log_with_alert(name, signal_rankings_log_path, cutoff)
+    snapshot_path = str(data_dir() / f"portfolio_snapshot_{name}.csv")
+    _rotate_log_with_alert(name, snapshot_path, cutoff, plain=True, timestamp_col="date")
+
+
+def apply_shared_log_retention(portfolios: dict) -> None:
+    """
+    alerts_log.csv/email_commands_log.csv are shared across every portfolio (see
+    docs/ALERT_LOG.md), so they can't be rotated per-portfolio the way
+    apply_portfolio_log_retention() rotates trade/signal-rankings/snapshot logs. Rotated using
+    the LARGEST resolved retention window across every portfolio with
+    enable_log_retention=True (the conservative choice: guarantees at least as much history is
+    kept as every opted-in portfolio individually needs). Entirely skipped (no-op) if zero
+    portfolios opt in, byte-identical to before this feature existed. See docs/LOG_RETENTION.md.
+    """
+    windows = [
+        compute_retention_window_days(spec["cfg"].lookback_period, spec["cfg"].holding_period)
+        for spec in portfolios.values() if spec["cfg"].enable_log_retention
+    ]
+    if not windows:
+        return
+    cutoff = pd.Timestamp.now() - pd.Timedelta(days=max(windows))
+    _rotate_log_with_alert("ALL", ALERTS_LOG_PATH, cutoff)
+    _rotate_log_with_alert("ALL", EMAIL_COMMANDS_LOG_PATH, cutoff)
+
+
 def check_and_apply_email_commands(portfolio_names: list[str], ibkr_port: int, dry_run: bool,
                                      send_email_command_feedback: bool = True) -> None:
     """
@@ -1100,12 +1166,29 @@ def main():
     #     before any network attempt, so an unconfigured key costs nothing every run. ---
     macro_indicators = get_cached_or_fetch_macro_indicators(fred_api_key=os.environ.get("FRED_API_KEY"))
 
+    # --- Time-based log retention for the two SHARED logs (alerts_log.csv, email_commands_log.csv),
+    #     ONCE per run, not per-portfolio, see apply_shared_log_retention()'s own docstring for
+    #     why these two can't be rotated inside the per-portfolio loop below. No-op entirely if
+    #     no portfolio has enable_log_retention=True. ---
+    try:
+        apply_shared_log_retention(portfolios)
+    except Exception as e:
+        logger.warning("Shared log retention check failed (non-fatal, continuing with normal run): %s", e)
+
     try:
         for name, spec in portfolios.items():
             cfg = spec["cfg"]
             tickers = spec["tickers"]
             trade_log_path = str(logs_dir() / f"live_trades_log_{name}.csv")
             signal_rankings_log_path = str(logs_dir() / f"signal_rankings_log_{name}.csv")
+
+            # --- Time-based log retention (opt-in, cfg.enable_log_retention), this portfolio's
+            #     OWN trade/signal-rankings/snapshot logs only, see
+            #     apply_portfolio_log_retention()'s own docstring. ---
+            try:
+                apply_portfolio_log_retention(name, cfg, trade_log_path, signal_rankings_log_path)
+            except Exception as e:
+                logger.warning("[%s] Log retention check failed (non-fatal, continuing): %s", name, e)
 
             # --- Stale rebalance-in-progress marker (non-blocking WARNING): a marker written
             #     immediately before a PREVIOUS run()'s rebalance, still present now, means that

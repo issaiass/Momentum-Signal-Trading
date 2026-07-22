@@ -120,6 +120,37 @@ that tests enforce, don't casually violate these when editing:
   `log_command_attempt()`'s bespoke read-then-write blocks, which don't go through
   `append_hash_chained_row()` and so each needed their own explicit acquire/release) now share
   this one locking primitive rather than each risking reinventing (or omitting) it.
+  `compute_retention_window_days(lookback_period, holding_period)` and
+  `rotate_hash_chained_log(log_path, cutoff_date)`/`rotate_plain_log(log_path, cutoff_date,
+  timestamp_col)` (also here) back `BacktestConfig.enable_log_retention` (opt-in, default
+  `False`, byte-identical behavior when off): every one of the five time-series CSVs this project
+  writes (trade log, signal rankings log, portfolio snapshot, plus the two shared logs) grew
+  unbounded forever until this existed, confirmed by search, not assumed. `compute_retention_
+  window_days()` implements `3 * (lookback_period + holding_period)` converted to calendar days
+  via the SAME month/week-quarter convention `execution/live_signal.py`'s
+  `resolve_momentum_scores()`/`compute_required_lookback_days()` already established (regime
+  decided ONCE from `holding_period < 1`, applied to BOTH fields, not independently per field).
+  `rotate_hash_chained_log()`/`rotate_plain_log()` (a shared private `_rotate_log()` underneath,
+  `rechain` bool selects whether output files get a freshly recomputed row_hash chain) ARCHIVE,
+  never delete: old rows move to a sibling `<log_path>.archive_<run_timestamp>.csv`, both output
+  files written atomically (temp file + `os.replace()`), guarded by the same
+  `acquire_log_lock()`/`release_log_lock()` critical section as every append, and (for
+  hash-chained files) independently re-seeded from `"GENESIS"` so `verify_log_integrity()`
+  (unchanged) keeps working on both resulting files with zero changes to that function. A serious
+  correctness risk was found and designed around while building this, not previously known:
+  `execution/live_signal.py`'s FIFO cost-basis functions (`measure_live_performance()`, and
+  transitively `reconstruct_dry_run_positions()`/`derive_own_live_positions()`, plus
+  `derive_entry_date()` separately) used to read the trade log via a single `pd.read_csv()` call;
+  archiving away a STILL-OPEN position's BUY row would have silently corrupted its cost basis
+  forever. `read_trade_log_with_archives(trade_log_path)` (`execution/live_signal.py`) fixes this:
+  concatenates the active file with every sibling `<trade_log_path>.archive_*.csv`, sorted by
+  timestamp, byte-identical in content to a plain read when no archives exist; all four
+  FIFO-dependent readers go through it now. `daily_runner.py`'s `apply_portfolio_log_retention()`
+  (per-portfolio: trade/signal-rankings/snapshot logs, using that portfolio's own resolved
+  window) and `apply_shared_log_retention()` (the two shared logs, using the LARGEST resolved
+  window across every opted-in portfolio, since a shared file can't have two different windows)
+  wire this in, once per run, firing a new `LOG_ROTATED` INFO alert whenever a rotation actually
+  moves rows. See `docs/LOG_RETENTION.md`.
 - **`core/strategy_signals.py`** (NEW module, selectable-momentum-strategy plan), dispatches on
   `BacktestConfig.strategy_type` (`config.yaml`'s per-portfolio `default_risk`/`risk_overrides`,
   one of 11 allowed values, `ALLOWED_STRATEGY_TYPES` in `backtest/momentum_backtest.py`, see

@@ -159,6 +159,20 @@ default_risk:
                                    # persistent paper portfolio, prefer --live --port 7497
                                    # against a real IBKR paper account instead, see
                                    # docs/RUNNING.md's "Restart and Resume Behavior" section.
+  enable_log_retention: false     # LIVE-ONLY, opt-in, default false is byte-identical to today
+                                   # (every log grows unbounded forever). When true, ARCHIVES
+                                   # (never deletes) rows older than
+                                   # 3*(lookback_period+holding_period), converted to calendar
+                                   # days the same way lookback_period is elsewhere in this file,
+                                   # out of this portfolio's own live_trades_log_<name>.csv,
+                                   # signal_rankings_log_<name>.csv, and
+                                   # portfolio_snapshot_<name>.csv, plus (using the LARGEST
+                                   # window across every opted-in portfolio) the shared
+                                   # alerts_log.csv/email_commands_log.csv. Archived rows move to
+                                   # a sibling "<file>.archive_<timestamp>.csv" with its own
+                                   # freshly re-seeded, independently verifiable hash chain, a
+                                   # still-open position's archived entry lot is never lost from
+                                   # P&L/cost-basis calculations. See docs/LOG_RETENTION.md.
   commission: 0.0                 # flat $ commission charged per trade, BACKTEST-ONLY,
                                    # has no effect on --live (real commission is already
                                    # reflected in your broker's real account balance)

@@ -1623,3 +1623,114 @@ class TestCheckTickerOverlap:
         assert set(overlap.keys()) == {"XLF", "XLE", "GLD", "TLT"}
         for names in overlap.values():
             assert set(names) == {"portfolio1", "portfolio2"}
+
+
+class TestApplyPortfolioLogRetention:
+    """
+    apply_portfolio_log_retention() (BacktestConfig.enable_log_retention, opt-in) wires
+    core/audit_log.py's rotate_hash_chained_log()/rotate_plain_log() into a portfolio's own
+    trade/signal-rankings/snapshot logs. See docs/LOG_RETENTION.md.
+    """
+
+    def _seed_hash_chained(self, path, header, rows_with_days_ago):
+        from datetime import datetime, timedelta
+        from momentum_trading.core.audit_log import append_hash_chained_row
+        for days_ago in rows_with_days_ago:
+            ts = (datetime.now() - timedelta(days=days_ago)).isoformat()
+            fields = [ts] + ["x"] * (len(header) - 2)
+            append_hash_chained_row(path, header, fields)
+
+    def test_disabled_by_default_is_a_complete_noop(self, tmp_path):
+        from momentum_trading.daily_runner import apply_portfolio_log_retention
+        trade_log_path = str(tmp_path / "live_trades_log_p1.csv")
+        signal_log_path = str(tmp_path / "signal_rankings_log_p1.csv")
+        self._seed_hash_chained(trade_log_path, ["timestamp", "ticker"], [500, 400])
+        cfg = BacktestConfig()  # enable_log_retention=False by default
+        apply_portfolio_log_retention("p1", cfg, trade_log_path, signal_log_path)
+        with open(trade_log_path) as f:
+            assert len(f.readlines()) == 3  # header + 2 rows, completely untouched
+
+    def test_enabled_rotates_old_rows_and_logs_an_alert(self, tmp_path, monkeypatch):
+        from momentum_trading.daily_runner import apply_portfolio_log_retention
+        import momentum_trading.daily_runner as dr
+        alerts_path = str(tmp_path / "alerts_log.csv")
+        monkeypatch.setattr(dr, "ALERTS_LOG_PATH", alerts_path)
+        monkeypatch.setattr(dr, "data_dir", lambda: tmp_path)
+
+        trade_log_path = str(tmp_path / "live_trades_log_p1.csv")
+        signal_log_path = str(tmp_path / "signal_rankings_log_p1.csv")
+        # lookback=1, holding=1 (monthly regime) -> retention window = 3*(31+31) = 186 days
+        self._seed_hash_chained(trade_log_path, ["timestamp", "ticker"], [500, 10])
+        cfg = BacktestConfig(lookback_period=1, holding_period=1, enable_log_retention=True)
+
+        apply_portfolio_log_retention("p1", cfg, trade_log_path, signal_log_path)
+
+        with open(trade_log_path) as f:
+            rows = f.readlines()
+        assert len(rows) == 2  # header + only the recent (10-days-ago) row survives
+
+        alerts = read_recent_alerts(portfolio="p1", limit=10, log_path=alerts_path)
+        assert any(a["alert_type"] == "LOG_ROTATED" for a in alerts)
+
+
+class TestApplySharedLogRetention:
+    """
+    apply_shared_log_retention() rotates alerts_log.csv/email_commands_log.csv using the LARGEST
+    resolved window across every enable_log_retention=True portfolio, since these two files are
+    shared across all portfolios and can't be rotated per-portfolio. See docs/LOG_RETENTION.md.
+    """
+
+    def test_noop_when_no_portfolio_opts_in(self, tmp_path, monkeypatch):
+        import momentum_trading.daily_runner as dr
+        from momentum_trading.daily_runner import apply_shared_log_retention
+        alerts_path = str(tmp_path / "alerts_log.csv")
+        monkeypatch.setattr(dr, "ALERTS_LOG_PATH", alerts_path)
+        from datetime import datetime, timedelta
+        from momentum_trading.core.audit_log import append_hash_chained_row, ALERTS_LOG_HEADER
+        old_ts = (datetime.now() - timedelta(days=1000)).isoformat()
+        append_hash_chained_row(alerts_path, ALERTS_LOG_HEADER,
+                                 [old_ts, "ALL", "X", "INFO", "m", ""])
+
+        portfolios = {"p1": {"cfg": BacktestConfig(enable_log_retention=False)}}
+        apply_shared_log_retention(portfolios)
+
+        with open(alerts_path) as f:
+            assert len(f.readlines()) == 2  # header + 1 row, untouched
+
+    def test_rotates_using_the_largest_window_across_opted_in_portfolios(self, tmp_path, monkeypatch):
+        import momentum_trading.daily_runner as dr
+        from momentum_trading.daily_runner import apply_shared_log_retention
+        alerts_path = str(tmp_path / "alerts_log.csv")
+        email_log_path = str(tmp_path / "email_commands_log.csv")
+        monkeypatch.setattr(dr, "ALERTS_LOG_PATH", alerts_path)
+        monkeypatch.setattr(dr, "EMAIL_COMMANDS_LOG_PATH", email_log_path)
+
+        from datetime import datetime, timedelta
+        from momentum_trading.core.audit_log import (
+            append_hash_chained_row, ALERTS_LOG_HEADER, compute_retention_window_days,
+        )
+        # p1 (short window: lookback=1, holding=0.25 -> 3*(28+7)=105 days) and p2 (long window:
+        # lookback=24, holding=3 -> 3*(744+93)=2511 days). A row 500 days old is OLDER than p1's
+        # window alone (would be wrongly archived if the code used the smallest window) but
+        # YOUNGER than p2's window (correctly survives when the LARGEST window governs, the
+        # documented "keeps at least as much as every opted-in portfolio needs" behavior).
+        p1_window = compute_retention_window_days(1, 0.25)
+        p2_window = compute_retention_window_days(24, 3)
+        assert p1_window < 500 < p2_window  # sanity-check the scenario is well-formed
+
+        mid_age_ts = (datetime.now() - timedelta(days=500)).isoformat()
+        recent_ts = (datetime.now() - timedelta(days=1)).isoformat()
+        append_hash_chained_row(alerts_path, ALERTS_LOG_HEADER,
+                                 [mid_age_ts, "ALL", "X", "INFO", "mid_age", ""])
+        append_hash_chained_row(alerts_path, ALERTS_LOG_HEADER,
+                                 [recent_ts, "ALL", "X", "INFO", "recent", ""])
+
+        portfolios = {
+            "p1": {"cfg": BacktestConfig(lookback_period=1, holding_period=0.25, enable_log_retention=True)},
+            "p2": {"cfg": BacktestConfig(lookback_period=24, holding_period=3, enable_log_retention=True)},
+        }
+        apply_shared_log_retention(portfolios)
+
+        with open(alerts_path) as f:
+            rows = f.readlines()
+        assert len(rows) == 3  # header + BOTH rows survive: p2's larger window governed

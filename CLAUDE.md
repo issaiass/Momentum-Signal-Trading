@@ -325,6 +325,28 @@ that tests enforce, don't casually violate these when editing:
   `generate_orders()`'s `money_invested` sums-to-`total_value * gross_exposure` invariant now
   only holds when the cap never has to leave a shortfall, see that function's own docstring and
   `docs/RISK_CONSTRAINTS.md`'s "Position Size Hard-Cap".
+  `ticker_sectors: dict = field(default_factory=dict)` + `max_sector_weight: float | None = None`
+  (Epic 3, "Redefining Stop-Loss Price, Plus Two Remaining Known Gaps" plan, Nice-to-Have tier,
+  opt-in, `{}`/`None` byte-identical to before) back the "Sector / Asset-Class Concentration Cap":
+  `max_position_weight`/`position_vol_budget` only ever constrain a SINGLE ticker, nothing
+  previously stopped several picks in the SAME sector from combining into an outsized aggregate
+  exposure. `ticker_sectors` is a manual `{ticker: sector_name}` mapping, deliberately, this
+  project has no vendor sector-data integration (`core/fundamentals.py` covers P/E, PEG, ROE,
+  Debt-to-Equity, Current Ratio, not sector), a ticker absent from the mapping is never
+  grouped/capped at all, not a silent error. `_apply_sector_caps(weights, ticker_sectors,
+  max_sector_weight)` (`backtest/momentum_backtest.py`) is wired into `resolve_target_weights()`
+  as the LAST step, after `_apply_position_caps()` and the optional
+  `_apply_volatility_budget_caps()`, so it constrains the FINAL, fully-capped weights. For any
+  sector whose summed weight exceeds the cap, every ticker in that sector scales down
+  proportionally so the sector sums to exactly the cap. Deliberately simpler than
+  `_apply_position_caps()`'s redistribute-to-others logic: the freed weight is left as
+  unallocated gross exposure (cash), NOT redistributed elsewhere, a conscious, conservative
+  choice, redistributing into other tickers/sectors could push one of THEM over its own
+  `max_position_weight` or `max_sector_weight`, a multi-constraint interaction
+  `_apply_position_caps()`'s own single-dimension redistribution never has to reason about, same
+  "reduce exposure rather than silently violate a cap" precedent as that function's own
+  `redistribution_incomplete` fix. See `docs/RISK_CONSTRAINTS.md`'s "Sector / Asset-Class
+  Concentration Cap".
   `compute_vol_scalar(realized_vol, target_portfolio_vol, min_gross_exposure,
   max_gross_exposure)` is the "Volatility Scaling" (Mandatory tier) portfolio-level formula,
   extracted from `run_risk_managed_backtest()`'s previously-inline logic specifically so

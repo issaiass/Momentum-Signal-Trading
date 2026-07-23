@@ -55,6 +55,17 @@ class TestBacktestConfigValidation:
         with pytest.raises(ValueError, match="stop_loss_pct"):
             BacktestConfig(stop_loss_pct=1.5)
 
+    def test_invalid_max_sector_weight_raises(self):
+        with pytest.raises(ValueError, match="max_sector_weight"):
+            BacktestConfig(max_sector_weight=1.5)
+
+    def test_max_sector_weight_none_default_is_accepted(self):
+        assert BacktestConfig().max_sector_weight is None  # should not raise
+
+    def test_ticker_sectors_non_dict_raises(self):
+        with pytest.raises(ValueError, match="ticker_sectors"):
+            BacktestConfig(ticker_sectors=["XLK"])
+
     def test_invalid_top_n_raises(self):
         # top_n selects how many top-momentum names actually get held each
         # rebalance, 0 or negative is meaningless (an empty or undefined
@@ -672,6 +683,87 @@ class TestApplyPositionCaps:
         from momentum_trading.backtest.momentum_backtest import _apply_position_caps
         result = _apply_position_caps({"A": 0.6, "B": 0.4}, max_weight=0.5)
         assert sum(result.values()) == pytest.approx(1.0)
+
+
+class TestApplySectorCaps:
+    """
+    _apply_sector_caps() (Epic 3, "Redefining Stop-Loss Price, Plus Two Remaining Known Gaps"
+    plan, "Sector / Asset-Class Concentration Cap", Nice-to-Have tier): caps the SUMMED weight
+    of every ticker mapped to the same sector, deliberately WITHOUT redistributing the freed
+    weight elsewhere (unlike _apply_position_caps()'s redistribute-to-others logic), the excess
+    is left as unallocated gross exposure (cash) instead.
+    """
+
+    def test_over_cap_sector_scaled_down_to_exactly_the_cap(self):
+        from momentum_trading.backtest.momentum_backtest import _apply_sector_caps
+        # A and B are both "Tech", summing to 0.7, over the 0.4 cap: scaled down proportionally
+        # (each already equal, so each ends up at 0.2, summing to exactly 0.4).
+        weights = {"A": 0.35, "B": 0.35, "C": 0.3}
+        sectors = {"A": "Tech", "B": "Tech", "C": "Energy"}
+        result = _apply_sector_caps(weights, sectors, max_sector_weight=0.4)
+        assert result["A"] + result["B"] == pytest.approx(0.4)
+        assert result["A"] == pytest.approx(result["B"])  # proportional scaling preserves ratio
+
+    def test_excess_is_not_redistributed_elsewhere(self):
+        # The freed weight from capping Tech is left unallocated, C ("Energy", untouched by the
+        # cap) must NOT receive any of Tech's excess, and the total must sum to LESS than 1.0.
+        from momentum_trading.backtest.momentum_backtest import _apply_sector_caps
+        weights = {"A": 0.35, "B": 0.35, "C": 0.3}
+        sectors = {"A": "Tech", "B": "Tech", "C": "Energy"}
+        result = _apply_sector_caps(weights, sectors, max_sector_weight=0.4)
+        assert result["C"] == pytest.approx(0.3)  # completely untouched
+        assert sum(result.values()) == pytest.approx(0.7)  # 0.4 (capped Tech) + 0.3 (Energy)
+
+    def test_unmapped_ticker_is_never_touched(self):
+        # A ticker absent from ticker_sectors is not grouped/capped at all, regardless of its
+        # own weight or any sector cap in effect.
+        from momentum_trading.backtest.momentum_backtest import _apply_sector_caps
+        weights = {"A": 0.9, "B": 0.1}
+        sectors = {"B": "Energy"}  # "A" deliberately unmapped
+        result = _apply_sector_caps(weights, sectors, max_sector_weight=0.4)
+        assert result["A"] == pytest.approx(0.9)
+        assert result["B"] == pytest.approx(0.1)  # Energy alone is already under cap
+
+    def test_multiple_sectors_each_under_cap_are_untouched(self):
+        from momentum_trading.backtest.momentum_backtest import _apply_sector_caps
+        weights = {"A": 0.2, "B": 0.2, "C": 0.2, "D": 0.2}
+        sectors = {"A": "Tech", "B": "Tech", "C": "Energy", "D": "Energy"}
+        result = _apply_sector_caps(weights, sectors, max_sector_weight=0.5)
+        for t, w in weights.items():
+            assert result[t] == pytest.approx(w)
+
+    def test_operates_on_already_position_capped_weights_not_pre_cap_values(self):
+        # resolve_target_weights() applies _apply_position_caps() BEFORE _apply_sector_caps(),
+        # confirms this function's caller-facing contract: it must operate on whatever weights
+        # it's handed (the already max_position_weight-capped values), not recompute from raw
+        # pre-cap weights, verified here by feeding it post-position-cap-shaped input directly.
+        from momentum_trading.backtest.momentum_backtest import _apply_position_caps, _apply_sector_caps
+        raw_weights = {"A": 0.6, "B": 0.4}
+        position_capped = _apply_position_caps(raw_weights, max_weight=0.35)
+        assert position_capped["A"] == pytest.approx(0.35)  # confirms the precondition
+        sectors = {"A": "Tech"}
+        result = _apply_sector_caps(position_capped, sectors, max_sector_weight=0.2)
+        assert result["A"] == pytest.approx(0.2)  # capped from 0.35 (post-position-cap), not 0.6
+
+    def test_resolve_target_weights_none_default_is_byte_identical(self, synthetic_daily_prices):
+        # cfg.max_sector_weight=None (the default) must never invoke sector capping at all.
+        cfg = BacktestConfig(max_sector_weight=None)
+        as_of = synthetic_daily_prices.index[100]
+        picks = ["SPY", "QQQ"]
+        weights_without = resolve_target_weights(picks, synthetic_daily_prices, as_of, cfg)
+        cfg_explicit_none = BacktestConfig(max_sector_weight=None, ticker_sectors={"SPY": "Broad"})
+        weights_with_mapping_but_no_cap = resolve_target_weights(
+            picks, synthetic_daily_prices, as_of, cfg_explicit_none
+        )
+        assert weights_without == weights_with_mapping_but_no_cap
+
+    def test_resolve_target_weights_applies_sector_cap_end_to_end(self, synthetic_daily_prices):
+        cfg = BacktestConfig(max_position_weight=1.0, max_sector_weight=0.3,
+                              ticker_sectors={"SPY": "Broad", "QQQ": "Broad"},
+                              use_correlation_penalty=False)
+        as_of = synthetic_daily_prices.index[100]
+        weights = resolve_target_weights(["SPY", "QQQ"], synthetic_daily_prices, as_of, cfg)
+        assert weights["SPY"] + weights["QQQ"] == pytest.approx(0.3)
 
 
 class TestComputeVolScalar:

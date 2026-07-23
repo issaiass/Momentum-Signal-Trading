@@ -271,6 +271,32 @@ default_risk:
                                    # name even under the same flat cap. Never allows a single
                                    # position's vol contribution to exceed this budget,
                                    # regardless of how strong the momentum signal is.
+  ticker_sectors: {}               # {ticker: sector_name}, e.g. {XLK: Technology, QQQ:
+                                   # Technology, XLE: Energy}. Manual mapping, this project has
+                                   # no vendor sector-data integration (core/fundamentals.py
+                                   # covers P/E, PEG, ROE, Debt-to-Equity, Current Ratio, not
+                                   # sector). {} (default) means no ticker is grouped/capped, a
+                                   # ticker missing from this map is simply never capped by
+                                   # max_sector_weight below, not an error. Only meaningful
+                                   # together with max_sector_weight.
+                                   #   ticker_sectors:
+                                   #     XLK: Technology
+                                   #     QQQ: Technology
+                                   #     XLE: Energy
+  max_sector_weight: null         # the "Sector / Asset-Class Concentration Cap" (Nice-to-Have
+                                   # tier). null (default) = disabled, byte-identical to before
+                                   # this field existed. When set, e.g. 0.30, any sector's
+                                   # SUMMED weight (per ticker_sectors above) exceeding this is
+                                   # scaled down to exactly the cap; the freed weight is left as
+                                   # unallocated exposure (cash), NOT redistributed to other
+                                   # tickers/sectors (deliberately simpler than
+                                   # max_position_weight's redistribute-to-others behavior, to
+                                   # avoid a redistribution that could push a DIFFERENT ticker
+                                   # over its own max_position_weight or a DIFFERENT sector over
+                                   # its own cap). Applied AFTER max_position_weight/
+                                   # position_vol_budget above, the final portfolio-construction
+                                   # constraint layer. See docs/RISK_CONSTRAINTS.md's "Sector /
+                                   # Asset-Class Concentration Cap".
   stop_loss_pct: 0.12             # per-position stop-loss, as a fraction below entry price.
                                    # FIXED from entry, not trailing (never ratchets up as the
                                    # position gains, see docs/RISK_CONSTRAINTS.md's "Stop-Loss

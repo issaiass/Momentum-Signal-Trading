@@ -233,6 +233,32 @@ class BacktestConfig:
                                              # regardless of how strong the momentum signal is.
                                              # See backtest/momentum_backtest.py's
                                              # _apply_volatility_budget_caps().
+    ticker_sectors: dict = field(default_factory=dict)  # {ticker: sector_name}, e.g.
+                                             # {"XLK": "Technology", "QQQ": "Technology"}. Manual
+                                             # mapping, no vendor sector-data integration exists
+                                             # in this project (core/fundamentals.py covers P/E,
+                                             # PEG, ROE, Debt-to-Equity, Current Ratio, not
+                                             # sector/asset-class). {} default (a ticker with no
+                                             # entry is never grouped/capped) is byte-identical to
+                                             # before this field existed. Only meaningful together
+                                             # with max_sector_weight below.
+    max_sector_weight: float | None = None  # the "Sector / Asset-Class Concentration Cap"
+                                             # (Nice-to-Have tier): None (default) disables this
+                                             # entirely, byte-identical to before. When set, any
+                                             # sector (per ticker_sectors above) whose SUMMED
+                                             # weight exceeds this is scaled down to exactly this
+                                             # cap; the freed weight is left as unallocated gross
+                                             # exposure (cash), NOT redistributed to other
+                                             # tickers/sectors (deliberately simpler than
+                                             # max_position_weight's redistribute-to-others logic,
+                                             # to avoid a redistribution that could push a
+                                             # DIFFERENT ticker over its own max_position_weight
+                                             # or push another sector over ITS cap). Applied AFTER
+                                             # max_position_weight/position_vol_budget above, the
+                                             # final portfolio-construction constraint layer. See
+                                             # backtest/momentum_backtest.py's
+                                             # _apply_sector_caps() and docs/RISK_CONSTRAINTS.md's
+                                             # "Sector / Asset-Class Concentration Cap".
     stop_loss_pct: float = 0.12             # per-position stop from entry price
     ticker_risk_overrides: dict = field(default_factory=dict)  # {ticker: {'enabled': bool,
         # 'stop_loss_pct': float}}, per-ticker override of the portfolio-wide stop_loss_pct
@@ -461,6 +487,10 @@ class BacktestConfig:
             errors.append(f"min_gross_exposure ({self.min_gross_exposure}) should be in [0, 1.0]")
         if not (0 < self.max_position_weight <= 1.0):
             errors.append(f"max_position_weight ({self.max_position_weight}) should be in (0, 1.0]")
+        if self.max_sector_weight is not None and not (0 < self.max_sector_weight <= 1.0):
+            errors.append(f"max_sector_weight ({self.max_sector_weight}) should be in (0, 1.0] or None")
+        if not isinstance(self.ticker_sectors, dict):
+            errors.append(f"ticker_sectors ({self.ticker_sectors!r}) must be a dict")
         if not (0 < self.stop_loss_pct < 1.0):
             errors.append(f"stop_loss_pct ({self.stop_loss_pct}) should be in (0, 1.0)")
         if not isinstance(self.ticker_risk_overrides, dict):
@@ -773,6 +803,8 @@ def resolve_target_weights(
             weights, daily_prices, as_of, cfg.vol_lookback_days,
             cfg.position_vol_budget, cfg.max_position_weight,
         )
+    if cfg.max_sector_weight is not None:
+        weights = _apply_sector_caps(weights, cfg.ticker_sectors, cfg.max_sector_weight)
     return weights
 
 
@@ -904,6 +936,46 @@ def _apply_volatility_budget_caps(
     total = sum(weights.values())
     if total > 0:
         weights = {t: w / total for t, w in weights.items()}
+    return weights
+
+
+def _apply_sector_caps(weights: dict, ticker_sectors: dict, max_sector_weight: float) -> dict:
+    """
+    The "Sector / Asset-Class Concentration Cap" (Nice-to-Have tier, docs/RISK_CONSTRAINTS.md):
+    caps the SUMMED weight of every ticker mapped to the same sector (cfg.ticker_sectors) at
+    max_sector_weight. A ticker absent from ticker_sectors is NOT grouped/capped at all, an
+    incomplete mapping is a safe no-op for unclassified tickers, not a silent error.
+
+    Deliberately simpler than _apply_position_caps()'s redistribute-to-others logic: when a
+    sector's summed weight exceeds the cap, every ticker in that sector is scaled down
+    proportionally so the sector sums to exactly the cap, and the freed weight is NOT
+    redistributed elsewhere, left as unallocated gross exposure (cash) instead. This is a
+    deliberate, conservative choice: redistributing the excess into tickers outside the
+    over-cap sector could push one of THEM over its own max_position_weight, or push a
+    DIFFERENT sector over ITS cap, a multi-constraint interaction _apply_position_caps()'s own
+    single-dimension redistribution doesn't have to reason about. Same "reduce exposure rather
+    than silently violate a cap" precedent that function's own bug fix established.
+
+    Called LAST in resolve_target_weights()'s pipeline, after _apply_position_caps() and the
+    optional _apply_volatility_budget_caps(), so it constrains the FINAL, fully-capped weights,
+    not an intermediate state.
+    """
+    weights = dict(weights)
+    sector_totals: dict[str, float] = {}
+    for t, w in weights.items():
+        sector = ticker_sectors.get(t)
+        if sector is None:
+            continue
+        sector_totals[sector] = sector_totals.get(sector, 0.0) + w
+
+    for sector, total in sector_totals.items():
+        if total <= max_sector_weight:
+            continue
+        scale = max_sector_weight / total
+        for t in weights:
+            if ticker_sectors.get(t) == sector:
+                weights[t] *= scale
+
     return weights
 
 

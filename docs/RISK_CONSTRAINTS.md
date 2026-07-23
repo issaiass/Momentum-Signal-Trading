@@ -632,6 +632,53 @@ starting point. `position_vol_budget` (Allow/disallow constraints above) is a co
 NOT redundant, per-ticker cap applied AFTER this flat one, varying by each ticker's own
 volatility rather than being identical for every ticker.
 
+## Sector / Asset-Class Concentration Cap [New, Nice-to-Have tier, LIVE + BACKTEST, opt-in]
+
+`max_position_weight` and `position_vol_budget` above only ever constrain a SINGLE ticker's
+weight. Nothing previously stopped several picks that all happen to sit in the SAME sector (e.g.
+`XLK` + `QQQ`, both effectively "Technology") from combining into an outsized aggregate exposure
+even when each individually respects its own per-ticker cap, standard hedge-fund/prop-desk
+practice caps this dimension separately from single-name risk, and this project didn't.
+
+`ticker_sectors` (`{}` default, e.g. `{"XLK": "Technology", "QQQ": "Technology", "XLE":
+"Energy"}`) + `max_sector_weight` (`None` default) close this gap. This is a **manual mapping**,
+deliberately: this project has no vendor integration for ETF sector/asset-class data today
+(`core/fundamentals.py` covers P/E, PEG, ROE, Debt-to-Equity, Current Ratio, not sector), and
+adding one is out of scope here. A ticker absent from `ticker_sectors` is never grouped or capped
+by this constraint at all, an incomplete mapping is a safe no-op for the unclassified tickers,
+not a silent error, you can classify only the tickers you actually care about capping.
+
+Implemented by `_apply_sector_caps()` (`backtest/momentum_backtest.py`), wired into
+`resolve_target_weights()` (the single shared sizing function both the backtest engine and
+`execution/live_signal.py`'s `compute_target_weights()` call, so live and backtest can't
+diverge) as the LAST step, after `_apply_position_caps()` and the optional
+`_apply_volatility_budget_caps()`, so it constrains the FINAL, fully-capped weights, not an
+intermediate state. For any sector whose summed weight exceeds `max_sector_weight`, every
+ticker in that sector is scaled down proportionally so the sector sums to exactly the cap.
+
+**Deliberately simpler than `_apply_position_caps()`'s redistribute-to-others logic**: the freed
+weight from capping an over-limit sector is left as unallocated gross exposure (cash), NOT
+redistributed into other tickers or sectors. This is a conscious, conservative design choice, not
+an oversight: redistributing that excess could push a DIFFERENT ticker over ITS OWN
+`max_position_weight`, or push a DIFFERENT sector over ITS OWN cap, a multi-constraint
+interaction `_apply_position_caps()`'s own single-dimension redistribution never has to reason
+about. Same "reduce exposure rather than silently violate a cap" precedent that function's own
+`redistribution_incomplete` bug fix established.
+
+Worked example, `max_sector_weight: 0.30`, two Technology picks each independently sized to
+`0.35` by inverse-vol weighting (summing to `0.70`, well over the cap):
+
+| Ticker | Sector | Pre-cap weight | Post-cap weight |
+|---|---|---|---|
+| XLK | Technology | 0.35 | 0.15 |
+| QQQ | Technology | 0.35 | 0.15 |
+| GLD | (unmapped) | 0.30 | 0.30 (untouched) |
+
+Technology's combined weight is scaled from `0.70` down to exactly `0.30` (each ticker halved,
+since they started equal), `GLD` (no `ticker_sectors` entry) is completely unaffected, and the
+freed `0.40` is left unallocated, the portfolio's total invested weight drops from `1.00` to
+`0.60` for this rebalance, by design.
+
 ## Drawdown Circuit Breaker [Recommended tier]
 
 Three now-distinct loss-protection layers exist, worth telling apart clearly:

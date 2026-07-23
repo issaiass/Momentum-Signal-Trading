@@ -106,7 +106,12 @@ README says so on purpose.
   once, with a dedicated `MARKET_WIDE_NEGATIVE_MOMENTUM_CASH` alert, see
   `docs/RISK_CONSTRAINTS.md`'s "Whole-Book Negative Momentum Cash Filter" section. Also a
   distinct `NO_ELIGIBLE_TICKERS` alert (any cause) plus a differently-worded no-action email when
-  zero tickers pass selection, see `docs/ALERT_LOG.md`. Restart-safe by
+  zero tickers pass selection, see `docs/ALERT_LOG.md`. Sector/asset-class concentration cap
+  (`ticker_sectors` + `max_sector_weight`, opt-in, LIVE + BACKTEST, Nice-to-Have tier): caps the
+  SUMMED weight of every ticker mapped to the same sector (a manual mapping, no vendor
+  sector-data source exists in this project), scaling an over-cap sector down to exactly the
+  limit without redistributing the freed weight elsewhere, left as unallocated cash instead, see
+  `docs/RISK_CONSTRAINTS.md`'s "Sector / Asset-Class Concentration Cap" section. Restart-safe by
   construction in `--live` mode (broker-sourced
   holdings, calendar-derived scheduling, persisted local/bind-mounted state, both native Python
   and Docker), plus a non-blocking `MISSED_REBALANCE_DAY` warning if a scheduled rebalance was

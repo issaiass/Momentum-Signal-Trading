@@ -19,7 +19,11 @@ COPY pyproject.toml .
 COPY src/ ./src/
 RUN pip install --no-cache-dir .
 
-# config.yaml must exist before building (copy config.example.yaml -> config.yaml and edit first)
+# config.yaml must exist before building (copy config.example.yaml -> config.yaml and edit first).
+# This baked-in copy is only a FALLBACK for standalone `docker build`/`docker run` usage without
+# compose; docker-compose.yml bind-mounts the host's real config.yaml over this same path, which
+# always wins under normal (compose-based) operation, letting a host edit reach the running
+# container on the next cron tick with no rebuild. See docs/DEPLOYMENT.md's "What needs what".
 COPY config.example.yaml .
 COPY config.yaml .
 

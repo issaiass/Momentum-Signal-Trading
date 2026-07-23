@@ -1028,6 +1028,28 @@ that tests enforce, don't casually violate these when editing:
   ticker regardless of whether capping ever triggers, now reworded to reflect that destructive
   sells are prevented, not just flagged). No new config field, this corrects unintended
   behavior, always-on, not an opt-in toggle like `skip_month_guardrail`/`use_absolute_momentum`.
+  `detect_and_log_config_change(portfolio_name, cfg)` is dynamic config reload's audit trail,
+  not the reload itself: `daily-runner`/`risk_monitor.py` are stateless CLI processes, cron
+  spawns a brand-new one on every tick, `load_config()` was ALREADY re-read fresh every
+  invocation before this existed, there was nothing to "apply" that wasn't already applied by
+  construction. The real, confirmed gap was Docker-specific: `Dockerfile`'s `COPY config.yaml .`
+  baked it into the image at BUILD time, and `docker-compose.yml`'s `volumes:` list didn't
+  bind-mount it (only `./logs`/`./data` were), so a host edit never reached the running
+  container without a rebuild or a manual `docker cp`. Fixed by bind-mounting
+  `./config.yaml:/app/config.yaml` in `docker-compose.yml` (the Dockerfile's own `COPY` stays as
+  a fallback for standalone `docker build`/`docker run` usage without compose, the bind mount
+  always wins under normal operation). `detect_and_log_config_change()` persists a full
+  `dataclasses.asdict(cfg)` JSON snapshot to `data_dir()`'s `last_config_snapshot_<portfolio>.json`
+  (same naming precedent as `risk/circuit_breaker.py`'s `_peak_equity_path()`), diffs it against
+  the previous run's snapshot, and fires a `CONFIG_CHANGED` INFO alert (`log_alert()`) with a
+  full field-by-field `"field: old -> new"` diff whenever it differs; a portfolio's very first
+  run (no prior snapshot) silently establishes the baseline, no alert. Wired into the
+  per-portfolio loop's "ALWAYS runs" section (every invocation, not gated by rebalance day).
+  Deliberately NOT wired into `risk/risk_monitor.py`, which never constructs a `BacktestConfig`
+  at all (only reads `total_value`), preserving its independence principle unchanged. See
+  `docs/DEPLOYMENT.md`'s "What needs what" section for the full restart-vs-nothing matrix,
+  including why `.env`/`docker-entrypoint.sh` genuinely can't be hot-reloaded the same way
+  (env vars are baked into the container process at creation, not re-read per file).
 
 **Config flow**: `config.yaml` (gitignored; copy from `config.example.yaml`) →
 `daily_runner.load_config()` builds one `BacktestConfig` per portfolio from

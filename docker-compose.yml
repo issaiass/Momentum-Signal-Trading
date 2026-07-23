@@ -75,4 +75,14 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./data:/app/data     # live_trades_log*.csv persist here across container restarts/rebuilds
+      # Bind-mounted (not baked in at build time like the Dockerfile's own COPY config.yaml .
+      # fallback), so editing THIS file on the host takes effect on the very next scheduled
+      # daily-runner/risk_monitor.py cron tick inside the container, no docker compose up -d,
+      # no --build, no manual docker cp, both scripts already call load_config() fresh every
+      # invocation (they're stateless CLI processes, not a long-running daemon). See
+      # docs/DEPLOYMENT.md's "What needs what" section. REQUIRES config.yaml to already exist
+      # on the host before the FIRST `docker compose up` (cp config.example.yaml config.yaml,
+      # the existing onboarding step), bind-mounting a path that doesn't exist yet creates an
+      # empty DIRECTORY at /app/config.yaml instead, breaking load_config() confusingly.
+      - ./config.yaml:/app/config.yaml
     # network_mode: host   # uncomment on Linux if connecting to a local TWS/Gateway instance

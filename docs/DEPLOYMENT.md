@@ -46,6 +46,34 @@ real. The `.env` examples throughout the rest of this file are shown inline for 
 each platform, but `.env.example` is the authoritative, up-to-date list of every variable the
 app reads.
 
+## What needs what: after editing a file, what do you actually have to do?
+
+`daily-runner` and `risk_monitor.py` are both stateless CLI scripts, cron (native or Docker's
+internal cron) spawns a brand-new process on every scheduled tick, they are never a
+long-running daemon holding stale state in memory. That single fact explains everything below:
+
+| File edited | Docker | Native (Task Scheduler / cron) |
+|---|---|---|
+| `config.yaml` | **Nothing.** Bind-mounted (`docker-compose.yml`), the next scheduled run (or a manual `daily-runner --force-rebalance`) reads the new file automatically, no `docker compose up -d`, no `--build`, no `docker cp`. A `CONFIG_CHANGED` alert (`docs/ALERT_LOG.md`) confirms it took effect, with a field-by-field diff | Already nothing, always was, `load_config()` reads the real file fresh every invocation |
+| `.env` | `docker compose up -d` (recreate, **not** `--build`), a few seconds. `.env` values are baked into the container's process environment once at creation; a recreate is required, but that's the full cost, no rebuild | No native `.env`-file loading exists at all (confirmed: `python-dotenv` is a listed dependency but never actually called in this codebase). "Native installs use user env vars instead" means an OS-level User/System environment variable; a Task Scheduler/cron-triggered run picks up an updated one on its next invocation automatically, same as `config.yaml` |
+| `Dockerfile` / `docker-entrypoint.sh` / `pyproject.toml` dependencies | `docker compose up -d --build` (full rebuild). `docker-entrypoint.sh` generates `/etc/cron.d/momentum-cron` **once**, at container start, from whatever env vars exist at that moment; a running container's cron genuinely cannot pick up a schedule/entrypoint change without at least a recreate | N/A, no image/entrypoint layer exists for a native install |
+
+**Why `.env`/the entrypoint aren't hot-reloaded the way `config.yaml` now is**: this is a
+deliberate design choice, not an unfixed gap. Environment variables are fundamentally baked into
+a process at creation, and there's no safe way to inject a new one into an already-running
+container's environment. Live-regenerating the crontab file mid-run to react to a changed env
+var was considered and rejected: it risks corrupting or dropping a cron job that's actively
+executing when the regeneration happens. A `docker compose up -d` recreate (seconds, no image
+rebuild) is the correct, minimal-disruption mechanism for these, and is already how the
+cron-schedule variables (`DAILY_RUNNER_CRON`/`RISK_MONITOR_CRON`) are documented to work
+elsewhere in this file.
+
+**The one real Docker footgun worth knowing**: bind-mounting a host path that doesn't exist yet
+creates an empty DIRECTORY at that container path instead of failing loudly. `config.yaml` must
+already exist on the host (the `cp config.example.yaml config.yaml` step above) before your
+*first* `docker compose up`, otherwise `/app/config.yaml` becomes a directory inside the
+container and `load_config()` fails with a confusing error instead of a clear "file not found."
+
 ## Verifying the install (recommended before configuring anything else)
 
 ```bash

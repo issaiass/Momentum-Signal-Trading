@@ -15,9 +15,11 @@ Operational wrapper: schedule this ONE script to run daily (cron/Task Scheduler)
 """
 
 import argparse
+import json
 import logging
 import os
 import sys
+from dataclasses import asdict
 from datetime import datetime
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -723,6 +725,61 @@ def apply_shared_log_retention(portfolios: dict) -> None:
     _rotate_log_with_alert("ALL", EMAIL_COMMANDS_LOG_PATH, cutoff)
 
 
+def _config_snapshot_path(name: str) -> Path:
+    return data_dir() / f"last_config_snapshot_{name}.json"
+
+
+def detect_and_log_config_change(portfolio_name: str, cfg: BacktestConfig) -> None:
+    """
+    Dynamic config reload's audit trail: daily-runner already re-reads config.yaml fresh on
+    EVERY invocation (it's a stateless CLI process, not a long-running daemon, see
+    docker-compose.yml's config.yaml bind mount, which is what actually lets a host edit reach
+    the running container without a rebuild), so there's nothing to "apply" here that isn't
+    already applied by construction. This function only adds VISIBILITY: a persistent, logged
+    record of exactly when a portfolio's effective config changed between runs, and what
+    changed, field by field.
+
+    Persists a full JSON snapshot of dataclasses.asdict(cfg) to data_dir()'s
+    last_config_snapshot_<portfolio>.json (same naming precedent as risk/circuit_breaker.py's
+    _peak_equity_path()), every BacktestConfig field is a plain str/float/int/bool/dict/list/
+    None, confirmed directly JSON-serializable, no custom encoder needed.
+
+    No prior snapshot (the very first run ever for this portfolio): silently writes the
+    baseline, no alert, there's nothing to diff against yet. A prior snapshot that differs:
+    fires a CONFIG_CHANGED INFO alert (log_alert(), same triple-step pattern as every other
+    advisory event in this file) with a human-readable "field: old -> new" diff for every
+    changed field, sorted by field name. The snapshot is always rewritten to the CURRENT config
+    afterward (changed or not), so the NEXT run compares against THIS run's state.
+
+    Deliberately NOT wired into risk/risk_monitor.py: that process never constructs a
+    BacktestConfig at all (only reads total_value directly from config.yaml), preserving its
+    established, independent-of-daily_runner.py design (docs/RISK_CONSTRAINTS.md's
+    "Independence from risk_monitor.py"), not a silent omission.
+    """
+    path = _config_snapshot_path(portfolio_name)
+    current = asdict(cfg)
+    previous = None
+    if path.is_file():
+        try:
+            previous = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            previous = None
+
+    if previous is not None:
+        changed_fields = sorted(
+            field for field in current
+            if field in previous and current[field] != previous[field]
+        )
+        if changed_fields:
+            diff = ", ".join(f"{f}: {previous[f]!r} -> {current[f]!r}" for f in changed_fields)
+            logger.info("[%s] CONFIG CHANGED since last run: %s", portfolio_name, diff)
+            log_alert(portfolio_name, "CONFIG_CHANGED", "INFO",
+                      f"Config changed since last run: {diff}", log_path=ALERTS_LOG_PATH)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(current, indent=2, sort_keys=True))
+
+
 def check_and_apply_email_commands(portfolio_names: list[str], ibkr_port: int, dry_run: bool,
                                      send_email_command_feedback: bool = True) -> None:
     """
@@ -1189,6 +1246,14 @@ def main():
                 apply_portfolio_log_retention(name, cfg, trade_log_path, signal_rankings_log_path)
             except Exception as e:
                 logger.warning("[%s] Log retention check failed (non-fatal, continuing): %s", name, e)
+
+            # --- Config-change audit trail: config.yaml is already re-read fresh every
+            #     invocation (this is a stateless CLI process), this just makes a change
+            #     between runs VISIBLE, see detect_and_log_config_change()'s own docstring. ---
+            try:
+                detect_and_log_config_change(name, cfg)
+            except Exception as e:
+                logger.warning("[%s] Config-change check failed (non-fatal, continuing): %s", name, e)
 
             # --- Stale rebalance-in-progress marker (non-blocking WARNING): a marker written
             #     immediately before a PREVIOUS run()'s rebalance, still present now, means that

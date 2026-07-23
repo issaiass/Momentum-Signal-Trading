@@ -152,7 +152,14 @@ README says so on purpose.
   ticker, not just the `top_n` actually selected, "Watchlist / Reserve" tickers included, see
   `docs/SIGNAL_RANKINGS_LOG.md`
 - Dockerized, self-scheduling deployment (`docker compose up -d`, internal cron, no manual
-  triggering needed for normal operation)
+  triggering needed for normal operation). `config.yaml` is bind-mounted (not baked into the
+  image), so a live edit takes effect on the very next scheduled run automatically, no rebuild,
+  no restart, no manual `docker cp`, both `daily-runner` and `risk_monitor.py` already re-read it
+  fresh every invocation (stateless CLI processes, not a daemon). A `CONFIG_CHANGED` alert
+  (`detect_and_log_config_change()`) logs a full field-by-field diff whenever a portfolio's
+  effective config changes between runs, see `docs/DEPLOYMENT.md`'s "What needs what" section
+  for the complete restart-vs-nothing matrix (`config.yaml`/`.env`/Dockerfile changes each need a
+  different action, or none at all)
 - 566-test pytest suite covering code mechanics, order sizing, config validation, audit-log
   integrity, multi-portfolio capital math, entirely on synthetic/mocked data, no live broker
   required to run it

@@ -1734,3 +1734,96 @@ class TestApplySharedLogRetention:
         with open(alerts_path) as f:
             rows = f.readlines()
         assert len(rows) == 3  # header + BOTH rows survive: p2's larger window governed
+
+
+class TestDetectAndLogConfigChange:
+    """
+    Dynamic config reload's audit trail: daily-runner already re-reads config.yaml fresh every
+    invocation (a stateless CLI process, not a daemon), this function only adds VISIBILITY, a
+    persistent, logged record of exactly when a portfolio's effective config changed between
+    runs and what changed, field by field. See docs/DEPLOYMENT.md's "What needs what" and
+    docs/ALERT_LOG.md's CONFIG_CHANGED row.
+    """
+
+    def test_first_run_writes_baseline_with_no_alert(self, tmp_path, monkeypatch):
+        import momentum_trading.daily_runner as dr
+        from momentum_trading.daily_runner import detect_and_log_config_change
+        alerts_path = str(tmp_path / "alerts_log.csv")
+        monkeypatch.setattr(dr, "ALERTS_LOG_PATH", alerts_path)
+        monkeypatch.setattr(dr, "data_dir", lambda: tmp_path)
+
+        cfg = BacktestConfig(stop_loss_pct=0.12)
+        detect_and_log_config_change("p1", cfg)
+
+        snapshot_path = tmp_path / "last_config_snapshot_p1.json"
+        assert snapshot_path.is_file()
+        assert not os.path.isfile(alerts_path)  # nothing to diff against yet, no alert fired
+
+    def test_changed_field_fires_alert_with_diff(self, tmp_path, monkeypatch):
+        import momentum_trading.daily_runner as dr
+        from momentum_trading.daily_runner import detect_and_log_config_change
+        alerts_path = str(tmp_path / "alerts_log.csv")
+        monkeypatch.setattr(dr, "ALERTS_LOG_PATH", alerts_path)
+        monkeypatch.setattr(dr, "data_dir", lambda: tmp_path)
+
+        detect_and_log_config_change("p1", BacktestConfig(stop_loss_pct=0.12, top_n=10))
+        detect_and_log_config_change("p1", BacktestConfig(stop_loss_pct=0.15, top_n=5))
+
+        alerts = read_recent_alerts(portfolio="p1", limit=10, log_path=alerts_path)
+        changed = [a for a in alerts if a["alert_type"] == "CONFIG_CHANGED"]
+        assert len(changed) == 1
+        assert "stop_loss_pct: 0.12 -> 0.15" in changed[0]["message"]
+        assert "top_n: 10 -> 5" in changed[0]["message"]
+
+    def test_unchanged_config_fires_no_alert(self, tmp_path, monkeypatch):
+        import momentum_trading.daily_runner as dr
+        from momentum_trading.daily_runner import detect_and_log_config_change
+        alerts_path = str(tmp_path / "alerts_log.csv")
+        monkeypatch.setattr(dr, "ALERTS_LOG_PATH", alerts_path)
+        monkeypatch.setattr(dr, "data_dir", lambda: tmp_path)
+
+        cfg = BacktestConfig(stop_loss_pct=0.12)
+        detect_and_log_config_change("p1", cfg)
+        detect_and_log_config_change("p1", BacktestConfig(stop_loss_pct=0.12))  # identical values
+
+        assert not os.path.isfile(alerts_path)
+
+    def test_snapshot_is_rewritten_each_run(self, tmp_path, monkeypatch):
+        # The second run's snapshot must reflect the SECOND config, so a THIRD run reverting to
+        # the first config's values is correctly detected as a change too, not silently ignored.
+        import momentum_trading.daily_runner as dr
+        from momentum_trading.daily_runner import detect_and_log_config_change
+        alerts_path = str(tmp_path / "alerts_log.csv")
+        monkeypatch.setattr(dr, "ALERTS_LOG_PATH", alerts_path)
+        monkeypatch.setattr(dr, "data_dir", lambda: tmp_path)
+
+        detect_and_log_config_change("p1", BacktestConfig(stop_loss_pct=0.10))
+        detect_and_log_config_change("p1", BacktestConfig(stop_loss_pct=0.20))
+        detect_and_log_config_change("p1", BacktestConfig(stop_loss_pct=0.10))
+
+        alerts = read_recent_alerts(portfolio="p1", limit=10, log_path=alerts_path)
+        changed = [a for a in alerts if a["alert_type"] == "CONFIG_CHANGED"]
+        assert len(changed) == 2  # run 2 (0.10->0.20) and run 3 (0.20->0.10)
+
+    def test_portfolios_are_scoped_independently(self, tmp_path, monkeypatch):
+        import momentum_trading.daily_runner as dr
+        from momentum_trading.daily_runner import detect_and_log_config_change
+        alerts_path = str(tmp_path / "alerts_log.csv")
+        monkeypatch.setattr(dr, "ALERTS_LOG_PATH", alerts_path)
+        monkeypatch.setattr(dr, "data_dir", lambda: tmp_path)
+
+        detect_and_log_config_change("p1", BacktestConfig(stop_loss_pct=0.10))
+        detect_and_log_config_change("p2", BacktestConfig(stop_loss_pct=0.20))
+        # p2's first-ever run must not be treated as a "change" just because p1 has a
+        # differently-valued snapshot, each portfolio has its own snapshot file.
+        assert not os.path.isfile(alerts_path)
+
+    def test_asdict_of_real_config_is_json_round_trippable(self):
+        # Confirms the core assumption this whole function relies on: every BacktestConfig
+        # field survives a JSON round-trip unchanged, no custom encoder needed.
+        import json
+        from dataclasses import asdict
+        cfg = BacktestConfig()
+        current = asdict(cfg)
+        round_tripped = json.loads(json.dumps(current, sort_keys=True))
+        assert round_tripped == current

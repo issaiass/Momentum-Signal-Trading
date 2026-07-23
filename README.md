@@ -488,6 +488,23 @@ answer whether the strategy actually works.
   test reproducing the exact race (many threads writing the same log concurrently) confirms the
   fix holds under real contention, including a real Windows-specific finding along the way
   (contended lock creation raises `PermissionError` there, not `FileExistsError` like POSIX).
+- **A real, confirmed backtest/live parity gap on an explicit empty-picks period, now fixed**:
+  `run_risk_managed_backtest()` used to skip its entire position-sizing/order block whenever a
+  rebalance date's `target_tickers` was an explicit empty list (the whole-book negative-momentum
+  cash filter, or the liquidity filter, zeroing out every pick), silently carrying the previously
+  held position forward instead of selling it, unlike live's `generate_orders()`, which already
+  correctly liquidates to cash in this case. Fixed: an empty `target_tickers` now flows through
+  the exact same sell/buy pipeline as any other rebalance. See `docs/RISK_CONSTRAINTS.md`'s
+  "Whole-Book Negative Momentum Cash Filter".
+- **A separate, minor, unfixed quirk found while building the fix above**: the very FIRST signal
+  date in any `monthly_picks` series can have its computed rebalance date collide with
+  `run_risk_managed_backtest()`'s own simulation-window start date, which the day-loop then
+  silently excludes, so the first rebalance in a short/synthetic `monthly_picks` series can
+  silently never fire, depending on exact calendar alignment (confirmed reproducible, depends on
+  weekend/NYSE-holiday placement relative to that first signal's month boundary). Real,
+  multi-year `monthly_picks` series (this project's own actual usage) never surface this, losing
+  only the very first of many rebalances doesn't visibly affect a long backtest. Not fixed,
+  flagged for a future look, see `CLAUDE.md`'s `backtest/momentum_backtest.py` bullet.
 
 ### Who should allocate capital here
 

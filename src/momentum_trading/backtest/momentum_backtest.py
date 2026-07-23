@@ -1187,65 +1187,78 @@ def run_risk_managed_backtest(
                 latest_signal_date = eligible_signals[-1]
                 target_tickers = monthly_picks.get(latest_signal_date, [])
 
-                if target_tickers and not circuit_breaker_halted:
-                    # --- regime filter: scale down gross exposure in a downtrend ---
-                    if config.use_regime_filter and regime_bullish is not None:
-                        bullish = bool(regime_bullish.loc[today]) if today in regime_bullish.index else True
-                        high_vol = bool(regime_high_vol.loc[today]) if (
-                            regime_high_vol is not None and today in regime_high_vol.index
-                        ) else False
-                        regime_scalar = config.min_gross_exposure if (not bullish or high_vol) else 1.0
-                        if high_vol and bullish:
-                            log_file.write(
-                                f"{today.strftime('%Y-%m-%d')} MARKET VOLATILITY REGIME DEFENSIVE: "
-                                f"{config.regime_benchmark} realized vol exceeds "
-                                f"{config.regime_vol_threshold:.0%} threshold, reducing exposure to "
-                                f"{config.min_gross_exposure:.0%} despite bullish trend\n"
-                            )
-                    else:
-                        regime_scalar = 1.0
+                if not circuit_breaker_halted:
+                    if target_tickers:
+                        # --- regime filter: scale down gross exposure in a downtrend ---
+                        if config.use_regime_filter and regime_bullish is not None:
+                            bullish = bool(regime_bullish.loc[today]) if today in regime_bullish.index else True
+                            high_vol = bool(regime_high_vol.loc[today]) if (
+                                regime_high_vol is not None and today in regime_high_vol.index
+                            ) else False
+                            regime_scalar = config.min_gross_exposure if (not bullish or high_vol) else 1.0
+                            if high_vol and bullish:
+                                log_file.write(
+                                    f"{today.strftime('%Y-%m-%d')} MARKET VOLATILITY REGIME DEFENSIVE: "
+                                    f"{config.regime_benchmark} realized vol exceeds "
+                                    f"{config.regime_vol_threshold:.0%} threshold, reducing exposure to "
+                                    f"{config.min_gross_exposure:.0%} despite bullish trend\n"
+                                )
+                        else:
+                            regime_scalar = 1.0
 
-                    # --- correlation spike: additional fast-reacting risk-off signal ---
-                    if config.use_correlation_spike_regime:
-                        spike = detect_correlation_spike(
-                            prices, today,
-                            config.correlation_spike_short_window,
-                            config.correlation_spike_baseline_window,
-                            config.correlation_spike_threshold,
+                        # --- correlation spike: additional fast-reacting risk-off signal ---
+                        if config.use_correlation_spike_regime:
+                            spike = detect_correlation_spike(
+                                prices, today,
+                                config.correlation_spike_short_window,
+                                config.correlation_spike_baseline_window,
+                                config.correlation_spike_threshold,
+                            )
+                            if spike:
+                                regime_scalar = min(regime_scalar, config.min_gross_exposure)
+                                log_file.write(
+                                    f"{today.strftime('%Y-%m-%d')} CORRELATION SPIKE DETECTED: "
+                                    f"reducing exposure to {config.min_gross_exposure:.0%}\n"
+                                )
+
+                        # --- volatility targeting: scale gross exposure to hit target vol ---
+                        realized_vol = _realized_portfolio_vol(portfolio_history, config.portfolio_vol_lookback)
+                        vol_scalar = compute_vol_scalar(
+                            realized_vol, config.target_portfolio_vol,
+                            config.min_gross_exposure, config.max_gross_exposure,
                         )
-                        if spike:
-                            regime_scalar = min(regime_scalar, config.min_gross_exposure)
-                            log_file.write(
-                                f"{today.strftime('%Y-%m-%d')} CORRELATION SPIKE DETECTED: "
-                                f"reducing exposure to {config.min_gross_exposure:.0%}\n"
-                            )
 
-                    # --- volatility targeting: scale gross exposure to hit target vol ---
-                    realized_vol = _realized_portfolio_vol(portfolio_history, config.portfolio_vol_lookback)
-                    vol_scalar = compute_vol_scalar(
-                        realized_vol, config.target_portfolio_vol,
-                        config.min_gross_exposure, config.max_gross_exposure,
-                    )
+                        gross_exposure = min(config.max_gross_exposure, regime_scalar * vol_scalar)
 
-                    gross_exposure = min(config.max_gross_exposure, regime_scalar * vol_scalar)
+                        # --- position sizing: custom weights (if provided for this date) or
+                        #     inverse-vol + optional correlation penalty, via the SAME resolver
+                        #     live_signal.py uses, single source of truth for sizing logic ---
+                        custom_w = None
+                        if custom_weights_by_date is not None:
+                            custom_w = custom_weights_by_date.get(latest_signal_date) or custom_weights_by_date.get(today)
+                        weights = resolve_target_weights(target_tickers, prices, today, config, custom_weights=custom_w)
 
-                    # --- position sizing: custom weights (if provided for this date) or
-                    #     inverse-vol + optional correlation penalty, via the SAME resolver
-                    #     live_signal.py uses, single source of truth for sizing logic ---
-                    custom_w = None
-                    if custom_weights_by_date is not None:
-                        custom_w = custom_weights_by_date.get(latest_signal_date) or custom_weights_by_date.get(today)
-                    weights = resolve_target_weights(target_tickers, prices, today, config, custom_weights=custom_w)
+                        log_file.write(
+                            f"--- Rebalance {today.strftime('%Y-%m-%d')} | Total Value ${total_value:,.2f} "
+                            f"| Gross Exposure {gross_exposure:.1%} (regime={regime_scalar:.2f}, "
+                            f"vol_scalar={vol_scalar:.2f}) ---\n"
+                        )
 
-                    log_file.write(
-                        f"--- Rebalance {today.strftime('%Y-%m-%d')} | Total Value ${total_value:,.2f} "
-                        f"| Gross Exposure {gross_exposure:.1%} (regime={regime_scalar:.2f}, "
-                        f"vol_scalar={vol_scalar:.2f}) ---\n"
-                    )
-
-                    target_dollar = {
-                        t: total_value * gross_exposure * w for t, w in weights.items()
-                    }
+                        target_dollar = {
+                            t: total_value * gross_exposure * w for t, w in weights.items()
+                        }
+                    else:
+                        # Explicit empty picks (whole-book negative momentum cash filter, or the
+                        # liquidity filter, zeroed out every pick this period): target_dollar={}
+                        # flows through the SAME sell/buy pipeline below as any other rebalance,
+                        # correctly liquidating every current holding to cash, no new sell/buy
+                        # logic needed, this mirrors live's generate_orders() exactly, which
+                        # already funnels an empty target_weights through the identical pipeline.
+                        target_dollar = {}
+                        log_file.write(
+                            f"{today.strftime('%Y-%m-%d')} EXPLICIT EMPTY PICKS: liquidating all "
+                            f"holdings to cash\n"
+                        )
 
                     current_value = {
                         t: shares * today_prices[t]

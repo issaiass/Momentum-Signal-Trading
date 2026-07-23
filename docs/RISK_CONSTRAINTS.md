@@ -280,25 +280,31 @@ when THIS constraint, not an unrelated cause, emptied `picks`. Distinct from the
 fire together, that's fine, they mean different things: one says "nothing was eligible this
 rebalance", this one says "specifically, the whole market looked bad").
 
-**Backtest note, an honest scope caveat, not overclaiming**: fixing this at the SELECTION layer
-(`resolve_strategy_picks()`) also surfaced and fixed a real, confirmed parity gap in
-`generate_strategy_monthly_picks()`: a date where a real "hold cash" decision was made (empty
+**Backtest note, a gap that WAS an honest scope caveat here, now closed**: fixing this at the
+SELECTION layer (`resolve_strategy_picks()`) also surfaced and fixed a real, confirmed parity gap
+in `generate_strategy_monthly_picks()`: a date where a real "hold cash" decision was made (empty
 picks, e.g. from this constraint or the liquidity filter) used to be silently SKIPPED from the
 returned `monthly_picks` series entirely, exactly like the "no signal at all yet" case (start of
 history, lookback not satisfied), even though it's a genuinely different situation. That skip
 meant `run_risk_managed_backtest()`'s `monthly_picks.get(date, [])` lookup for the NEXT
 rebalance would silently fall through to a STALE prior period's picks instead of correctly
 seeing "nothing was eligible then." Fixed: such a date is now included with an explicit `[]`,
-so subsequent lookups see the correct, current decision, not stale data. This does NOT, by
-itself, make `run_risk_managed_backtest()` actively LIQUIDATE existing holdings to cash the
-moment this constraint triggers, that engine's own rebalance-trigger condition
-(`if target_tickers and not circuit_breaker_halted:`) currently treats an empty `target_tickers`
-as "nothing to rebalance this period, hold whatever is currently held" rather than "force-sell
-everything," a narrower, pre-existing characteristic of the backtest EXECUTION engine itself,
-distinct from the SELECTION layer this constraint lives in, deliberately left alone here rather
-than risking a larger, unrequested change to a heavily-tested, financially-significant
-simulation loop. Live's `execution/live_signal.py`'s `run()` has no such gap, `generate_orders()`
-genuinely sells any current holdings to cash immediately once `picks` comes back empty.
+so subsequent lookups see the correct, current decision, not stale data.
+
+At the time, this deliberately did NOT also make `run_risk_managed_backtest()` actively LIQUIDATE
+existing holdings to cash the moment this constraint triggered, that engine's own rebalance-
+trigger condition (`if target_tickers and not circuit_breaker_halted:`) treated an empty
+`target_tickers` as "nothing to rebalance this period, hold whatever is currently held" rather
+than "force-sell everything," a narrower, EXECUTION-layer gap distinct from the SELECTION layer
+this constraint lives in. **This has since been fixed** (a later epic in this same project): the
+rebalance-trigger condition is now `if not circuit_breaker_halted:`, with the sizing logic
+conditional on `target_tickers` and an explicit `else: target_dollar = {}` branch when it's
+empty, flowing through the SAME sell/buy pipeline as any other rebalance and correctly
+liquidating every current holding to cash. `circuit_breaker_halted` still overrides both branches
+identically (a halted portfolio is neither rebalanced nor force-liquidated, unchanged). Live's
+`execution/live_signal.py`'s `run()` never had this gap, `generate_orders()` genuinely sells any
+current holdings to cash immediately once `picks` comes back empty; the backtest engine now
+matches that behavior exactly.
 
 ## Broker-Side Protective Stop [New, LIVE-ONLY, opt-in]
 

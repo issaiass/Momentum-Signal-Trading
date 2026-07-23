@@ -216,10 +216,10 @@ that tests enforce, don't casually violate these when editing:
   now `if scores_row is None or scores_row.empty: continue` (only the genuine no-signal case),
   every other date is included even when `resolve_strategy_picks()` explicitly returned `[]`.
   See `docs/RISK_CONSTRAINTS.md`'s "Whole-Book Negative Momentum Cash Filter" for the documented
-  scope boundary: this fixes the SELECTION-layer parity, but `run_risk_managed_backtest()`'s own
-  rebalance-trigger condition doesn't yet actively liquidate holdings on an explicit empty
-  `target_tickers`, a narrower, pre-existing EXECUTION-layer characteristic left alone here,
-  deliberately, rather than risking an unrequested change to that heavily-tested simulation loop.
+  scope boundary this fixed the SELECTION-layer half of: the narrower EXECUTION-layer half (a
+  backtest's `run_risk_managed_backtest()` not force-liquidating on an explicit empty
+  `target_tickers`) was deliberately left alone at the time, and has SINCE been fixed too, see
+  this file's own bullet below.
   Four genuinely new ranking functions, one per strategy: `blend_momentum_scores()` (reused
   UNCHANGED from `core/functions_quant_extensions.py`, previously fully coded but dead code, zero
   production call sites before this, for `multi_timeframe_composite`, resamples to monthly FIRST
@@ -382,6 +382,34 @@ that tests enforce, don't casually violate these when editing:
   bullet below), same "live and backtest must not diverge" principle every other regime/vol
   mechanism here follows. See `docs/RISK_CONSTRAINTS.md`'s "Regime Filter: Volatility
   Dimension".
+  `run_risk_managed_backtest()`'s rebalance-trigger condition (Epic 2, "Redefining Stop-Loss
+  Price, Plus Two Remaining Known Gaps" plan) closes the backtest/live parity gap documented
+  above and in `docs/RISK_CONSTRAINTS.md`'s "Whole-Book Negative Momentum Cash Filter": was `if
+  target_tickers and not circuit_breaker_halted:`, wrapping regime/vol/sizing AND
+  `target_dollar` construction together, so an EXPLICIT empty `target_tickers` (the whole-book
+  negative-momentum cash filter, or the liquidity filter, zeroing out every pick) skipped the
+  ENTIRE block, silently carrying forward whatever was already held instead of selling it,
+  unlike live's `generate_orders()`, which already funnels an empty `target_weights` through the
+  same sell/buy pipeline as any other rebalance. Now `if not circuit_breaker_halted:`, with only
+  the regime/vol/sizing sub-block conditional on `target_tickers` (unchanged when truthy); the
+  `else` branch sets `target_dollar = {}` directly and logs an `"EXPLICIT EMPTY PICKS"` line, no
+  new sell/buy logic, this reuses the EXACT SAME `current_value`/`raw_trades`/aggregate-drift-
+  skip/drift-threshold/sells-then-buys pipeline (unchanged, unindented) that already correctly
+  liquidates a real position whenever `target_dollar` doesn't include it. `circuit_breaker_halted`
+  still overrides both branches identically (unchanged): a halted portfolio is neither
+  rebalanced nor force-liquidated, matching live's own circuit-breaker semantics ("halt NEW
+  rebalancing," not "force an exit"). A genuine, pre-existing, unrelated quirk was found and
+  worked around (not fixed, out of this epic's scope) while building this epic's regression
+  tests: the very FIRST signal date in ANY `monthly_picks` series can have its computed
+  rebalance date collide with `run_risk_managed_backtest()`'s own simulation-window start date
+  (`sim_start_date`, itself derived from that same first signal date), which the day-loop's `for
+  today in prices.index[1:]:` then silently excludes, so the FIRST rebalance in a short/synthetic
+  `monthly_picks` series can silently never fire, depending on exact calendar alignment (confirmed
+  directly: reproducible with `pd.bdate_range` fixtures, whether it triggers depends on where
+  weekends/`NYSE` holidays fall relative to that first signal's month boundary). Real, multi-year
+  `monthly_picks` series used elsewhere in this project's own tests/notebooks never surface this
+  (losing only the very first of many rebalances doesn't visibly break anything), which is
+  presumably why it was never caught before. Not fixed here, flagged for a future look.
 - **`execution/live_signal.py`**, live signal/order generation, IBKR integration (`ibapi`
   `EClient`/`EWrapper`, not a third-party wrapper), multi-portfolio orchestration, FIFO P&L,
   hash-chained audit log. `fetch_ohlcv_for_tickers()` is distinct from `fetch_live_prices()`,

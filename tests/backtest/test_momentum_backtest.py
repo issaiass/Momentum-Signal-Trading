@@ -16,7 +16,7 @@ import pandas as pd
 import pytest
 
 from momentum_trading.backtest.momentum_backtest import (
-    BacktestConfig, run_custom_backtest, resolve_target_weights,
+    BacktestConfig, run_custom_backtest, run_risk_managed_backtest, resolve_target_weights,
 )
 
 
@@ -353,6 +353,98 @@ class TestBacktestRuns:
         df = run_custom_backtest(synthetic_monthly_picks, synthetic_daily_prices,
                                   initial_capital=1000.0, custom_weights_by_date=cw)
         assert not df.empty
+
+
+class TestBacktestLiquidatesOnExplicitEmptyPicks:
+    """
+    Epic 2 (this session's "Closing Two Remaining Known Gaps" plan): a monthly_picks entry that
+    is an EXPLICIT empty list (not a missing/no-signal-yet date) must liquidate every current
+    holding to cash, matching live's generate_orders() (an empty target_weights already flows
+    through the same sell/buy pipeline there). Before this fix, run_risk_managed_backtest()
+    skipped its entire position-sizing/order block whenever `target_tickers` was falsy, silently
+    carrying the old holding forward instead of selling it.
+
+    Both fixtures below use THREE monthly signals, not two: the very first entry in ANY
+    monthly_picks series has its rebalance date collide with the simulation's own start date in
+    some calendar alignments (a separate, pre-existing quirk of run_risk_managed_backtest()'s
+    sim-window setup, unrelated to this fix, confirmed by direct inspection while building these
+    tests, flagged separately rather than silently worked around forever). A December warm-up
+    signal (identical pick, re-confirmed in January) absorbs that first-rebalance quirk, so the
+    SECOND and THIRD signals (the ones this test actually cares about) land on real, simulated
+    trading days.
+    """
+
+    def _picks_with_explicit_empty_february(self, prices):
+        month_ends = prices.resample("ME").last().index
+        dec_end, jan_end, feb_end = month_ends[0], month_ends[1], month_ends[2]
+        return pd.Series({dec_end: ["A"], jan_end: ["A"], feb_end: []})
+
+    def test_explicit_empty_picks_liquidates_to_cash_before_the_crash(self):
+        # Ticker A: flat through Dec/Jan/Feb, HALVES in price over March (the window between the
+        # empty-picks liquidation and the next real rebalance). Ticker B: flat throughout, kept
+        # only so the price panel always has >=1 valid, uneventful ticker.
+        dates = pd.bdate_range("2019-12-01", "2020-04-30")
+        price_a = pd.Series(100.0, index=dates)
+        march_idx = np.where(dates.month == 3)[0]
+        for i, idx in enumerate(march_idx):
+            price_a.iloc[idx] = 100.0 * (1 - 0.5 * i / (len(march_idx) - 1))
+        price_a.iloc[march_idx[-1]:] = 50.0  # stays crashed through April
+        price_b = pd.Series(100.0, index=dates)
+        prices = pd.DataFrame({"A": price_a, "B": price_b})
+        monthly_picks = self._picks_with_explicit_empty_february(prices)
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False, commission=0.0,
+                              min_trade_size=0.0, drift_threshold=0.0, max_position_weight=1.0,
+                              initial_capital=1000.0)
+
+        df = run_risk_managed_backtest(monthly_picks, prices, cfg)
+
+        # March: liquidated to cash by February's explicit empty-picks rebalance, so despite A
+        # crashing 50% during March, the portfolio (sitting in cash) shows a near-zero return,
+        # NOT the large loss a still-held A position would produce (the bug this fixes).
+        march_row = df[df.index.month == 3]
+        assert not march_row.empty
+        assert abs(march_row["Portfolio Monthly Return"].iloc[0]) < 0.02
+
+    def test_circuit_breaker_halt_still_overrides_empty_picks_liquidation(self):
+        # A pre-existing, unchanged property this fix must preserve: circuit_breaker_halted
+        # skips the ENTIRE block (sizing AND the new empty-picks liquidation branch alike), so a
+        # halted portfolio's holdings are neither rebalanced nor force-liquidated.
+        #
+        # circuit_breaker_halted is only recomputed ON rebalance days (using THAT day's price),
+        # so instead of timing a crash to a specific day (fragile against exact real-vs-business-
+        # day calendar alignment), ticker A crashes EARLY in January (right after the Dec/Jan
+        # warm-up buys) and stays flat at the crashed price through all of February: whatever
+        # exact day February's empty-picks rebalance falls on, it lands inside this flat,
+        # still-crashed window, guaranteeing the breaker is tripped when that rebalance's
+        # drawdown gets recomputed. Then A drops FURTHER across March. If the halt correctly
+        # suppressed the would-be liquidation, the position is STILL held into March and this
+        # second leg of the crash shows up as a real, large negative March return; a
+        # wrongly-liquidated (cash) portfolio would show ~0% instead, the exact outcome the
+        # liquidation test above confirms.
+        dates = pd.bdate_range("2019-12-01", "2020-04-30")
+        price_a = pd.Series(100.0, index=dates)
+        jan_idx = np.where(dates.month == 1)[0]
+        price_a.iloc[jan_idx[2]:] = 20.0  # crash on the 3rd Jan trading day, flat at $20 after
+        march_idx = np.where(dates.month == 3)[0]
+        for i, idx in enumerate(march_idx):
+            price_a.iloc[idx] = 20.0 * (1 - 0.5 * i / (len(march_idx) - 1))  # 20 -> 10 across March
+        price_a.iloc[march_idx[-1]:] = 10.0
+        price_b = pd.Series(100.0, index=dates)
+        prices = pd.DataFrame({"A": price_a, "B": price_b})
+        monthly_picks = self._picks_with_explicit_empty_february(prices)
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False, commission=0.0,
+                              min_trade_size=0.0, drift_threshold=0.0, max_position_weight=1.0,
+                              initial_capital=1000.0, stop_loss_pct=0.99,
+                              max_portfolio_drawdown_pct=0.10)
+
+        df = run_risk_managed_backtest(monthly_picks, prices, cfg)
+
+        # Still exposed to A's continued 20 -> 10 crash within March (halt suppressed the
+        # liquidation) shows up as a large negative March return, NOT the ~0% a
+        # correctly-liquidated cash position would show instead.
+        march_row = df[df.index.month == 3]
+        assert not march_row.empty
+        assert march_row["Portfolio Monthly Return"].iloc[0] < -0.2
 
 
 class TestResolveTargetWeights:

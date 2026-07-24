@@ -5,8 +5,12 @@
 ## What this is
 
 A trusted trader can send simple, structured commands via email that `daily_runner.py` picks
-up and applies on its next scheduled run. Entirely **opt-in**, inactive unless you set four
-specific environment variables (below).
+up and applies. Entirely **opt-in**, inactive unless you set four specific environment
+variables (below). Two ways this gets picked up: the regular `DAILY_RUNNER_CRON`-scheduled run
+(once a day by default) always checks as part of its normal work, or, for much faster turnaround,
+a dedicated lightweight `daily-runner --check-commands-only` cron entry (`EMAIL_CHECK_CRON`,
+every 5 minutes by default in Docker) that does ONLY this, skipping the rebalance loop
+entirely, see "Command latency" below.
 
 ## Security model (the important part)
 
@@ -155,15 +159,45 @@ still wins), this can never be used to accidentally make the bot riskier.
   that portfolio's latest prices and current positions (a real broker query in `--live`, or
   dry-run reconstruction), not the full rebalance machinery, so it's fast. If no portfolio
   snapshot exists yet (the portfolio has never completed a run), you get a reply explaining
-  that instead of a report. Like every email command, this is only picked up when
-  `daily_runner.py` actually runs and polls the inbox; today that's `DAILY_RUNNER_CRON`'s
-  schedule (once a day by default), a faster, dedicated polling cadence is planned separately.
+  that instead of a report. Picked up on either the regular `DAILY_RUNNER_CRON`-scheduled run
+  or, for real turnaround, the dedicated `EMAIL_CHECK_CRON` lightweight poll (every 5 minutes
+  by default in Docker), see "Command latency" below.
 - **LIQUIDATE / ADJUST_PARAM**, parsed, validated, and logged/alerted, but require you to
   take the actual action yourself (place the liquidating trades yourself, or edit
   `config.yaml`'s `risk_overrides` with the validated value).
 - **ALERTS_REPORT**, read-only, replies immediately (even in dry-run) with the most
   recent `LIMIT` rows (default 10, capped at 50) from `logs/alerts_log.csv`, filtered to the
   requested portfolio (or every portfolio, for `ALL`). See `docs/ALERT_LOG.md`.
+
+## Command latency
+
+Every email command needs `daily_runner.py` to actually run and poll the inbox before it's
+seen at all, there's no persistent listener (a long-running daemon would reintroduce the same
+class of "needs a restart to see a change" problem this project's stateless-CLI-process design
+otherwise avoids, see `CLAUDE.md`'s notes on `daily_runner.py`/`risk_monitor.py` both being
+re-invoked fresh by cron every tick, never a daemon). Two ways this happens:
+
+- **The regular `DAILY_RUNNER_CRON`-scheduled run** (once a day by default, or whenever you
+  manually run `daily-runner`/`daily-runner --force-rebalance`) checks commands as part of its
+  normal work, same as always, no separate setup needed.
+- **`daily-runner --check-commands-only`**, a lightweight, dedicated path: loads `config.yaml`,
+  resolves `total_value` the same as a normal run, then ONLY polls and applies email commands,
+  then exits immediately, skipping log retention, config-change detection, and the entire
+  per-portfolio stop-loss/rebalance loop. With no pending command, the cost is one IMAP search
+  and nothing else, safe to run frequently. In Docker, wired to `EMAIL_CHECK_CRON` (default
+  `*/5 * * * *`, every 5 minutes, see `docker-compose.yml`/`.env.example`); for a native
+  install, register the equivalent Task Scheduler/cron entry yourself (see
+  `docs/DEPLOYMENT.md`'s Path B, step 8).
+
+Same `dry_run = not args.live` semantics as everywhere else in this project apply to BOTH
+paths: `PAUSE`/`RESUME`/`SKIP_NEXT_REBALANCE`/`SET_MAX_DRAWDOWN` are parsed, validated, logged,
+and replied to normally even without `--live`, but only actually change state when the
+container/task is genuinely running `--live`. `STATUS`/`ALERTS_REPORT`/`TRIGGER_REPORT` are
+read-only and apply in both modes, unaffected. `docker-entrypoint.sh`'s `EMAIL_CHECK_CRON`
+line, like the main `daily-runner` line, defaults to dry-run; going live for this path needs
+the same deliberate uncomment-and-rebuild step as everywhere else `--live`/
+`--confirm-live-trading` appear in that file (see `CLAUDE.md`'s "Safety defaults that are
+load-bearing").
 
 ## Feedback emails and the audit trail
 

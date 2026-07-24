@@ -1220,6 +1220,15 @@ def main():
                               "Prints a pass/fail summary and exits, no config.yaml needed, no "
                               "portfolio logic runs. Run this once after creating/editing .env on any "
                               "machine, before trusting cron/--live with those credentials.")
+    parser.add_argument("--check-commands-only", action="store_true",
+                         help="Lightweight path for a frequent (e.g. every 5 minutes) cron entry: "
+                              "loads config.yaml, resolves total_value the same as a normal run, "
+                              "then ONLY polls and applies email commands (see docs/EMAIL_COMMANDS.md), "
+                              "then exits, skipping log retention, config-change detection, and the "
+                              "full per-portfolio stop-loss/rebalance loop entirely. TRIGGER_REPORT "
+                              "sends a real report from this path; PAUSE/RESUME/SKIP_NEXT_REBALANCE/"
+                              "SET_MAX_DRAWDOWN only actually apply with --live, same as a normal run. "
+                              "With no pending command, the cost is one IMAP search and nothing else.")
     args = parser.parse_args()
 
     if args.test_email:
@@ -1380,6 +1389,12 @@ def main():
         )
     except Exception as e:
         logger.warning("Email command check failed (non-fatal, continuing with normal run): %s", e)
+
+    if args.check_commands_only:
+        logger.info("--check-commands-only: email command check complete, exiting (skipping log "
+                    "retention, config-change detection, and the per-portfolio stop-loss/"
+                    "rebalance loop).")
+        return
 
     # --- Time-based log retention for the two SHARED logs (alerts_log.csv, email_commands_log.csv),
     #     ONCE per run, not per-portfolio, see apply_shared_log_retention()'s own docstring for

@@ -26,6 +26,15 @@ services:
       # needs a host-level cron/Task Scheduler `docker exec` workaround instead, see that
       # DEPLOYMENT.md section for the copy-pasteable recipe.
       - RISK_MONITOR_CRON=${RISK_MONITOR_CRON:-0 9-16 * * 1-5}
+      # EMAIL_CHECK_CRON default (every 5 minutes) is the "Fast, Auto-Applied Email-Triggered
+      # Reports" cadence (docs/EMAIL_COMMANDS.md): a lightweight `daily-runner
+      # --check-commands-only` entry that ONLY polls and applies email commands (TRIGGER_REPORT
+      # sends a real report from here; PAUSE/RESUME/etc. still only apply with --live, same as a
+      # normal run), skipping log retention, config-change detection, and the full rebalance
+      # loop entirely. With no pending command, the cost is one IMAP search, safe to run this
+      # often. Same "container recreate only, no --build" note as DAILY_RUNNER_CRON/
+      # RISK_MONITOR_CRON above applies here too.
+      - EMAIL_CHECK_CRON=${EMAIL_CHECK_CRON:-*/5 * * * *}
       # Space-separated portfolio names to independently risk-monitor, one
       # cron entry each, must match names under config.yaml's portfolios: key.
       # Defaults to just "portfolio1"; add more (e.g. "portfolio1 portfolio2") if

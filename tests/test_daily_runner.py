@@ -1619,6 +1619,102 @@ class TestTestEmailFlag:
         assert self._run_main_with_args(monkeypatch, ["--test-email"], False) == 1
 
 
+class TestCheckCommandsOnlyFlag:
+    """
+    --check-commands-only (Epic 3, "Fast, Auto-Applied Email-Triggered Reports" plan) is the
+    lightweight, frequent-cron path: config load + resolve_total_values() run normally, then
+    ONLY check_and_apply_email_commands() runs, then main() returns immediately, deliberately
+    skipping shared log retention, config-change detection, and the full per-portfolio
+    stop-loss/rebalance loop. These tests drive main() through a REAL config.yaml on disk (not
+    a mocked load_config()), matching TestLoadConfig's own precedent, so the whole real
+    argparse -> load_config -> resolve_total_values -> check_and_apply_email_commands chain is
+    exercised, with only the functions genuinely irrelevant to this path mocked out.
+    """
+
+    def _write_config(self, tmp_path, sample_config_dict):
+        path = tmp_path / "config.yaml"
+        with open(path, "w") as f:
+            yaml.safe_dump(sample_config_dict, f)
+        return str(path)
+
+    def test_parses_and_sets_flag(self):
+        import argparse
+        # Direct argparse smoke test, no full main() run needed for this part.
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--check-commands-only", action="store_true")
+        args = parser.parse_args(["--check-commands-only"])
+        assert args.check_commands_only is True
+        args_default = parser.parse_args([])
+        assert args_default.check_commands_only is False
+
+    def test_calls_check_and_apply_email_commands_then_returns(self, tmp_path, monkeypatch, sample_config_dict):
+        config_path = self._write_config(tmp_path, sample_config_dict)
+        monkeypatch.setattr("sys.argv", ["daily-runner", "--config", config_path, "--check-commands-only"])
+        monkeypatch.setattr(daily_runner, "get_cached_or_fetch_macro_indicators", lambda **k: {})
+
+        calls = []
+        monkeypatch.setattr(daily_runner, "check_and_apply_email_commands",
+                             lambda *a, **k: calls.append((a, k)))
+
+        def _fail_if_called(name):
+            raise AssertionError(f"{name} must not run under --check-commands-only")
+        monkeypatch.setattr(daily_runner, "apply_shared_log_retention",
+                             lambda *a, **k: _fail_if_called("apply_shared_log_retention"))
+
+        result = daily_runner.main()
+
+        assert result is None  # returns normally, no sys.exit()
+        assert len(calls) == 1
+        args_used, kwargs_used = calls[0]
+        assert "portfolio1" in args_used[0]
+        assert kwargs_used["portfolios"] is not None
+        assert kwargs_used["resolved_total_values"] == {"portfolio1": 1000.0}
+
+    def test_does_not_reach_per_portfolio_rebalance_loop(self, tmp_path, monkeypatch, sample_config_dict):
+        config_path = self._write_config(tmp_path, sample_config_dict)
+        monkeypatch.setattr("sys.argv", ["daily-runner", "--config", config_path, "--check-commands-only"])
+        monkeypatch.setattr(daily_runner, "get_cached_or_fetch_macro_indicators", lambda **k: {})
+        monkeypatch.setattr(daily_runner, "check_and_apply_email_commands", lambda *a, **k: None)
+
+        def _fail_if_called(*a, **k):
+            raise AssertionError("write_portfolio_snapshot must not run under --check-commands-only")
+        monkeypatch.setattr(daily_runner, "write_portfolio_snapshot", _fail_if_called)
+
+        def _fail_if_called_retention(*a, **k):
+            raise AssertionError("apply_shared_log_retention must not run under --check-commands-only")
+        monkeypatch.setattr(daily_runner, "apply_shared_log_retention", _fail_if_called_retention)
+
+        daily_runner.main()  # must not raise, must not reach either fail_if_called path
+
+    def test_without_flag_reaches_shared_log_retention(self, tmp_path, monkeypatch, sample_config_dict):
+        # Control case: WITHOUT --check-commands-only, the normal full path still reaches
+        # apply_shared_log_retention() (proving the early-return above is specific to the flag,
+        # not something that broke the normal path).
+        import momentum_trading.execution.live_signal as live_signal
+        config_path = self._write_config(tmp_path, sample_config_dict)
+        monkeypatch.setattr("sys.argv", ["daily-runner", "--config", config_path])
+        monkeypatch.setattr(daily_runner, "get_cached_or_fetch_macro_indicators", lambda **k: {})
+        monkeypatch.setattr(daily_runner, "check_and_apply_email_commands", lambda *a, **k: None)
+
+        calls = []
+        monkeypatch.setattr(daily_runner, "apply_shared_log_retention",
+                             lambda *a, **k: calls.append(True))
+        # Stop the per-portfolio loop right after the retention check we're confirming, before
+        # any real network call: fetch_live_prices() (lazily imported inside the loop, hence
+        # patched on live_signal directly) is called outside any per-check try/except, so this
+        # exception propagates to main()'s own outer try/except -> sys.exit(1), unlike
+        # apply_portfolio_log_retention's failure, which is caught non-fatally right at its own
+        # call site and would otherwise let the loop continue into a real yfinance fetch.
+        monkeypatch.setattr(live_signal, "fetch_live_prices",
+                             lambda *a, **k: (_ for _ in ()).throw(RuntimeError("stop here")))
+        monkeypatch.setattr(daily_runner, "send_alert_email", lambda *a, **k: None)
+
+        with pytest.raises(SystemExit):
+            daily_runner.main()
+
+        assert calls == [True]
+
+
 class TestResolveTotalValues:
     """
     total_value: null must mean "account value minus every

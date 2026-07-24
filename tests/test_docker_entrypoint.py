@@ -49,7 +49,7 @@ def run_entrypoint(stub_bin_dir, tmp_path, extra_env=None):
     env = dict(os.environ)
     env["PATH"] = f"{stub_bin_dir}{os.pathsep}{env.get('PATH', '')}"
     env["CRONTAB_PATH"] = str(crontab_path)
-    for key in ("DAILY_RUNNER_CRON", "RISK_MONITOR_CRON", "RISK_MONITOR_PORTFOLIOS"):
+    for key in ("DAILY_RUNNER_CRON", "RISK_MONITOR_CRON", "RISK_MONITOR_PORTFOLIOS", "EMAIL_CHECK_CRON"):
         env.pop(key, None)  # start from a clean slate regardless of the caller's real .env
     if extra_env:
         env.update(extra_env)
@@ -66,10 +66,14 @@ class TestDefaultSchedule:
     def test_default_produces_single_portfolio1_line(self, stub_bin_dir, tmp_path):
         crontab = run_entrypoint(stub_bin_dir, tmp_path)
         lines = crontab.strip().splitlines()
-        assert len(lines) == 2  # daily-runner + exactly one risk_monitor line
+        assert len(lines) == 3  # daily-runner + exactly one risk_monitor line + email-check
         assert lines[0] == "35 9 * * 1-5 cd /app && daily-runner >> /app/logs/daily_$(date +%Y%m%d).log 2>&1"
         assert "--portfolio portfolio1 " in lines[1]
         assert lines[1].startswith("0 9-16 * * 1-5 ")
+        assert lines[2] == (
+            "*/5 * * * * cd /app && daily-runner --check-commands-only "
+            ">> /app/logs/email_check_$(date +%Y%m%d).log 2>&1"
+        )
 
     def test_date_expression_stays_literal(self, stub_bin_dir, tmp_path):
         # Regression guard: $(date ...) must NOT be evaluated when the crontab is
@@ -122,5 +126,42 @@ class TestMultiPortfolioRiskMonitoring:
         crontab = run_entrypoint(stub_bin_dir, tmp_path, extra_env={
             "RISK_MONITOR_PORTFOLIOS": "portfolio1 portfolio2 portfolio3 portfolio4",
         })
-        daily_lines = [l for l in crontab.strip().splitlines() if "daily-runner" in l]
+        # Excludes the separate --check-commands-only line (also contains "daily-runner"),
+        # this counts only the FULL rebalance-loop entry.
+        daily_lines = [l for l in crontab.strip().splitlines()
+                        if "daily-runner" in l and "--check-commands-only" not in l]
         assert len(daily_lines) == 1
+
+
+class TestEmailCheckCron:
+    """
+    EMAIL_CHECK_CRON ("Fast, Auto-Applied Email-Triggered Reports" plan, Epic 3) generates a
+    separate, lightweight `daily-runner --check-commands-only` cron entry, independent of
+    DAILY_RUNNER_CRON/RISK_MONITOR_CRON's own lines.
+    """
+
+    def test_default_cadence_is_every_5_minutes(self, stub_bin_dir, tmp_path):
+        crontab = run_entrypoint(stub_bin_dir, tmp_path)
+        email_lines = [l for l in crontab.strip().splitlines() if "--check-commands-only" in l]
+        assert len(email_lines) == 1
+        assert email_lines[0].startswith("*/5 * * * * ")
+
+    def test_custom_cadence_is_used(self, stub_bin_dir, tmp_path):
+        crontab = run_entrypoint(stub_bin_dir, tmp_path, extra_env={
+            "EMAIL_CHECK_CRON": "*/10 * * * *",
+        })
+        email_lines = [l for l in crontab.strip().splitlines() if "--check-commands-only" in l]
+        assert len(email_lines) == 1
+        assert email_lines[0].startswith("*/10 * * * * ")
+
+    def test_writes_to_its_own_log_file(self, stub_bin_dir, tmp_path):
+        crontab = run_entrypoint(stub_bin_dir, tmp_path)
+        email_lines = [l for l in crontab.strip().splitlines() if "--check-commands-only" in l]
+        assert "email_check_$(date +%Y%m%d).log" in email_lines[0]
+
+    def test_dry_run_by_default_no_live_flag(self, stub_bin_dir, tmp_path):
+        # Same safety precedent as the main daily-runner line: --live is opt-in only via
+        # uncommenting a different line in docker-entrypoint.sh, never env-var-driven.
+        crontab = run_entrypoint(stub_bin_dir, tmp_path)
+        email_lines = [l for l in crontab.strip().splitlines() if "--check-commands-only" in l]
+        assert "--live" not in email_lines[0]

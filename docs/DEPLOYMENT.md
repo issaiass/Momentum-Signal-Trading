@@ -202,6 +202,9 @@ it's a pure email-setup check, safe to run before you've done anything else.
    # the container's TZ (America/New_York). Omit to use the defaults shown here.
    # DAILY_RUNNER_CRON=35 9 * * 1-5      # daily-runner: 9:35am ET, weekdays
    # RISK_MONITOR_CRON=0 9-16 * * 1-5    # risk_monitor.py: hourly, 9am-4pm ET, weekdays
+   # EMAIL_CHECK_CRON=*/5 * * * *        # daily-runner --check-commands-only: every 5 min,
+                                          # see docs/EMAIL_COMMANDS.md, no effect unless email
+                                          # commands are configured below
 
    # Which portfolios get automated risk_monitor.py coverage, space-separated,
    # must match config.yaml's portfolios: key. config.yaml itself supports any number of
@@ -235,9 +238,9 @@ it's a pure email-setup check, safe to run before you've done anything else.
    docker exec -it momentum-signal crontab -l
    docker logs -f momentum-signal
    ```
-   To change the schedule later, edit `DAILY_RUNNER_CRON`/`RISK_MONITOR_CRON` in `.env` and run
-   `docker compose up -d`, this only recreates the container (which regenerates the crontab
-   from those env vars on start), it does **not** require `--build`.
+   To change the schedule later, edit `DAILY_RUNNER_CRON`/`RISK_MONITOR_CRON`/`EMAIL_CHECK_CRON`
+   in `.env` and run `docker compose up -d`, this only recreates the container (which
+   regenerates the crontab from those env vars on start), it does **not** require `--build`.
 
 6. **Check logs land in the mounted volume** (survives container restarts/rebuilds):
    ```bash
@@ -356,6 +359,19 @@ rather run Python directly on Windows.
    .venv\Scripts\daily-runner.exe >> logs\daily_%date:~-4,4%%date:~-10,2%%date:~-7,2%.log 2>&1
    ```
    then point `schtasks /TR` at the `.bat` file instead of `python.exe` directly.)
+
+8. **Optional: register the email-command check** (every 5 minutes, see
+   `docs/EMAIL_COMMANDS.md`), only useful if `IMAP_HOST`/`IMAP_USER`/`IMAP_PASS`/
+   `TRUSTED_SENDER_EMAIL` are also set as user env vars above:
+   ```powershell
+   schtasks /Create /TN "MomentumEmailCheck" /TR "C:\path\to\momentum-trading\.venv\Scripts\daily-runner.exe --check-commands-only" /SC MINUTE /MO 5 /RU SYSTEM
+   ```
+   Equivalent Linux/Mac host crontab (`crontab -e`):
+   ```
+   */5 * * * * cd /path/to/momentum-trading && .venv/bin/daily-runner --check-commands-only >> logs/email_check_$(date +\%Y\%m\%d).log 2>&1
+   ```
+   Same lightweight-path behavior as the Docker `EMAIL_CHECK_CRON` entry: polls and applies
+   email commands only, no rebalance loop, safe to run this often.
 
 ### Path A vs. Path B, which to choose
 

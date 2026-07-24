@@ -1150,6 +1150,22 @@ that tests enforce, don't casually violate these when editing:
   writeup, including the false-positive `awk`-based diagnostic dead end (quoted commas in a
   dollar-formatted `reason` field defeat naive comma-splitting) worth knowing about before
   trusting `awk -F','` as a diagnostic for any CSV in this project again.
+  `--check-commands-only` (Epic 3, same plan) is the new lightweight, frequent-cron-friendly
+  entry point: reuses `main()`'s existing arg parsing/config load/`resolve_total_values()`
+  setup unchanged, calls the Epic 2-enriched `check_and_apply_email_commands()`, then `return`s
+  immediately, deliberately skipping shared log retention, config-change detection, and the
+  entire per-portfolio stop-loss/rebalance loop, inserted right after the email-commands
+  try/except and before `apply_shared_log_retention()`. With no pending command the cost is one
+  IMAP search and nothing else, `PAUSE`/`RESUME`/`SKIP_NEXT_REBALANCE`/`SET_MAX_DRAWDOWN` still
+  only actually apply with `--live` (unchanged `check_and_apply_email_commands()` semantics),
+  `TRIGGER_REPORT`/`STATUS`/`ALERTS_REPORT` apply in both modes. `docker-entrypoint.sh` gained a
+  new `EMAIL_CHECK_CRON` env var (default `*/5 * * * *`, `docker-compose.yml`/`.env.example`,
+  identical `"${VAR:-default}"` pattern as `DAILY_RUNNER_CRON`/`RISK_MONITOR_CRON`) generating a
+  `daily-runner --check-commands-only >> /app/logs/email_check_$(date +\%Y\%m\%d).log 2>&1` cron
+  line (dry-run by default, commented `--live`/`--confirm-live-trading` variants alongside it,
+  same deliberate not-env-var-driven friction as the main `daily-runner` line). See
+  `docs/EMAIL_COMMANDS.md`'s new "Command latency" section and `docs/DEPLOYMENT.md`'s native
+  Task Scheduler/cron equivalent (Path B, step 8).
 
 **Config flow**: `config.yaml` (gitignored; copy from `config.example.yaml`) →
 `daily_runner.load_config()` builds one `BacktestConfig` per portfolio from

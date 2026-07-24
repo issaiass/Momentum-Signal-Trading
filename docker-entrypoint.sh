@@ -32,6 +32,16 @@ DAILY_RUNNER_CRON="${DAILY_RUNNER_CRON:-35 9 * * 1-5}"
 # --portfolio <name>` cron/Task Scheduler entry instead).
 RISK_MONITOR_CRON="${RISK_MONITOR_CRON:-0 9-16 * * 1-5}"
 
+# EMAIL_CHECK_CRON (default every 5 minutes) is the "Fast, Auto-Applied Email-Triggered
+# Reports" cadence (docs/EMAIL_COMMANDS.md): a lightweight `daily-runner --check-commands-only`
+# entry that ONLY polls and applies email commands (TRIGGER_REPORT sends a real report from
+# here; PAUSE/RESUME/SKIP_NEXT_REBALANCE/SET_MAX_DRAWDOWN still only actually apply with
+# --live, same as a normal run), skipping log retention, config-change detection, and the full
+# per-portfolio rebalance loop entirely. With no pending command, the cost is one IMAP search,
+# safe to run this often. Entirely opt-in like the rest of the email-commands feature: silent
+# no-op if IMAP_HOST/IMAP_USER/IMAP_PASS/TRUSTED_SENDER_EMAIL aren't set in .env.
+EMAIL_CHECK_CRON="${EMAIL_CHECK_CRON:-*/5 * * * *}"
+
 # Space-separated portfolio names to independently risk-monitor, one cron
 # entry each, config.yaml supports any number of portfolios (daily-runner already
 # loops over all of them), but risk_monitor.py previously covered a single
@@ -96,6 +106,13 @@ CRONTAB_PATH="${CRONTAB_PATH:-/etc/cron.d/momentum-cron}"
   for p in $RISK_MONITOR_PORTFOLIOS; do
     echo "$RISK_MONITOR_CRON"' cd /app && python -m momentum_trading.risk.risk_monitor --portfolio '"$p"' >> /app/logs/risk_monitor_'"$p"'_$(date +%Y%m%d).log 2>&1'
   done
+  echo "$EMAIL_CHECK_CRON"' cd /app && daily-runner --check-commands-only >> /app/logs/email_check_$(date +%Y%m%d).log 2>&1' # dry run
+  # echo "$EMAIL_CHECK_CRON"' cd /app && daily-runner --check-commands-only --live --port 7497 >> /app/logs/email_check_$(date +%Y%m%d).log 2>&1' # trading (paper)
+  # echo "$EMAIL_CHECK_CRON"' cd /app && daily-runner --check-commands-only --live --confirm-live-trading --port 7496 >> /app/logs/email_check_$(date +%Y%m%d).log 2>&1' # trading (live account)
+  # Same reasoning as the main daily-runner line above: --live/--confirm-live-trading here are
+  # deliberately NOT env-var-driven, a real deployment wanting TRIGGER_REPORT to reflect real
+  # broker positions (or PAUSE/RESUME/SET_MAX_DRAWDOWN to actually apply) uncomments the
+  # matching line above and rebuilds, same intentional friction as everywhere else in this file.
 } > "$CRONTAB_PATH"
 chmod 0644 "$CRONTAB_PATH"
 crontab "$CRONTAB_PATH"

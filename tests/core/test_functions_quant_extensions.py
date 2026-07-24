@@ -99,6 +99,22 @@ class TestDailyWindowComparison:
         assert result["1 Day"]["portfolio"] == pytest.approx(0.05)
         assert result["1 Day"]["benchmark"] == pytest.approx(0.02)
 
+    def test_duplicate_same_day_rows_do_not_raise(self, tmp_path):
+        # Real, confirmed regression (found verifying send_daily end-to-end against real
+        # accumulated data, not synthetic): write_portfolio_snapshot() writes one row per RUN,
+        # not per calendar day, so more than one manual run on the same day (routine during
+        # testing, or a retry after a crash) produces multiple rows sharing a date. Before the
+        # fix, port_cgi.loc[latest_date] returned a Series (multiple matches) instead of a
+        # scalar, raising TypeError inside float(). Two rows share 2026-06-02.
+        dates = pd.to_datetime(["2026-06-01", "2026-06-02", "2026-06-02"])
+        snapshot_dir = _write_snapshot_csv(tmp_path, "p1", dates, [0.10, 0.05, 0.02], [0.01, 0.02, 0.01])
+        result = daily_window_comparison("p1", snapshot_dir=snapshot_dir)
+        assert "error" not in result
+        # Dedup keeps only the LAST row for the duplicated 2026-06-02 date (the 0.05 row is
+        # dropped entirely, not compounded), so "1 Day" (2026-06-02 vs. 2026-06-01) is just the
+        # surviving row's own return: (1.10*1.02)/1.10 - 1 = 0.02
+        assert result["1 Day"]["portfolio"] == pytest.approx(0.02)
+
 
 class TestMonthlyWindowComparison:
     def test_missing_snapshot_log_returns_error(self, tmp_path):
@@ -129,3 +145,15 @@ class TestMonthlyWindowComparison:
             snapshot_dir = _write_snapshot_csv(tmp_path, f"p_{n}", dates, [0.01] * n, [0.005] * n)
             result = monthly_window_comparison(f"p_{n}", snapshot_dir=snapshot_dir)
             assert "error" not in result
+
+    def test_duplicate_same_day_rows_do_not_raise(self, tmp_path):
+        # Same real, confirmed regression as TestDailyWindowComparison's own test: multiple
+        # snapshot rows sharing a date (write_portfolio_snapshot() writes one row per RUN, not
+        # per calendar day) used to crash port_cgi.loc[latest_date] (returns a Series, not a
+        # scalar, when the date is duplicated).
+        dates = pd.date_range("2026-01-01", periods=40, freq="B").tolist()
+        dates[-1] = dates[-2]  # duplicate the LAST date, same as a same-day re-run
+        snapshot_dir = _write_snapshot_csv(tmp_path, "p1", dates, [0.001] * 40, [0.0005] * 40)
+        result = monthly_window_comparison("p1", snapshot_dir=snapshot_dir)
+        assert "error" not in result
+        assert "1 Month" in result

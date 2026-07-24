@@ -691,6 +691,12 @@ def compare_to_benchmark(name: str, snapshot_dir: str = str(data_dir())) -> dict
             "outperformance": np.nan, "n_periods": 0, "as_of_date": None,
             "note": "No rows with both period returns populated yet.",
         }
+    # Deliberately NOT deduplicated by date (unlike daily_window_comparison()/
+    # monthly_window_comparison() below): each row's period_return is the incremental change
+    # since the PREVIOUS row written, regardless of calendar date, so multiple same-day rows
+    # (e.g. two manual runs) are legitimate, real incremental data points that must ALL compound
+    # into this cumulative product; collapsing to one row per date would silently discard real
+    # returns (confirmed directly: doing so broke this function's own compounding-math test).
 
     port_cum = (1 + df["portfolio_period_return"]).prod() - 1
     bench_cum = (1 + df["benchmark_period_return"]).prod() - 1
@@ -746,6 +752,13 @@ def since_inception_performance(
     df = df.dropna(subset=["portfolio_period_return", "benchmark_period_return"]).sort_values("date")
     if df.empty:
         return {"error": "No snapshot rows with period returns yet, need at least 2 runs."}
+    # Deliberately NOT deduplicated by date, same reasoning as compare_to_benchmark()'s own
+    # comment: each row's period_return is a legitimate real incremental change since the
+    # PREVIOUS row (regardless of calendar date), collapsing same-day rows would silently
+    # discard real return data from the cumulative/vol/drawdown stats below. This function's
+    # `.set_index("date")` doesn't do a scalar .loc[single_date] lookup (unlike
+    # daily_window_comparison()/monthly_window_comparison()), so duplicate dates don't crash
+    # here, they just need to stay in the series.
 
     returns = df.set_index("date")[["portfolio_period_return", "benchmark_period_return"]].rename(
         columns={"portfolio_period_return": "Portfolio", "benchmark_period_return": "SPY_Return"})
@@ -814,6 +827,13 @@ def daily_window_comparison(name: str, snapshot_dir: str = str(data_dir())) -> d
     df = df.dropna(subset=["portfolio_period_return", "benchmark_period_return"]).sort_values("date")
     if df.empty:
         return {"error": "No snapshot rows with period returns yet, need at least 2 runs."}
+    # write_portfolio_snapshot() writes one row per RUN, not per calendar day (its own
+    # docstring), so more than one manual run on the same day (routine during testing, or a
+    # retry after a crash) produces multiple rows sharing a date. Consumers here need ONE row
+    # per date to do a scalar .loc[date] lookup below; keep the LAST (most recent) row for any
+    # duplicated date, the most up-to-date snapshot for that day, a real bug found and fixed
+    # while verifying this codepath end-to-end for the first time against real accumulated data.
+    df = df.drop_duplicates(subset="date", keep="last")
 
     df = df.set_index("date")
     port_cgi = (1 + df["portfolio_period_return"]).cumprod()
@@ -870,6 +890,11 @@ def monthly_window_comparison(name: str, snapshot_dir: str = str(data_dir())) ->
     df = df.dropna(subset=["portfolio_period_return", "benchmark_period_return"]).sort_values("date")
     if df.empty:
         return {"error": "No snapshot rows with period returns yet, need at least 2 runs."}
+    # See daily_window_comparison()'s identical comment above: write_portfolio_snapshot() writes
+    # one row per RUN, not per calendar day, so more than one run on the same day produces
+    # duplicate dates; keep the LAST (most recent) row per date before the scalar .loc[date]
+    # lookups below.
+    df = df.drop_duplicates(subset="date", keep="last")
 
     df = df.set_index("date")
     port_cgi = (1 + df["portfolio_period_return"]).cumprod()

@@ -517,6 +517,19 @@ answer whether the strategy actually works.
   multi-year `monthly_picks` series (this project's own actual usage) never surface this, losing
   only the very first of many rebalances doesn't visibly affect a long backtest. Not fixed,
   flagged for a future look, see `CLAUDE.md`'s `backtest/momentum_backtest.py` bullet.
+- **A real, confirmed crash in the daily/monthly report's window-comparison stats, now fixed**:
+  `notifications.send_daily` had never been turned on against real accumulated deployment
+  history before (confirmed, first time this session), crashing with `TypeError: float()
+  argument must be a string or a real number, not 'Series'`. `write_portfolio_snapshot()` writes
+  one row per RUN, not per calendar day, so more than one manual run on the same day (routine
+  during testing) produces multiple `portfolio_snapshot_<name>.csv` rows sharing a date
+  (confirmed directly: one real file had 36 rows for a single date). `daily_window_comparison()`/
+  `monthly_window_comparison()` (`core/functions_quant_extensions.py`) both index by date and do
+  a scalar lookup for the latest value, which breaks on a duplicate date. Fixed by keeping only
+  the most recent same-day row before that lookup in both functions; deliberately NOT applied to
+  the two sibling functions in the same file that aggregate every row via a cumulative product
+  instead, doing so there would have silently discarded real return data (caught by an existing
+  test before it shipped). See `CLAUDE.md`'s `daily_runner.py` bullet for the full detail.
 
 ### Who should allocate capital here
 

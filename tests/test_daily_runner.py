@@ -1827,3 +1827,117 @@ class TestDetectAndLogConfigChange:
         current = asdict(cfg)
         round_tripped = json.loads(json.dumps(current, sort_keys=True))
         assert round_tripped == current
+
+
+class TestBuildAndSendPortfolioReport:
+    """
+    Epic 1 of the "Fast, Auto-Applied Email-Triggered Reports" plan: build_and_send_portfolio_
+    report() is the single function BOTH the scheduled monthly/daily report call sites in the
+    per-portfolio loop AND the on-demand TRIGGER_REPORT email command (Epic 2) now share,
+    extracted from what used to be two separate inline blocks. These tests confirm the
+    extraction's own contract directly (no snapshot -> no-op; report_type selects the right
+    window-comparison function and send_*_report()), independent of either call site.
+    """
+
+    def _write_snapshot(self, tmp_path, name):
+        import csv
+        path = tmp_path / f"portfolio_snapshot_{name}.csv"
+        with open(path, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["date", "total_value", "cash"])
+            w.writerow(["2026-01-01", "1000", "0"])
+        return path
+
+    def _stub_common(self, monkeypatch, dr):
+        # Neutral stubs for every dependency build_and_send_portfolio_report() calls besides
+        # the snapshot file itself and the final send_*_report(), so each test only has to
+        # assert on the ONE thing it cares about.
+        monkeypatch.setattr(dr.fnx, "compare_to_benchmark", lambda name: {"comparison": True})
+        monkeypatch.setattr(dr.fnx, "since_inception_performance", lambda name: {"since": True})
+        monkeypatch.setattr(dr, "build_position_performance", lambda *a, **k: {"pos": True})
+        monkeypatch.setattr(dr, "measure_live_performance", lambda *a, **k: {"pnl": True})
+        monkeypatch.setattr(dr, "fetch_ohlcv_for_tickers", lambda tickers: {t: object() for t in tickers})
+        monkeypatch.setattr(dr, "compute_latest_indicators", lambda df: {"ind": True})
+        monkeypatch.setattr(dr, "get_cached_or_fetch_fundamentals", lambda *a, **k: {"fund": True})
+
+    def test_no_snapshot_returns_false_and_sends_nothing(self, tmp_path, monkeypatch):
+        import momentum_trading.daily_runner as dr
+        from momentum_trading.daily_runner import build_and_send_portfolio_report
+        monkeypatch.setattr(dr, "data_dir", lambda: tmp_path)
+        monthly_calls, daily_calls = [], []
+        monkeypatch.setattr(dr, "send_monthly_report", lambda *a, **k: monthly_calls.append(a))
+        monkeypatch.setattr(dr, "send_daily_report", lambda *a, **k: daily_calls.append(a))
+
+        result = build_and_send_portfolio_report(
+            "p1", BacktestConfig(), {}, {}, "trades.csv", 1000.0, True, {}, {},
+            report_type="monthly",
+        )
+        assert result is False
+        assert monthly_calls == [] and daily_calls == []
+
+    def test_monthly_report_type_calls_send_monthly_report_with_monthly_window(self, tmp_path, monkeypatch):
+        import momentum_trading.daily_runner as dr
+        from momentum_trading.daily_runner import build_and_send_portfolio_report
+        monkeypatch.setattr(dr, "data_dir", lambda: tmp_path)
+        self._write_snapshot(tmp_path, "p1")
+        self._stub_common(monkeypatch, dr)
+        monkeypatch.setattr(dr.fnx, "monthly_window_comparison", lambda name: "MONTHLY_WINDOW")
+        monkeypatch.setattr(dr.fnx, "daily_window_comparison",
+                             lambda name: (_ for _ in ()).throw(AssertionError("wrong window fn called")))
+        monthly_calls = []
+        monkeypatch.setattr(dr, "send_monthly_report", lambda *a, **k: monthly_calls.append(a))
+        monkeypatch.setattr(dr, "send_daily_report",
+                             lambda *a, **k: (_ for _ in ()).throw(AssertionError("wrong report fn called")))
+
+        result = build_and_send_portfolio_report(
+            "p1", BacktestConfig(), {}, {}, "trades.csv", 1000.0, True, {}, {},
+            report_type="monthly",
+        )
+        assert result is True
+        assert len(monthly_calls) == 1
+        # send_monthly_report(name, snapshot_df, comparison, notification_cfg, real_pnl,
+        # since_inception, window_comparison, ...), window_comparison is positional arg index 6.
+        assert monthly_calls[0][6] == "MONTHLY_WINDOW"
+
+    def test_daily_report_type_calls_send_daily_report_with_daily_window(self, tmp_path, monkeypatch):
+        import momentum_trading.daily_runner as dr
+        from momentum_trading.daily_runner import build_and_send_portfolio_report
+        monkeypatch.setattr(dr, "data_dir", lambda: tmp_path)
+        self._write_snapshot(tmp_path, "p1")
+        self._stub_common(monkeypatch, dr)
+        monkeypatch.setattr(dr.fnx, "daily_window_comparison", lambda name: "DAILY_WINDOW")
+        monkeypatch.setattr(dr.fnx, "monthly_window_comparison",
+                             lambda name: (_ for _ in ()).throw(AssertionError("wrong window fn called")))
+        daily_calls = []
+        monkeypatch.setattr(dr, "send_daily_report", lambda *a, **k: daily_calls.append(a))
+        monkeypatch.setattr(dr, "send_monthly_report",
+                             lambda *a, **k: (_ for _ in ()).throw(AssertionError("wrong report fn called")))
+
+        result = build_and_send_portfolio_report(
+            "p1", BacktestConfig(), {}, {}, "trades.csv", 1000.0, True, {}, {},
+            report_type="daily",
+        )
+        assert result is True
+        assert len(daily_calls) == 1
+        # send_daily_report(name, snapshot_df, comparison, notification_cfg, real_pnl,
+        # since_inception, window_comparison, ...), window_comparison is positional arg index 6.
+        assert daily_calls[0][6] == "DAILY_WINDOW"
+
+    def test_no_held_tickers_skips_ohlcv_fetch(self, tmp_path, monkeypatch):
+        import momentum_trading.daily_runner as dr
+        from momentum_trading.daily_runner import build_and_send_portfolio_report
+        monkeypatch.setattr(dr, "data_dir", lambda: tmp_path)
+        self._write_snapshot(tmp_path, "p1")
+        self._stub_common(monkeypatch, dr)
+        monkeypatch.setattr(dr.fnx, "daily_window_comparison", lambda name: "W")
+        monkeypatch.setattr(dr, "send_daily_report", lambda *a, **k: None)
+        monkeypatch.setattr(
+            dr, "fetch_ohlcv_for_tickers",
+            lambda tickers: (_ for _ in ()).throw(AssertionError("should not be called with no positions")),
+        )
+
+        result = build_and_send_portfolio_report(
+            "p1", BacktestConfig(), {}, {}, "trades.csv", 1000.0, True, {}, {},
+            report_type="daily",
+        )
+        assert result is True

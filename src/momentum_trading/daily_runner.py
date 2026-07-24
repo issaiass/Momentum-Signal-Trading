@@ -780,6 +780,87 @@ def detect_and_log_config_change(portfolio_name: str, cfg: BacktestConfig) -> No
     path.write_text(json.dumps(current, indent=2, sort_keys=True))
 
 
+def build_and_send_portfolio_report(
+    name: str, cfg: BacktestConfig, current_positions: dict, latest_prices: dict,
+    trade_log_path: str, total_value: float, dry_run: bool, notification_cfg: dict,
+    macro_indicators: dict, report_type: str,
+) -> bool:
+    """
+    Builds and sends either the monthly or daily performance report for ONE portfolio. Extracted
+    (Epic 1, "Fast, Auto-Applied Email-Triggered Reports" plan) from what used to be two separate
+    inline blocks in the per-portfolio loop below, so the SAME logic is now shared by both the
+    scheduled call sites (monthly-report-day / send_daily gate, still doing their own gating
+    exactly as before, unchanged) AND the on-demand TRIGGER_REPORT email command
+    (check_and_apply_email_commands(), Epic 2), guaranteeing an on-demand report can never
+    silently diverge from what the scheduled one would have shown.
+
+    This function does NOT decide WHETHER to send, only HOW, once that decision is already
+    made, except for the one universal precondition every report needs: a
+    portfolio_snapshot_<name>.csv must already exist (returns False, sends nothing, if it
+    doesn't, a portfolio that has never completed a prior run genuinely has no historical data
+    to report on yet).
+
+    report_type : "monthly" or "daily", selects since_inception/window-comparison granularity
+    (fnx.monthly_window_comparison() vs fnx.daily_window_comparison()) and which of
+    send_monthly_report()/send_daily_report() gets called.
+
+    dry_run : passed straight through to measure_live_performance() (was `not args.live` at
+    both original call sites), NOT re-derived here, so a caller without an `args` object (the
+    new email-command path) can pass it explicitly.
+
+    Returns True if a report was actually sent, False if skipped (no snapshot yet), so a caller
+    (e.g. TRIGGER_REPORT's reply email) can tell the difference and word its reply accordingly.
+    """
+    snapshot_path = str(data_dir() / f"portfolio_snapshot_{name}.csv")
+    if not os.path.isfile(snapshot_path):
+        logger.info("[%s] %s report skipped: no portfolio snapshot yet (no prior run).",
+                    name, report_type)
+        return False
+
+    snapshot_df = pd.read_csv(snapshot_path, parse_dates=["date"])
+    comparison = fnx.compare_to_benchmark(name)
+    since_inception = fnx.since_inception_performance(name)
+    window_comparison = (
+        fnx.monthly_window_comparison(name) if report_type == "monthly"
+        else fnx.daily_window_comparison(name)
+    )
+    held_tickers = list(current_positions.keys())
+    indicators = {}
+    fundamentals = {}
+    if held_tickers:
+        ohlcv = fetch_ohlcv_for_tickers(held_tickers)
+        indicators = {t: compute_latest_indicators(df) for t, df in ohlcv.items()}
+        fundamentals = {
+            t: get_cached_or_fetch_fundamentals(
+                t, fmp_api_key=os.environ.get("FMP_API_KEY"),
+                eodhd_api_key=os.environ.get("EODHD_API_KEY"),
+            )
+            for t in held_tickers
+        }
+    position_performance = build_position_performance(current_positions, latest_prices, trade_log_path)
+    # --- REAL realized+unrealized P&L from the trade log (FIFO), distinct from the
+    #     snapshot-based unrealized_pnl already in the report, this covers cumulative gains
+    #     from trades that have since closed, not just currently-open positions. ---
+    try:
+        real_pnl = measure_live_performance(
+            "1970-01-01", datetime.today().strftime("%Y-%m-%d"),
+            latest_prices=latest_prices, log_path=trade_log_path,
+            initial_capital=total_value, dry_run=dry_run,
+        )
+    except FileNotFoundError:
+        real_pnl = None
+
+    if report_type == "monthly":
+        send_monthly_report(name, snapshot_df, comparison, notification_cfg, real_pnl,
+                             since_inception, window_comparison, indicators, fundamentals,
+                             macro_indicators, position_performance)
+    else:
+        send_daily_report(name, snapshot_df, comparison, notification_cfg, real_pnl,
+                           since_inception, window_comparison, indicators, fundamentals,
+                           macro_indicators, position_performance)
+    return True
+
+
 def check_and_apply_email_commands(portfolio_names: list[str], ibkr_port: int, dry_run: bool,
                                      send_email_command_feedback: bool = True) -> None:
     """
@@ -1699,41 +1780,10 @@ def main():
             notification_cfg = cfg_raw.get("notifications", {})
             if notification_cfg.get("send_daily", False):
                 try:
-                    snapshot_path = str(data_dir() / f"portfolio_snapshot_{name}.csv")
-                    if os.path.isfile(snapshot_path):
-                        daily_snapshot_df = pd.read_csv(snapshot_path, parse_dates=["date"])
-                        daily_comparison = fnx.compare_to_benchmark(name)
-                        daily_since_inception = fnx.since_inception_performance(name)
-                        daily_windows = fnx.daily_window_comparison(name)
-                        held_tickers = list(current_positions.keys())
-                        daily_indicators = {}
-                        daily_fundamentals = {}
-                        if held_tickers:
-                            ohlcv = fetch_ohlcv_for_tickers(held_tickers)
-                            daily_indicators = {t: compute_latest_indicators(df) for t, df in ohlcv.items()}
-                            daily_fundamentals = {
-                                t: get_cached_or_fetch_fundamentals(
-                                    t, fmp_api_key=os.environ.get("FMP_API_KEY"),
-                                    eodhd_api_key=os.environ.get("EODHD_API_KEY"),
-                                )
-                                for t in held_tickers
-                            }
-                        daily_position_performance = build_position_performance(
-                            current_positions, latest_prices, trade_log_path,
-                        )
-                        try:
-                            daily_real_pnl = measure_live_performance(
-                                "1970-01-01", datetime.today().strftime("%Y-%m-%d"),
-                                latest_prices=latest_prices, log_path=trade_log_path,
-                                initial_capital=total_value, dry_run=not args.live,
-                            )
-                        except FileNotFoundError:
-                            daily_real_pnl = None
-                        send_daily_report(
-                            name, daily_snapshot_df, daily_comparison, notification_cfg,
-                            daily_real_pnl, daily_since_inception, daily_windows, daily_indicators,
-                            daily_fundamentals, macro_indicators, daily_position_performance,
-                        )
+                    build_and_send_portfolio_report(
+                        name, cfg, current_positions, latest_prices, trade_log_path, total_value,
+                        not args.live, notification_cfg, macro_indicators, report_type="daily",
+                    )
                 except Exception as e:
                     logger.warning("[%s] Daily report skipped due to error (non-fatal): %s", name, e)
 
@@ -1878,48 +1928,10 @@ def main():
                 # --- Monthly report, on the configured day of month ---
                 report_day = notification_cfg.get("monthly_report_day_of_month")
                 if report_day and datetime.today().day == report_day:
-                    snapshot_path = str(data_dir() / f"portfolio_snapshot_{name}.csv")
-                    if os.path.isfile(snapshot_path):
-                        snapshot_df = pd.read_csv(snapshot_path, parse_dates=["date"])
-                        comparison = fnx.compare_to_benchmark(name)
-                        since_inception = fnx.since_inception_performance(name)
-                        window_comparison = fnx.monthly_window_comparison(name)
-                        held_tickers = list(current_positions.keys())
-                        indicators = {}
-                        fundamentals = {}
-                        if held_tickers:
-                            ohlcv = fetch_ohlcv_for_tickers(held_tickers)
-                            indicators = {t: compute_latest_indicators(df) for t, df in ohlcv.items()}
-                            fundamentals = {
-                                t: get_cached_or_fetch_fundamentals(
-                                    t, fmp_api_key=os.environ.get("FMP_API_KEY"),
-                                    eodhd_api_key=os.environ.get("EODHD_API_KEY"),
-                                )
-                                for t in held_tickers
-                            }
-                        position_performance = build_position_performance(
-                            current_positions, latest_prices, trade_log_path,
-                        )
-                        # --- REAL realized+unrealized P&L from the trade log (FIFO),
-                        #     distinct from the snapshot-based unrealized_pnl already in the
-                        #     report, this covers cumulative gains from trades that have since
-                        #     closed, not just currently-open positions. dry_run=not args.live
-                        #     filters out any dry-run rows sharing this same log file. ---
-                        try:
-                            real_pnl = measure_live_performance(
-                                "1970-01-01", datetime.today().strftime("%Y-%m-%d"),
-                                latest_prices=latest_prices,
-                                log_path=trade_log_path,
-                                initial_capital=total_value,
-                                dry_run=not args.live,
-                            )
-                        except FileNotFoundError:
-                            real_pnl = None
-                        send_monthly_report(
-                            name, snapshot_df, comparison, notification_cfg, real_pnl,
-                            since_inception, window_comparison, indicators,
-                            fundamentals, macro_indicators, position_performance,
-                        )
+                    build_and_send_portfolio_report(
+                        name, cfg, current_positions, latest_prices, trade_log_path, total_value,
+                        not args.live, notification_cfg, macro_indicators, report_type="monthly",
+                    )
             else:
                 logger.info("[%s] Not a rebalance day, stop-loss check complete only.", name)
 

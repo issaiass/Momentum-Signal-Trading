@@ -1050,6 +1050,54 @@ that tests enforce, don't casually violate these when editing:
   `docs/DEPLOYMENT.md`'s "What needs what" section for the full restart-vs-nothing matrix,
   including why `.env`/`docker-entrypoint.sh` genuinely can't be hot-reloaded the same way
   (env vars are baked into the container process at creation, not re-read per file).
+  `build_and_send_portfolio_report(name, cfg, current_positions, latest_prices, trade_log_path,
+  total_value, dry_run, notification_cfg, macro_indicators, report_type)` (Epic 1, "Fast,
+  Auto-Applied Email-Triggered Reports" plan) is a pure extraction, zero behavior change: the
+  monthly and daily report blocks used to be two separate inline code blocks in the
+  per-portfolio loop (snapshot read, `fnx.compare_to_benchmark()`/`since_inception_performance()`/
+  `monthly_window_comparison()`-or-`daily_window_comparison()`, `fetch_ohlcv_for_tickers()` +
+  `compute_latest_indicators()`/`get_cached_or_fetch_fundamentals()` for held tickers,
+  `build_position_performance()`, `measure_live_performance()` for real FIFO P&L, then
+  `send_monthly_report()`/`send_daily_report()`), now one shared function selecting between the
+  two via `report_type: "monthly" | "daily"`. Both EXISTING call sites (the `monthly_report_
+  day_of_month` gate and the `send_daily` gate) keep their own gating logic unchanged, calling
+  this function only once that decision is already made; the function itself only owns the ONE
+  universal precondition every report needs regardless of caller: a
+  `portfolio_snapshot_<name>.csv` must already exist (returns `False`, sends nothing, for a
+  portfolio that's never completed a prior run). Extracted specifically so the on-demand
+  `TRIGGER_REPORT` email command (Epic 2, `check_and_apply_email_commands()`) can call the
+  EXACT same report-building logic the scheduled path already uses, guaranteeing an on-demand
+  report can never silently diverge from what the scheduled one would have shown, same
+  single-shared-function principle this codebase already applies everywhere else
+  (`resolve_target_weights()`, `resolve_strategy_picks()`, `compute_vol_scalar()`). Confirmed
+  byte-identical via the full existing test suite (no new failures) plus 4 new direct unit tests
+  (`TestBuildAndSendPortfolioReport`, `tests/test_daily_runner.py`) asserting the no-snapshot
+  no-op, correct `report_type` -> window-comparison-function and `send_*_report()` routing, and
+  the no-held-tickers OHLCV-fetch skip.
+  **A real, confirmed bug found and fixed while verifying the extraction above against real
+  accumulated data, not synthetic**: `notifications.send_daily` had never actually been turned
+  on with real deployed history before (confirmed, this session was the first time), and doing
+  so crashed with `TypeError: float() argument must be a string or a real number, not 'Series'`
+  for every portfolio. Root cause: `write_portfolio_snapshot()`'s own docstring says it writes
+  one row per RUN, not per calendar day, so more than one manual `--force-rebalance`/`--live`
+  run on the same day (routine during testing, or a retry after a crash) produces multiple
+  `data/portfolio_snapshot_<name>.csv` rows sharing a date (confirmed directly: one real
+  portfolio's file had 36 rows for a single date after this session's own heavy same-day
+  testing). `core/functions_quant_extensions.py`'s `daily_window_comparison()`/
+  `monthly_window_comparison()` both do a scalar `port_cgi.loc[latest_date]` lookup after
+  `.set_index("date")`, which returns a Series (not a scalar) whenever the index has duplicate
+  values, breaking the subsequent `float(...)` call. Fixed in BOTH functions:
+  `df.drop_duplicates(subset="date", keep="last")` right before `.set_index("date")`, keeping
+  the most recent same-day snapshot for that date's point-in-time lookup. Deliberately NOT
+  applied to `compare_to_benchmark()`/`since_inception_performance()` in the same file, despite
+  reading the identical file: those two AGGREGATE every row's `period_return` via `.prod()` (a
+  cumulative product of ALL incremental changes since each row's own predecessor, regardless of
+  calendar date), never doing a scalar date lookup, so they don't crash on duplicate dates, and
+  deduplicating them would have been WRONG, silently discarding real, legitimate incremental
+  return data, confirmed directly: applying the same dedup there broke
+  `TestBenchmarkComparison::test_cumulative_return_math`'s own compounding-math assertion,
+  caught before it shipped. Regression tests added for both fixed functions
+  (`test_duplicate_same_day_rows_do_not_raise`, `tests/core/test_functions_quant_extensions.py`).
 
 **Config flow**: `config.yaml` (gitignored; copy from `config.example.yaml`) →
 `daily_runner.load_config()` builds one `BacktestConfig` per portfolio from

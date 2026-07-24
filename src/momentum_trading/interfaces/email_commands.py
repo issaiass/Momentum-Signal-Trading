@@ -98,7 +98,15 @@ class SkipRebalanceCommand(CommandBase):
 
 
 class TriggerReportCommand(CommandBase):
+    """
+    Auto-applied (daily_runner.py's check_and_apply_email_commands()): builds and sends a real
+    report immediately via the same build_and_send_portfolio_report() the scheduled monthly/
+    daily report call sites use, guaranteeing an on-demand report can never diverge from what
+    the scheduled one would show. report_type defaults to DAILY (the lighter of the two
+    reports), MONTHLY is available via an optional REPORT_TYPE: line.
+    """
     action: Literal["TRIGGER_REPORT"] = "TRIGGER_REPORT"
+    report_type: Literal["MONTHLY", "DAILY"] = "DAILY"
 
 
 class StatusCommand(CommandBase):
@@ -222,6 +230,7 @@ COMMAND_MODELS = {
 #   PARAM: <only for ADJUST_PARAM, e.g. stop_loss_pct>
 #   VALUE: <only for ADJUST_PARAM or SET_MAX_DRAWDOWN, e.g. 0.15>
 #   LIMIT: <only for ALERTS_REPORT, optional, default 10, max 50>
+#   REPORT_TYPE: <only for TRIGGER_REPORT, optional, MONTHLY|DAILY, default DAILY>
 # --------------------------------------------------------------------------- #
 def _parse_fields(body: str) -> dict:
     fields = {}
@@ -287,6 +296,8 @@ def parse_command(sender: str, trusted_sender: str, body: str) -> ParsedCommandR
         except ValueError:
             return ParsedCommandResult(success=False, raw_action=action,
                                         error=f"LIMIT {limit_str!r} is not a valid integer.")
+    if action == "TRIGGER_REPORT":
+        payload["report_type"] = fields.get("REPORT_TYPE", "DAILY").strip().upper()
 
     try:
         command = model_cls(**payload)

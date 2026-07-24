@@ -1443,6 +1443,155 @@ class TestSameInboxWarning:
         assert not any("same address as IMAP_USER" in r.message for r in caplog.records)
 
 
+class TestTriggerReportEmailCommand:
+    """
+    TRIGGER_REPORT (Epic 2, "Fast, Auto-Applied Email-Triggered Reports" plan) genuinely
+    auto-applies now, unlike LIQUIDATE/ADJUST_PARAM: check_and_apply_email_commands() widened
+    with portfolios/resolved_total_values/notification_cfg/macro_indicators (the data main()
+    already has in scope at its own call site) builds and sends a real report via
+    build_and_send_portfolio_report(), the exact same function the scheduled monthly/daily
+    report call sites use (Epic 1). build_and_send_portfolio_report() itself is mocked here
+    (already covered by TestBuildAndSendPortfolioReport above), these tests isolate the NEW
+    dispatch logic: correct report_type, correct portfolio-scoped cfg/tickers/total_value/
+    current_positions/latest_prices, that it applies identically in dry-run and --live mode
+    (unlike PauseCommand etc., which only apply in --live), and the two graceful-fallback
+    paths (no portfolio data supplied to this call; no snapshot exists yet for the portfolio).
+    """
+
+    def _configure_email_env(self, monkeypatch):
+        monkeypatch.setenv("IMAP_HOST", "imap.example.com")
+        monkeypatch.setenv("IMAP_USER", "bot@example.com")
+        monkeypatch.setenv("IMAP_PASS", "secret")
+        monkeypatch.setenv("TRUSTED_SENDER_EMAIL", "trader@example.com")
+
+    def _parsed(self, body):
+        from momentum_trading.interfaces.email_commands import parse_command
+        result = parse_command("trader@example.com", "trader@example.com", body)
+        assert result.success is True
+        return result
+
+    def _stub_prices(self, monkeypatch):
+        import numpy as np
+        import momentum_trading.execution.live_signal as live_signal
+        dates = pd.bdate_range("2026-01-01", periods=30)
+        prices = pd.DataFrame(
+            {"SPY": np.linspace(400, 410, 30), "QQQ": np.linspace(300, 310, 30)}, index=dates,
+        )
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        monkeypatch.setattr(daily_runner, "with_retry", lambda fn, retries, delay, *a, **k: fn(*a, **k))
+
+    def _portfolio_kwargs(self, cfg=None):
+        cfg = cfg or BacktestConfig()
+        return dict(
+            portfolios={"p1": {"cfg": cfg, "tickers": ["SPY", "QQQ"]}},
+            resolved_total_values={"p1": 5000.0},
+            notification_cfg={"send_daily": True},
+            macro_indicators={"fed_funds_rate": 5.0},
+        )
+
+    def test_dry_run_calls_build_and_send_with_correct_args(self, monkeypatch):
+        self._configure_email_env(monkeypatch)
+        self._stub_prices(monkeypatch)
+        parsed = self._parsed("ACTION: TRIGGER_REPORT\nPORTFOLIO: p1\nREPORT_TYPE: MONTHLY")
+        monkeypatch.setattr(daily_runner, "poll_and_process_commands", lambda *a, **k: [parsed])
+        monkeypatch.setattr(daily_runner, "send_alert_email", lambda *a, **k: None)
+        calls = []
+        monkeypatch.setattr(daily_runner, "build_and_send_portfolio_report",
+                             lambda *a, **k: calls.append((a, k)) or True)
+        kwargs = self._portfolio_kwargs()
+
+        daily_runner.check_and_apply_email_commands(
+            ["p1"], ibkr_port=7497, dry_run=True, **kwargs,
+        )
+
+        assert len(calls) == 1
+        args, kw = calls[0]
+        # positional signature: name, cfg, current_positions, latest_prices, trade_log_path,
+        # total_value, dry_run, notification_cfg, macro_indicators
+        assert args[0] == "p1"
+        assert args[1] is kwargs["portfolios"]["p1"]["cfg"]
+        assert args[2] == {}  # dry-run, persist_dry_run_state defaults False
+        assert set(args[3].keys()) == {"SPY", "QQQ"}
+        assert args[5] == 5000.0
+        assert args[6] is True  # dry_run
+        assert args[7] is kwargs["notification_cfg"]
+        assert args[8] is kwargs["macro_indicators"]
+        assert kw["report_type"] == "monthly"
+
+    def test_default_report_type_is_daily(self, monkeypatch):
+        self._configure_email_env(monkeypatch)
+        self._stub_prices(monkeypatch)
+        parsed = self._parsed("ACTION: TRIGGER_REPORT\nPORTFOLIO: p1")
+        monkeypatch.setattr(daily_runner, "poll_and_process_commands", lambda *a, **k: [parsed])
+        monkeypatch.setattr(daily_runner, "send_alert_email", lambda *a, **k: None)
+        calls = []
+        monkeypatch.setattr(daily_runner, "build_and_send_portfolio_report",
+                             lambda *a, **k: calls.append((a, k)) or True)
+
+        daily_runner.check_and_apply_email_commands(
+            ["p1"], ibkr_port=7497, dry_run=True, **self._portfolio_kwargs(),
+        )
+
+        assert calls[0][1]["report_type"] == "daily"
+
+    def test_live_mode_uses_real_broker_positions(self, monkeypatch):
+        self._configure_email_env(monkeypatch)
+        self._stub_prices(monkeypatch)
+        parsed = self._parsed("ACTION: TRIGGER_REPORT\nPORTFOLIO: p1")
+        monkeypatch.setattr(daily_runner, "poll_and_process_commands", lambda *a, **k: [parsed])
+        monkeypatch.setattr(daily_runner, "send_alert_email", lambda *a, **k: None)
+        monkeypatch.setattr(daily_runner, "get_ibkr_positions",
+                             lambda port: {"SPY": {"shares": 5.0, "avg_entry_price": 400.0}})
+        calls = []
+        monkeypatch.setattr(daily_runner, "build_and_send_portfolio_report",
+                             lambda *a, **k: calls.append((a, k)) or True)
+
+        # applies identically in --live mode (dry_run=False), unlike PAUSE/RESUME/etc.
+        daily_runner.check_and_apply_email_commands(
+            ["p1"], ibkr_port=7497, dry_run=False, **self._portfolio_kwargs(),
+        )
+
+        assert len(calls) == 1
+        args, kw = calls[0]
+        assert args[2] == {"SPY": {"shares": 5.0, "avg_entry_price": 400.0}}
+        assert args[6] is False  # dry_run
+
+    def test_no_portfolio_data_supplied_falls_back_to_manual_followthrough(self, monkeypatch):
+        # A caller that doesn't pass portfolios/resolved_total_values (e.g. an older
+        # integration, or a test only exercising other commands) must not crash, TRIGGER_REPORT
+        # degrades to the same manual-follow-through reply LIQUIDATE/ADJUST_PARAM get.
+        self._configure_email_env(monkeypatch)
+        parsed = self._parsed("ACTION: TRIGGER_REPORT\nPORTFOLIO: p1")
+        monkeypatch.setattr(daily_runner, "poll_and_process_commands", lambda *a, **k: [parsed])
+        sent = []
+        monkeypatch.setattr(daily_runner, "send_alert_email",
+                             lambda subject, body: sent.append((subject, body)))
+
+        daily_runner.check_and_apply_email_commands(["p1"], ibkr_port=7497, dry_run=True)
+
+        assert len(sent) == 1
+        assert "needs manual action" in sent[0][0]
+
+    def test_no_snapshot_yet_sends_explanatory_reply(self, monkeypatch):
+        self._configure_email_env(monkeypatch)
+        self._stub_prices(monkeypatch)
+        parsed = self._parsed("ACTION: TRIGGER_REPORT\nPORTFOLIO: p1")
+        monkeypatch.setattr(daily_runner, "poll_and_process_commands", lambda *a, **k: [parsed])
+        sent = []
+        monkeypatch.setattr(daily_runner, "send_alert_email",
+                             lambda subject, body: sent.append((subject, body)))
+        # build_and_send_portfolio_report()'s own real behavior: returns False when no
+        # snapshot exists yet (see TestBuildAndSendPortfolioReport).
+        monkeypatch.setattr(daily_runner, "build_and_send_portfolio_report", lambda *a, **k: False)
+
+        daily_runner.check_and_apply_email_commands(
+            ["p1"], ibkr_port=7497, dry_run=True, **self._portfolio_kwargs(),
+        )
+
+        assert len(sent) == 1
+        assert "no data yet" in sent[0][0]
+
+
 class TestTestEmailFlag:
     """
     --test-email must exit immediately based on run_email_diagnostics()'s result,

@@ -63,7 +63,7 @@ from .interfaces.notifications import (
 from .interfaces.email_commands import (
     poll_and_process_commands, PauseCommand, ResumeCommand, LiquidateCommand,
     SkipRebalanceCommand, StatusCommand, SetMaxDrawdownCommand, AlertsReportCommand,
-    log_command_attempt, build_reply_body, EMAIL_COMMANDS_LOG_PATH,
+    TriggerReportCommand, log_command_attempt, build_reply_body, EMAIL_COMMANDS_LOG_PATH,
 )
 from .core import functions_quant_extensions as fnx
 
@@ -862,18 +862,39 @@ def build_and_send_portfolio_report(
 
 
 def check_and_apply_email_commands(portfolio_names: list[str], ibkr_port: int, dry_run: bool,
-                                     send_email_command_feedback: bool = True) -> None:
+                                     send_email_command_feedback: bool = True,
+                                     portfolios: dict | None = None,
+                                     resolved_total_values: dict | None = None,
+                                     notification_cfg: dict | None = None,
+                                     macro_indicators: dict | None = None) -> None:
     """
     Polls for commands from the trusted sender and applies the ones that are
     safe to auto-apply (PAUSE/RESUME reuse the existing circuit-breaker halt
     mechanism; SKIP_NEXT_REBALANCE writes a one-time flag; STATUS replies
     immediately; SET_MAX_DRAWDOWN writes a tightening-only override, see
-    get_effective_max_drawdown_pct()). LIQUIDATE and ADJUST_PARAM are
+    get_effective_max_drawdown_pct(); TRIGGER_REPORT builds and sends a real
+    report immediately, see below). LIQUIDATE and ADJUST_PARAM are
     intentionally logged/alerted but NOT auto-applied here, they're
     high-impact enough to warrant a human reviewing the parsed command and
     applying it deliberately (LIQUIDATE via a manual place_orders_ibkr call,
     ADJUST_PARAM via editing config.yaml with the validated value) rather
     than a fully automatic pipeline.
+
+    TRIGGER_REPORT is read-only/side-effect-free (sends an email, changes
+    nothing about trading state), so unlike PAUSE/RESUME/SKIP_NEXT_REBALANCE
+    it applies in BOTH dry-run and --live mode, same category as STATUS/
+    ALERTS_REPORT above. It fetches ONLY what's needed to build a report
+    right then (that portfolio's latest prices, current positions via a real
+    broker query in --live or dry-run reconstruction, its resolved
+    total_value), deliberately NOT the full orphaned-ticker classification/
+    cross-portfolio overlap scoping the main per-portfolio loop does, this is
+    a lightweight on-demand path, not a rebalance. portfolios/
+    resolved_total_values/notification_cfg/macro_indicators are the data
+    main() already has in scope at its own call site, passed straight
+    through, no new fetching there. When portfolios/resolved_total_values
+    are not supplied (None, the default, e.g. a caller only exercising other
+    commands), TRIGGER_REPORT falls back to the old manual-follow-through
+    behavior rather than crashing.
 
     send_email_command_feedback : gates ACCEPTED/REJECTED/ERROR reply EMAILS
     only (notifications.send_email_command_feedback in config.yaml). Every
@@ -996,9 +1017,58 @@ def check_and_apply_email_commands(portfolio_names: list[str], ibkr_port: int, d
                         f"This can only TIGHTEN the effective threshold, never loosen it, the actual "
                         f"breaker will use whichever of config.yaml's value or this override is smaller.",
                     )
+                elif isinstance(cmd, TriggerReportCommand):
+                    if portfolios is None or resolved_total_values is None or name not in portfolios:
+                        # Data needed to build a real report wasn't supplied to this call
+                        # (e.g. a caller only exercising other commands), fall back to the
+                        # old manual-follow-through behavior rather than crashing.
+                        logger.warning("[%s] TRIGGER_REPORT parsed successfully but this caller "
+                                       "didn't supply portfolio data, requires MANUAL "
+                                       "follow-through: %s", name, cmd)
+                        _maybe_send(
+                            f"Email command needs manual action: {cmd.action} ({name})",
+                            f"Command parsed and validated successfully but is not auto-applied.\n"
+                            f"Action: {cmd.action}\nPortfolio: {name}\n\nReview and apply manually.",
+                        )
+                        continue
+                    spec = portfolios[name]
+                    cfg = spec["cfg"]
+                    tickers = spec["tickers"]
+                    total_value = resolved_total_values[name]
+                    trade_log_path = str(logs_dir() / f"live_trades_log_{name}.csv")
+                    if dry_run:
+                        current_positions = (
+                            reconstruct_dry_run_positions(trade_log_path)
+                            if cfg.persist_dry_run_state else {}
+                        )
+                    else:
+                        current_positions = with_retry(get_ibkr_positions, 3, 2.0, ibkr_port)
+                    from .execution.live_signal import fetch_live_prices, compute_required_lookback_days
+                    daily_prices = with_retry(
+                        fetch_live_prices, 3, 2.0, tickers,
+                        lookback_days=compute_required_lookback_days(cfg),
+                    )
+                    latest_prices = daily_prices.iloc[-1].to_dict() if not daily_prices.empty else {}
+                    report_type = cmd.report_type.lower()
+                    sent = build_and_send_portfolio_report(
+                        name, cfg, current_positions, latest_prices, trade_log_path,
+                        total_value, dry_run, notification_cfg or {}, macro_indicators or {},
+                        report_type=report_type,
+                    )
+                    if sent:
+                        logger.info("[%s] %s report sent via TRIGGER_REPORT email command.",
+                                    name, report_type)
+                    else:
+                        logger.warning("[%s] TRIGGER_REPORT requested but no portfolio "
+                                       "snapshot exists yet (no prior run), nothing to report.", name)
+                        _maybe_send(
+                            f"TRIGGER_REPORT: {name} (no data yet)",
+                            f"No portfolio snapshot exists yet for '{name}'; run daily-runner at "
+                            f"least once before requesting a report.",
+                        )
                 else:
-                    # LIQUIDATE / ADJUST_PARAM / TRIGGER_REPORT: flagged for manual
-                    # follow-through rather than auto-applied, see docstring.
+                    # LIQUIDATE / ADJUST_PARAM: flagged for manual follow-through rather than
+                    # auto-applied, see docstring.
                     logger.warning("[%s] Email command %s parsed successfully but requires MANUAL "
                                    "follow-through (not auto-applied): %s", name, cmd.action, cmd)
                     _maybe_send(
@@ -1289,20 +1359,27 @@ def main():
         cfg_raw.get("account_wide_max_drawdown_pct", 0.0),
     )
 
-    # --- Check for and apply email commands (opt-in, silent no-op if unconfigured) ---
+    # --- Macro indicators (Fed Funds Rate, CPI), fetched ONCE per run, not per-portfolio,
+    #     macro conditions apply market-wide, not per-ticker. Cached (see core/macro_data.py),
+    #     and the FRED_API_KEY presence check happens inside get_cached_or_fetch_macro_indicators()
+    #     before any network attempt, so an unconfigured key costs nothing every run. Fetched
+    #     BEFORE the email-commands check below (moved up from its old position after it) since
+    #     a TRIGGER_REPORT command needs it to build a real report immediately. ---
+    macro_indicators = get_cached_or_fetch_macro_indicators(fred_api_key=os.environ.get("FRED_API_KEY"))
+
+    # --- Check for and apply email commands (opt-in, silent no-op if unconfigured). Widened
+    #     with portfolios/resolved_total_values/notification_cfg/macro_indicators so
+    #     TRIGGER_REPORT can build and send a real report immediately, see that function's
+    #     own docstring. ---
     try:
         check_and_apply_email_commands(
             list(portfolios.keys()), args.port, dry_run=not args.live,
             send_email_command_feedback=notification_cfg.get("send_email_command_feedback", True),
+            portfolios=portfolios, resolved_total_values=resolved_total_values,
+            notification_cfg=notification_cfg, macro_indicators=macro_indicators,
         )
     except Exception as e:
         logger.warning("Email command check failed (non-fatal, continuing with normal run): %s", e)
-
-    # --- Macro indicators (Fed Funds Rate, CPI), fetched ONCE per run, not per-portfolio,
-    #     macro conditions apply market-wide, not per-ticker. Cached (see core/macro_data.py),
-    #     and the FRED_API_KEY presence check happens inside get_cached_or_fetch_macro_indicators()
-    #     before any network attempt, so an unconfigured key costs nothing every run. ---
-    macro_indicators = get_cached_or_fetch_macro_indicators(fred_api_key=os.environ.get("FRED_API_KEY"))
 
     # --- Time-based log retention for the two SHARED logs (alerts_log.csv, email_commands_log.csv),
     #     ONCE per run, not per-portfolio, see apply_shared_log_retention()'s own docstring for

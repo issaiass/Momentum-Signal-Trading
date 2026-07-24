@@ -122,3 +122,44 @@ An archive produced from a hash-chained log is itself a complete, independently 
 hash-chained log, `execution/live_signal.py`'s `verify_log_integrity(archive_path)` works on it
 unchanged, exactly as it does on the active file. An archive produced from the portfolio snapshot
 is a plain CSV with the same columns as the active file, just older rows.
+
+## A real, confirmed incident this mechanism was manually applied to retroactively
+
+`log_orders()`'s CSV schema gained a `transaction_amount` column at some point (inserted before
+`row_hash`, see `daily_runner.py`'s own bullet in `CLAUDE.md` for the feature this backs), which,
+per this document's own precedent, requires archiving any pre-existing `live_trades_log_<name>.csv`
+first, a fresh file with the new header. This didn't happen for `portfolio1`/`portfolio2` (unlike
+`portfolio1.csv.pre-money-invested-schema`, an EARLIER schema change that WAS archived manually,
+just under a descriptive name rather than the `.archive_<timestamp>.csv` convention
+`read_trade_log_with_archives()` globs for). Both files ended up with a stale 13-column header
+but a genuine MIX of 13-field (pre-change) and 14-field (post-change) data rows, confirmed via
+direct inspection, not guessed: `awk -F','`'s naive comma count is unreliable here (a quoted
+`"drift $14,399.22"`-style `reason` field with a thousands-comma inflates its count, a real false
+positive hit while diagnosing this), `csv.reader`/`pd.read_csv()` are quote-aware and authoritative.
+`pd.read_csv()` on either file raised `ParserError: Error tokenizing data. C error: Expected 13
+fields in line 91, saw 14` (`portfolio1`) / `..., saw 14` at line 122 (`portfolio2`), confirmed to
+have NOTHING to do with duplicate dates or any Docker/filesystem flakiness first suspected while
+diagnosing it (a real dead end, ruled out by directly reproducing the exact same error via
+`daily_runner.build_and_send_portfolio_report()` called in complete isolation, no CLI, no email
+commands, no container), the read failure was inside `measure_live_performance()` ->
+`read_trade_log_with_archives()` -> `pd.read_csv(trade_log_path)`, not the portfolio snapshot file
+at all. This had been silently latent since the schema change: nothing had done a full-history
+`pd.read_csv()` of either file since then, until the new `TRIGGER_REPORT` email command (see
+`docs/EMAIL_COMMANDS.md`) became the first code path to do so for `portfolio1` (`notifications.
+send_daily` being off meant the regular scheduled report never exercised it either).
+
+Fixed via a one-time manual migration script (not part of the shipped package, `core/audit_log.py`'s
+`rotate_hash_chained_log()` couldn't be reused directly for this, it always writes the SAME
+original header to both the archive and the rewritten active file, by design, since normal
+time-based rotation never needs to CORRECT a header, only split by date): rows were split by their
+ACTUAL field count (13 vs. 14, confirmed via `csv.reader`, not by date, a more robust criterion
+than trying to find the exact cutoff timestamp), the 13-field rows moved to a new
+`<path>.archive_<timestamp>.csv` (own correct old header, hash chain re-seeded from `GENESIS`,
+same convention as every other archive), the active file rewritten with only the 14-field rows
+under the CORRECTED 14-column header (hash chain also re-seeded from `GENESIS`). Verified after
+the fact: `pd.read_csv()` on both resulting active files, `read_trade_log_with_archives()`
+correctly reuniting active+archive into the full original row count (154 for `portfolio1`, 250
+for `portfolio2`), and `verify_log_integrity()` passing on all four resulting files (both active
+files, both archives). If this recurs for any log after a future schema change, prefer archiving
+the pre-existing file BEFORE the change ships (this document's own recommended practice) over a
+retroactive field-count-based migration.

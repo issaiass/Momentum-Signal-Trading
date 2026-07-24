@@ -218,6 +218,50 @@ class TestAlertsReportCommand:
         assert "not a valid integer" in result.error
 
 
+class TestTriggerReportCommand:
+    """
+    PARSING only (default/explicit REPORT_TYPE, invalid value rejected). The actual report
+    build + send is exercised end-to-end in tests/test_daily_runner.py, since that's where
+    build_and_send_portfolio_report()/current-positions fetching are wired together.
+    """
+
+    def test_parses_with_default_report_type_daily(self):
+        result = parse_command(TRUSTED, TRUSTED, "ACTION: TRIGGER_REPORT\nPORTFOLIO: portfolio1")
+        assert result.success is True
+        assert result.command.report_type == "DAILY"
+
+    def test_parses_with_explicit_report_type_monthly(self):
+        result = parse_command(
+            TRUSTED, TRUSTED,
+            "ACTION: TRIGGER_REPORT\nPORTFOLIO: portfolio1\nREPORT_TYPE: MONTHLY",
+        )
+        assert result.success is True
+        assert result.command.report_type == "MONTHLY"
+
+    def test_parses_with_explicit_report_type_daily(self):
+        result = parse_command(
+            TRUSTED, TRUSTED,
+            "ACTION: TRIGGER_REPORT\nPORTFOLIO: portfolio1\nREPORT_TYPE: DAILY",
+        )
+        assert result.success is True
+        assert result.command.report_type == "DAILY"
+
+    def test_report_type_is_case_insensitive(self):
+        result = parse_command(
+            TRUSTED, TRUSTED,
+            "ACTION: TRIGGER_REPORT\nPORTFOLIO: portfolio1\nREPORT_TYPE: monthly",
+        )
+        assert result.success is True
+        assert result.command.report_type == "MONTHLY"
+
+    def test_invalid_report_type_rejected_not_raised(self):
+        result = parse_command(
+            TRUSTED, TRUSTED,
+            "ACTION: TRIGGER_REPORT\nPORTFOLIO: portfolio1\nREPORT_TYPE: WEEKLY",
+        )
+        assert result.success is False
+
+
 class TestAuditLogging:
     """
     Every parsed attempt (accepted or rejected) must

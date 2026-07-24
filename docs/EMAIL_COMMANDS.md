@@ -104,7 +104,7 @@ PORTFOLIO: <portfolio_name or ALL>
 | `SKIP_NEXT_REBALANCE` | Yes (only in `--live` mode) | N/A | `ACTION: SKIP_NEXT_REBALANCE`<br>`PORTFOLIO: portfolio1` |
 | `STATUS` | Yes, read-only, always applies | N/A | `ACTION: STATUS`<br>`PORTFOLIO: portfolio1` |
 | `SET_MAX_DRAWDOWN` | Yes (only in `--live` mode), **tightening-only** | `VALUE:` (fraction 0-1) | `ACTION: SET_MAX_DRAWDOWN`<br>`PORTFOLIO: portfolio1`<br>`VALUE: 0.10` |
-| `TRIGGER_REPORT` | Parsed, logged | N/A | `ACTION: TRIGGER_REPORT`<br>`PORTFOLIO: portfolio1` |
+| `TRIGGER_REPORT` | Yes, read-only, always applies (both dry-run and `--live`) | `REPORT_TYPE:` (optional, `MONTHLY` or `DAILY`, default `DAILY`) | `ACTION: TRIGGER_REPORT`<br>`PORTFOLIO: portfolio1`<br>`REPORT_TYPE: MONTHLY` |
 | `LIQUIDATE` | **No, manual only** | `CONFIRM: I confirm liquidation` (exact phrase, case-insensitive) | `ACTION: LIQUIDATE`<br>`PORTFOLIO: portfolio1`<br>`CONFIRM: I confirm liquidation` |
 | `ADJUST_PARAM` | **No, manual only** | `PARAM:` (allowlisted name), `VALUE:` (number, within bounds) | `ACTION: ADJUST_PARAM`<br>`PORTFOLIO: portfolio1`<br>`PARAM: stop_loss_pct`<br>`VALUE: 0.15` |
 | `ALERTS_REPORT` | Yes, read-only, always applies | `LIMIT:` (optional, default 10, max 50) | `ACTION: ALERTS_REPORT`<br>`PORTFOLIO: portfolio1`<br>`LIMIT: 20` |
@@ -148,10 +148,19 @@ still wins), this can never be used to accidentally make the bot riskier.
   `daily_runner.py --resume-trading`).
 - **SKIP_NEXT_REBALANCE**, one-time flag, consumed on the next rebalance attempt (doesn't
   persist beyond one cycle).
-- **TRIGGER_REPORT / LIQUIDATE / ADJUST_PARAM**, parsed, validated, and logged/alerted, but
-  require you to take the actual action yourself (send the report manually, place the
-  liquidating trades yourself, or edit `config.yaml`'s `risk_overrides` with the validated
-  value).
+- **TRIGGER_REPORT**, read-only/side-effect-free, applies immediately (even in dry-run):
+  builds and sends a real MONTHLY or DAILY report (`REPORT_TYPE:`, default `DAILY`) via the
+  same `build_and_send_portfolio_report()` the scheduled report call sites use, so an
+  on-demand report can never diverge from what the scheduled one would show. Fetches only
+  that portfolio's latest prices and current positions (a real broker query in `--live`, or
+  dry-run reconstruction), not the full rebalance machinery, so it's fast. If no portfolio
+  snapshot exists yet (the portfolio has never completed a run), you get a reply explaining
+  that instead of a report. Like every email command, this is only picked up when
+  `daily_runner.py` actually runs and polls the inbox; today that's `DAILY_RUNNER_CRON`'s
+  schedule (once a day by default), a faster, dedicated polling cadence is planned separately.
+- **LIQUIDATE / ADJUST_PARAM**, parsed, validated, and logged/alerted, but require you to
+  take the actual action yourself (place the liquidating trades yourself, or edit
+  `config.yaml`'s `risk_overrides` with the validated value).
 - **ALERTS_REPORT**, read-only, replies immediately (even in dry-run) with the most
   recent `LIMIT` rows (default 10, capped at 50) from `logs/alerts_log.csv`, filtered to the
   requested portfolio (or every portfolio, for `ALL`). See `docs/ALERT_LOG.md`.

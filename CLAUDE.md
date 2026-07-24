@@ -1098,6 +1098,58 @@ that tests enforce, don't casually violate these when editing:
   `TestBenchmarkComparison::test_cumulative_return_math`'s own compounding-math assertion,
   caught before it shipped. Regression tests added for both fixed functions
   (`test_duplicate_same_day_rows_do_not_raise`, `tests/core/test_functions_quant_extensions.py`).
+  `TRIGGER_REPORT` (Epic 2, same plan) now genuinely auto-applies instead of only being logged
+  for manual follow-through: `interfaces/email_commands.py`'s `TriggerReportCommand` gained an
+  optional `report_type: Literal["MONTHLY", "DAILY"] = "DAILY"` field (parsed from an optional
+  `REPORT_TYPE:` email line, same optional-field convention as `SET_MAX_DRAWDOWN`'s `VALUE:`/
+  `ALERTS_REPORT`'s `LIMIT:`), and `check_and_apply_email_commands()` gained a new
+  `elif isinstance(cmd, TriggerReportCommand):` branch, pulled OUT of the generic
+  `LIQUIDATE`/`ADJUST_PARAM` manual-follow-through `else` bucket. Read-only/side-effect-free
+  (sends an email, changes nothing about trading state), so unlike `PAUSE`/`RESUME`/
+  `SKIP_NEXT_REBALANCE` it applies in BOTH dry-run and `--live` mode, same category as the
+  pre-existing `STATUS`/`ALERTS_REPORT` commands. `check_and_apply_email_commands()`'s
+  signature gained four new optional params (`portfolios`, `resolved_total_values`,
+  `notification_cfg`, `macro_indicators`, all `None` by default, byte-identical behavior for
+  every pre-existing call site that omits them, including every pre-existing test): `main()`'s
+  own call site now passes its already-computed `portfolios`/`resolved_total_values`/
+  `notification_cfg`/`macro_indicators` straight through, no new fetching there. This required
+  moving the `macro_indicators = get_cached_or_fetch_macro_indicators(...)` fetch to run
+  BEFORE the email-commands check (previously after it), a pure reordering, no behavior change
+  to the fetch itself, since a `TRIGGER_REPORT` needs it to build a report immediately. The new
+  branch fetches ONLY what a report needs right then, not the full per-portfolio rebalance
+  machinery (no orphaned-ticker classification, no `scope_overlapping_holdings()`): current
+  positions via a real `get_ibkr_positions()` broker query in `--live`, or
+  `reconstruct_dry_run_positions()` in dry-run (only if `cfg.persist_dry_run_state`, else `{}`,
+  matching the main per-portfolio loop's own default), and latest prices via
+  `fetch_live_prices()`/`compute_required_lookback_days()` (lazily imported inside the branch,
+  matching the existing lazy-import precedent for these two names elsewhere in this file), then
+  calls `build_and_send_portfolio_report()` (Epic 1) directly with the requested
+  `report_type.lower()`. When `portfolios`/`resolved_total_values` aren't supplied (e.g. an
+  older integration or a test only exercising other commands), `TRIGGER_REPORT` falls back to
+  the same manual-follow-through reply `LIQUIDATE`/`ADJUST_PARAM` get, rather than crashing.
+  When `build_and_send_portfolio_report()` returns `False` (no `portfolio_snapshot_<name>.csv`
+  exists yet, the portfolio has never completed a run), a dedicated reply explains that instead
+  of silence. See `docs/EMAIL_COMMANDS.md`'s updated command table and "What happens to each
+  command" section.
+  **A real, confirmed, pre-existing incident found and fixed while Docker-verifying
+  `TRIGGER_REPORT` against real accumulated data, unrelated to Epic 2's own code**:
+  `live_trades_log_portfolio1.csv`/`live_trades_log_portfolio2.csv` had a stale 13-column
+  header (predating a `transaction_amount` column added to `log_orders()`'s schema earlier
+  in this project's history) while containing a genuine mix of 13- and 14-field rows, making
+  `pd.read_csv()` raise `ParserError: ... Expected 13 fields ... saw 14` for the WHOLE file,
+  confirmed to be entirely unrelated to duplicate dates or Docker/filesystem flakiness first
+  suspected while diagnosing it, a real dead end ruled out by reproducing the identical error
+  via `build_and_send_portfolio_report()` called in complete isolation. Fixed via a one-time
+  manual migration (not part of the shipped package, `rotate_hash_chained_log()` couldn't be
+  reused directly since it always writes the SAME original header to both outputs by design):
+  rows split by ACTUAL field count into a `.archive_<timestamp>.csv` (old header, old rows,
+  re-chained from `GENESIS`) and a rewritten active file (corrected new header, new rows, also
+  re-chained), verified via `pd.read_csv()`, `read_trade_log_with_archives()`, and
+  `verify_log_integrity()` on all four resulting files. See `docs/LOG_RETENTION.md`'s "A real,
+  confirmed incident this mechanism was manually applied to retroactively" for the full
+  writeup, including the false-positive `awk`-based diagnostic dead end (quoted commas in a
+  dollar-formatted `reason` field defeat naive comma-splitting) worth knowing about before
+  trusting `awk -F','` as a diagnostic for any CSV in this project again.
 
 **Config flow**: `config.yaml` (gitignored; copy from `config.example.yaml`) →
 `daily_runner.load_config()` builds one `BacktestConfig` per portfolio from

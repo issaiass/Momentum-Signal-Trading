@@ -1879,6 +1879,25 @@ def main():
                 except Exception as e:
                     logger.warning("[%s] Daily report skipped due to error (non-fatal): %s", name, e)
 
+            # --- Monthly report, on the configured day of month, ALWAYS runs (Epic 4,
+            #     "Fast, Auto-Applied Email-Triggered Reports" plan), decoupled from the
+            #     rebalance gate below, same as the daily report just above. Previously nested
+            #     inside "if args.force_rebalance or is_rebalance_day(...)", so the monthly
+            #     report date ALSO had to independently be a rebalance day (or a forced one) or
+            #     it silently never fired that month; institutional scheduled reporting should
+            #     fire reliably on its own calendar, independent of whether a trading decision
+            #     happened that same day, matching the daily report's own already-correct
+            #     pattern. See docs/EMAIL_REPORTING.md. ---
+            report_day = notification_cfg.get("monthly_report_day_of_month")
+            if report_day and datetime.today().day == report_day:
+                try:
+                    build_and_send_portfolio_report(
+                        name, cfg, current_positions, latest_prices, trade_log_path, total_value,
+                        not args.live, notification_cfg, macro_indicators, report_type="monthly",
+                    )
+                except Exception as e:
+                    logger.warning("[%s] Monthly report skipped due to error (non-fatal): %s", name, e)
+
             # --- item 3: idempotent rebalance, item 2 rebalance gate ---
             if args.force_rebalance or is_rebalance_day(holding_period_months=cfg.holding_period):
                 if already_ran_today(f"rebalance_{name}") and not args.force_rebalance:

@@ -1619,6 +1619,89 @@ class TestTestEmailFlag:
         assert self._run_main_with_args(monkeypatch, ["--test-email"], False) == 1
 
 
+class TestMonthlyReportDecoupledFromRebalanceDay:
+    """
+    Epic 4, "Fast, Auto-Applied Email-Triggered Reports" plan: the monthly report must fire on
+    its own configured calendar day (notifications.monthly_report_day_of_month), independent of
+    whether today is ALSO a rebalance day, matching the daily report's own pre-existing pattern.
+    Previously nested inside "if args.force_rebalance or is_rebalance_day(...)", so a monthly
+    report date that didn't happen to also be a rebalance day silently never fired.
+
+    Drives main() through a REAL config.yaml on disk (matching TestCheckCommandsOnlyFlag's own
+    precedent), with fetch_live_prices mocked (no real network) and every log-writing/side-
+    effecting helper mocked or isolated to tmp_path, so the real per-portfolio ALWAYS-runs block
+    executes far enough to reach the monthly-report check, with build_and_send_portfolio_report()
+    itself mocked as a spy (already covered by TestBuildAndSendPortfolioReport) to isolate
+    exactly the ONE thing this epic changes: whether it's called at all.
+    """
+
+    def _write_config(self, tmp_path, sample_config_dict, notification_cfg):
+        cfg = dict(sample_config_dict)
+        cfg["notifications"] = notification_cfg
+        path = tmp_path / "config.yaml"
+        with open(path, "w") as f:
+            yaml.safe_dump(cfg, f)
+        return str(path)
+
+    def _common_mocks(self, monkeypatch, tmp_path):
+        import momentum_trading.execution.live_signal as live_signal
+        import numpy as np
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(daily_runner, "LOCK_DIR", tmp_path / "data")
+        monkeypatch.setattr(daily_runner, "ALERTS_LOG_PATH", str(tmp_path / "data" / "alerts_log.csv"))
+
+        dates = pd.bdate_range("2026-01-01", periods=30)
+        prices = pd.DataFrame({
+            "SPY": np.linspace(400, 410, 30), "QQQ": np.linspace(300, 310, 30),
+            "XLK": np.linspace(150, 160, 30),
+        }, index=dates)
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        monkeypatch.setattr(daily_runner, "get_cached_or_fetch_macro_indicators", lambda **k: {})
+        monkeypatch.setattr(daily_runner, "check_and_apply_email_commands", lambda *a, **k: None)
+        monkeypatch.setattr(daily_runner, "apply_shared_log_retention", lambda *a, **k: None)
+        monkeypatch.setattr(daily_runner, "apply_portfolio_log_retention", lambda *a, **k: None)
+        monkeypatch.setattr(daily_runner, "detect_and_log_config_change", lambda *a, **k: None)
+        monkeypatch.setattr(daily_runner, "write_portfolio_snapshot", lambda *a, **k: None)
+        monkeypatch.setattr(daily_runner, "send_alert_email", lambda *a, **k: None)
+        monkeypatch.setattr(daily_runner, "send_action_email", lambda *a, **k: None)
+        monkeypatch.setattr(daily_runner, "is_rebalance_day", lambda **k: False)
+
+    def test_monthly_report_fires_even_when_not_a_rebalance_day(self, tmp_path, monkeypatch, sample_config_dict):
+        from datetime import datetime
+        self._common_mocks(monkeypatch, tmp_path)
+        today_day = datetime.today().day
+        config_path = self._write_config(
+            tmp_path, sample_config_dict, {"monthly_report_day_of_month": today_day},
+        )
+        monkeypatch.setattr("sys.argv", ["daily-runner", "--config", config_path])
+
+        calls = []
+        monkeypatch.setattr(daily_runner, "build_and_send_portfolio_report",
+                             lambda *a, **k: calls.append(k.get("report_type")) or True)
+
+        daily_runner.main()
+
+        assert "monthly" in calls
+
+    def test_monthly_report_does_not_fire_on_a_different_day(self, tmp_path, monkeypatch, sample_config_dict):
+        from datetime import datetime
+        self._common_mocks(monkeypatch, tmp_path)
+        today_day = datetime.today().day
+        other_day = 1 if today_day != 1 else 2  # guaranteed to differ from today
+        config_path = self._write_config(
+            tmp_path, sample_config_dict, {"monthly_report_day_of_month": other_day},
+        )
+        monkeypatch.setattr("sys.argv", ["daily-runner", "--config", config_path])
+
+        calls = []
+        monkeypatch.setattr(daily_runner, "build_and_send_portfolio_report",
+                             lambda *a, **k: calls.append(k.get("report_type")) or True)
+
+        daily_runner.main()
+
+        assert "monthly" not in calls
+
+
 class TestCheckCommandsOnlyFlag:
     """
     --check-commands-only (Epic 3, "Fast, Auto-Applied Email-Triggered Reports" plan) is the

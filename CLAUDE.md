@@ -1166,6 +1166,26 @@ that tests enforce, don't casually violate these when editing:
   same deliberate not-env-var-driven friction as the main `daily-runner` line). See
   `docs/EMAIL_COMMANDS.md`'s new "Command latency" section and `docs/DEPLOYMENT.md`'s native
   Task Scheduler/cron equivalent (Path B, step 8).
+  The monthly report (Epic 4, same plan) is now decoupled from `is_rebalance_day()`: its
+  `report_day and datetime.today().day == report_day` check was moved out of the `if
+  args.force_rebalance or is_rebalance_day(...):` block and into the unconditional "ALWAYS
+  runs" section, right after the daily report block, calling `build_and_send_portfolio_report(
+  ..., report_type="monthly")` there instead, a pure call-site relocation, same
+  `current_positions`/`latest_prices`/`trade_log_path`/`total_value` already in scope. Fixes a
+  real gap: previously, a monthly report date that didn't happen to ALSO be a rebalance day (or
+  a forced one) silently never fired that month, e.g. a portfolio on a quarterly rebalance
+  cadence whose `monthly_report_day_of_month` doesn't land on one of those few rebalance dates.
+  The daily report never had this problem, it already lived in the unconditional block; this
+  epic brings the monthly report in line with that existing, correct pattern. One small,
+  deliberate deviation from a byte-identical relocation: the moved block is now wrapped in a
+  `try/except Exception -> logger.warning("[%s] Monthly report skipped due to error
+  (non-fatal): %s", ...)`, matching the daily report block right next to it (which already had
+  one) and every other ALWAYS-runs check in this function; the OLD, un-wrapped call site would
+  have let a report-building exception propagate to `main()`'s own outer
+  `except Exception -> sys.exit(1)`, aborting every REMAINING portfolio's rebalance for the
+  day, a real, newly-relevant risk once this check runs unconditionally rather than only
+  alongside an already-successful rebalance. See `docs/EMAIL_REPORTING.md`'s updated PERIODIC
+  section.
 
 **Config flow**: `config.yaml` (gitignored; copy from `config.example.yaml`) →
 `daily_runner.load_config()` builds one `BacktestConfig` per portfolio from

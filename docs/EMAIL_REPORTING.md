@@ -35,7 +35,9 @@ In `config.yaml`:
 notifications:
   send_standard: true             # routine rebalance summaries
   send_periodic: true             # monthly report
-  monthly_report_day_of_month: 1  # day of month the report fires; omit/null to disable
+  monthly_report_day_of_month: 1  # day of month the report fires, on its OWN calendar,
+                                   # independent of the rebalance schedule (same as send_daily
+                                   # below), omit/null to disable
   send_daily: false               # daily report, same content depth as the monthly report,
                                    # generated every day. Defaults to false (see above);
                                    # set true to opt in.
@@ -170,7 +172,13 @@ same rich-HTML look as the table above rather than a bare log line. This only fi
 here by design (the daily portfolio snapshot/stop-loss check still runs regardless, see
 `RUNNING.md`).
 
-**PERIODIC (monthly report)**, HTML email with:
+**PERIODIC (monthly report)**, fires on `notifications.monthly_report_day_of_month`'s own
+calendar day, in the per-portfolio ALWAYS-runs block, unconditionally (dry-run or `--live`),
+independent of whether today is also a rebalance day, same pattern as the DAILY report just
+below. Previously nested inside the rebalance-day gate, meaning a monthly report date that
+didn't happen to also be a rebalance day silently never fired that month, a real gap fixed for
+the same reason institutional scheduled reporting is expected to run reliably on its own
+calendar, not conditioned on whether a trading decision happened that same day. HTML email with:
 - An embedded portfolio-value-over-time chart (PNG, generated via matplotlib)
 - Current position summary (total value, cash, unrealized P&L), from the latest snapshot row
 - Actual P&L (realized, unrealized, total, trade count, total return), from

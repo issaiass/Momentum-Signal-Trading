@@ -867,6 +867,30 @@ that tests enforce, don't casually violate these when editing:
   ("Excluded")` derivation of the `EXCLUDED` action is already generic, confirmed by reading both,
   needed no change to pick up the new status. See `docs/RISK_CONSTRAINTS.md`'s "Technical-Indicator
   Entry Confirmation".
+  `use_volume_confirmation`/`volume_confirmation_lookback_days`/`volume_confirmation_min_ratio`
+  (`BacktestConfig`, Epic 4, "Institutional Momentum Best-Practice Gaps" plan, the last of the
+  four gaps found reviewing IBKR's own Quant momentum-trading articles, opt-in, `False` default
+  byte-identical to before) wire `core/functions_quant_extensions.py`'s NEW
+  `volume_confirmation_filter()` into selection, distinct from `use_liquidity_filter` (an
+  ABSOLUTE dollar-volume tradability threshold): this is a RELATIVE volume-TREND confirmation of
+  the price move itself, Part I's "rising volume confirms the move." The trailing
+  `volume_confirmation_lookback_days` window (default `20`) splits into two equal halves,
+  eligible only if `recent_half_avg_volume / earlier_half_avg_volume >=
+  volume_confirmation_min_ratio` (default `1.0`, at least flat-or-rising participation). Applied
+  right after the technical-confirmation filter, in both `run()` and `core/strategy_signals.py`'s
+  `generate_strategy_monthly_picks()`. The existing OHLCV fetch gate widened from `if
+  cfg.use_liquidity_filter and not ranks.empty:` to `if (cfg.use_liquidity_filter or
+  cfg.use_volume_confirmation) and not ranks.empty:`, so the SAME already-fetched `df_volume` now
+  feeds both filters, zero extra API calls when both are enabled, one shared fetch when only
+  `use_volume_confirmation` is. `generate_strategy_monthly_picks()`'s pre-existing `daily_volume`
+  param is likewise now shared: `use_volume_confirmation=True` without `daily_volume` supplied
+  raises the same loud `ValueError` precedent `use_liquidity_filter` already established. A new
+  `pre_volume_ranks_row` snapshot (captured after the technical filter but before this one) gives
+  a volume-excluded ticker its own `"Excluded (Low Volume Confirmation)"`
+  `full_signal_universe`/`selection_status`, distinguishable from every other exclusion reason;
+  `log_signal_rankings()`'s/`notifications.py`'s existing `startswith("Excluded")` derivation
+  needed no change, confirmed generic. See `docs/RISK_CONSTRAINTS.md`'s "Volume-Confirmed Signal
+  Quality".
   `compute_target_weights()`'s regime filter block now also blends in `cfg.regime_vol_threshold`
   (see `BacktestConfig`'s own bullet above for the shared formula and backtest-parity
   implementation): when set, the regime benchmark's trailing realized volatility

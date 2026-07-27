@@ -463,6 +463,22 @@ class BacktestConfig:
     technical_confirmation_require_macd_bullish: bool = False  # MACD line must be above its
                                              # signal line
 
+    # --- Volume-confirmed signal quality (Epic 4, "Institutional Momentum Best-Practice Gaps"
+    #     plan), an opt-in HARD GATE, LIVE + BACKTEST. Distinct from use_liquidity_filter above
+    #     (an absolute dollar-volume tradability THRESHOLD): this is a relative volume-TREND
+    #     confirmation of the price move itself, a ticker can pass the liquidity filter (plenty
+    #     of absolute volume) while failing this one (that volume is flat or declining). False
+    #     default is byte-identical to before this existed. Reuses the SAME daily_volume data
+    #     already threaded through for use_liquidity_filter, no new fetch. See
+    #     core/functions_quant_extensions.py's volume_confirmation_filter() and
+    #     docs/RISK_CONSTRAINTS.md's "Volume-Confirmed Signal Quality". ---
+    use_volume_confirmation: bool = False
+    volume_confirmation_lookback_days: int = 20  # split into two equal halves (recent vs
+                                             # earlier), volume_confirmation_filter()'s own default
+    volume_confirmation_min_ratio: float = 1.0   # recent-half-avg-volume / earlier-half-avg-
+                                             # volume required to remain eligible; 1.0 = at least
+                                             # flat-or-rising participation
+
     # --- Additional execution safety checks ---
     max_dollar_drawdown: float | None = None       # e.g. 500.0, halt if equity drops this many $ from peak, independent of the % breaker
     max_slippage_tolerance_pct: float | None = None  # e.g. 0.02, alert (not un-fill) if actual fill deviates from expected price by more than this
@@ -554,6 +570,13 @@ class BacktestConfig:
                 f"technical_confirmation_min_sma_window ({self.technical_confirmation_min_sma_window}) "
                 f"should be >= 1 or None"
             )
+        if self.volume_confirmation_lookback_days < 2:
+            errors.append(
+                f"volume_confirmation_lookback_days ({self.volume_confirmation_lookback_days}) "
+                f"must be >= 2 (split into two equal halves)"
+            )
+        if self.volume_confirmation_min_ratio <= 0:
+            errors.append(f"volume_confirmation_min_ratio ({self.volume_confirmation_min_ratio}) must be > 0")
         if not isinstance(self.ticker_risk_overrides, dict):
             errors.append(f"ticker_risk_overrides ({self.ticker_risk_overrides!r}) must be a dict")
         else:

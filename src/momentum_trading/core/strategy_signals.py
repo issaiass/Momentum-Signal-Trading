@@ -30,7 +30,9 @@ import pandas as pd
 
 from ..backtest.momentum_backtest import BacktestConfig
 from ..execution.live_signal import resolve_momentum_scores, assign_ranks
-from .functions_quant_extensions import blend_momentum_scores, liquidity_filter, technical_confirmation_filter
+from .functions_quant_extensions import (
+    blend_momentum_scores, liquidity_filter, technical_confirmation_filter, volume_confirmation_filter,
+)
 from .fundamentals import get_cached_or_fetch_fundamentals
 
 # strategy_type values whose SCORING is identical to the base per-ticker trailing-return score
@@ -428,13 +430,15 @@ def generate_strategy_monthly_picks(
 
     daily_volume : optional, backtest-side counterpart to execution/live_signal.py's run()'s
     live liquidity-filter wiring (see that function's own docstring for the full mechanism and
-    its absolute_momentum caveat). Only consulted when cfg.use_liquidity_filter is True; unlike
-    the fundamentals point-in-time-bias case above, historical volume genuinely exists and
-    applying it here is NOT a look-ahead risk, so a caller that enables the flag WITHOUT
-    supplying daily_volume gets a loud ValueError, not a silent no-op, matching the
-    hybrid_multi_factor precedent above of failing loud rather than guessing. cfg.
-    use_liquidity_filter False (the default) makes this param irrelevant, byte-identical to
-    before it existed.
+    its absolute_momentum caveat). Consulted when cfg.use_liquidity_filter OR
+    cfg.use_volume_confirmation (Epic 4, "Institutional Momentum Best-Practice Gaps" plan) is
+    True, the SAME data feeding both, an absolute dollar-volume threshold for the former, a
+    relative recent-vs-earlier volume-trend ratio for the latter. Unlike the fundamentals
+    point-in-time-bias case above, historical volume genuinely exists and applying it here is
+    NOT a look-ahead risk, so a caller that enables either flag WITHOUT supplying daily_volume
+    gets a loud ValueError, not a silent no-op, matching the hybrid_multi_factor precedent above
+    of failing loud rather than guessing. Both flags False (the default) makes this param
+    irrelevant, byte-identical to before it existed.
     """
     if getattr(cfg, "strategy_type", "momentum") == "hybrid_multi_factor":
         raise NotImplementedError(
@@ -451,6 +455,13 @@ def generate_strategy_monthly_picks(
             "point-in-time fundamentals), so this fails loud rather than silently skipping "
             "the requested liquidity constraint. Pass a {ticker: daily volume} DataFrame."
         )
+    if cfg.use_volume_confirmation and daily_volume is None:
+        raise ValueError(
+            "generate_strategy_monthly_picks(): cfg.use_volume_confirmation is True but "
+            "daily_volume was not provided. Historical volume genuinely exists (unlike "
+            "point-in-time fundamentals), so this fails loud rather than silently skipping "
+            "the requested volume-confirmation constraint. Pass a {ticker: daily volume} DataFrame."
+        )
     scores = resolve_strategy_scores(daily_prices, tickers, cfg, lookback_period).dropna(how="all")
     ranks = assign_ranks(scores)
     if cfg.use_liquidity_filter and daily_volume is not None:
@@ -460,6 +471,10 @@ def generate_strategy_monthly_picks(
         ranks = technical_confirmation_filter(
             ranks, daily_prices[tickers], cfg.technical_confirmation_min_sma_window,
             cfg.technical_confirmation_max_rsi, cfg.technical_confirmation_require_macd_bullish,
+        )
+    if cfg.use_volume_confirmation and daily_volume is not None:
+        ranks = volume_confirmation_filter(
+            ranks, daily_volume, cfg.volume_confirmation_lookback_days, cfg.volume_confirmation_min_ratio,
         )
     picks = {}
     for date in ranks.index:

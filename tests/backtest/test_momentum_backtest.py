@@ -82,6 +82,22 @@ class TestBacktestConfigValidation:
         with pytest.raises(ValueError, match="technical_confirmation_min_sma_window"):
             BacktestConfig(use_technical_confirmation=True, technical_confirmation_min_sma_window=0)
 
+    def test_use_volume_confirmation_defaults_false(self):
+        assert BacktestConfig().use_volume_confirmation is False
+
+    def test_volume_confirmation_defaults(self):
+        cfg = BacktestConfig()
+        assert cfg.volume_confirmation_lookback_days == 20
+        assert cfg.volume_confirmation_min_ratio == 1.0
+
+    def test_invalid_volume_confirmation_lookback_days_raises(self):
+        with pytest.raises(ValueError, match="volume_confirmation_lookback_days"):
+            BacktestConfig(volume_confirmation_lookback_days=1)
+
+    def test_invalid_volume_confirmation_min_ratio_raises(self):
+        with pytest.raises(ValueError, match="volume_confirmation_min_ratio"):
+            BacktestConfig(volume_confirmation_min_ratio=0)
+
     def test_ticker_sectors_non_dict_raises(self):
         with pytest.raises(ValueError, match="ticker_sectors"):
             BacktestConfig(ticker_sectors=["XLK"])

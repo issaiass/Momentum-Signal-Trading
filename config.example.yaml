@@ -549,6 +549,20 @@ default_risk:
   technical_confirmation_require_macd_bullish: false  # true = MACD line must be above its
                                        # signal line to remain eligible
 
+  # Volume-confirmed signal quality, LIVE + BACKTEST, an opt-in HARD GATE. Distinct from
+  # use_liquidity_filter above (an absolute dollar-volume tradability THRESHOLD): this is a
+  # relative volume-TREND confirmation of the price move itself, "rising volume confirms the
+  # move." False default is byte-identical to before this existed. Reuses the SAME volume data
+  # already fetched for use_liquidity_filter, no new fetch. See docs/RISK_CONSTRAINTS.md's
+  # "Volume-Confirmed Signal Quality".
+  use_volume_confirmation: false
+  volume_confirmation_lookback_days: 20   # split into two equal halves (recent 10 days vs.
+                                       # earlier 10 days)
+  volume_confirmation_min_ratio: 1.0      # recent-half-avg-volume / earlier-half-avg-volume
+                                       # required to remain eligible; 1.0 = at least
+                                       # flat-or-rising participation, a higher value requires an
+                                       # accelerating volume trend
+
   # Backtest-only (research/notebook use, no effect on daily-runner). run_risk_managed_backtest()
   # is the ONLY consumer of every field in this block, none of them are read anywhere in the
   # --live or dry-run execution path, setting these in a portfolio's risk_overrides has zero

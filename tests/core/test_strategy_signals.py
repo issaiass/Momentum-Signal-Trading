@@ -571,6 +571,48 @@ class TestGenerateStrategyMonthlyPicks:
         for tickers in picks.values:
             assert "C" not in tickers
 
+    def test_use_volume_confirmation_off_is_byte_identical(self):
+        # Epic 4 ("Institutional Momentum Best-Practice Gaps" plan): daily_volume passed but the
+        # flag is off (default), must not change picks at all.
+        prices = _synthetic_prices()
+        volume = pd.DataFrame({t: np.full(len(prices), 10_000.0) for t in ["A", "B", "C"]}, index=prices.index)
+        cfg = BacktestConfig(holding_period=1, lookback_period=3)
+        without_volume = generate_strategy_monthly_picks(prices, ["A", "B", "C"], cfg, cfg.lookback_period, top_n=2)
+        with_volume = generate_strategy_monthly_picks(prices, ["A", "B", "C"], cfg, cfg.lookback_period,
+                                                        top_n=2, daily_volume=volume)
+        for date in without_volume.index:
+            assert set(without_volume[date]) == set(with_volume[date])
+
+    def test_use_volume_confirmation_on_without_daily_volume_raises(self):
+        prices = _synthetic_prices()
+        cfg = BacktestConfig(holding_period=1, lookback_period=3, use_volume_confirmation=True)
+        with pytest.raises(ValueError, match="daily_volume"):
+            generate_strategy_monthly_picks(prices, ["A", "B", "C"], cfg, cfg.lookback_period, top_n=2)
+
+    def test_declining_volume_ticker_never_selected_even_if_top_ranked(self):
+        # C is given the STRONGEST momentum (would be rank 1 every date) but its trading volume
+        # PERSISTENTLY declines (recent-half always below earlier-half at any rebalance date),
+        # failing the min_ratio=1.0 "at least flat-or-rising participation" check, must never be
+        # selected despite otherwise being the best signal.
+        dates = pd.bdate_range("2023-01-01", periods=400)
+        rng = np.random.default_rng(7)
+        prices = pd.DataFrame({
+            "A": 100 * np.cumprod(1 + rng.normal(0.0003, 0.01, 400)),
+            "B": 100 * np.cumprod(1 + rng.normal(0.0002, 0.01, 400)),
+            "C": 100 * np.cumprod(1 + rng.normal(0.002, 0.01, 400)),  # strongest drift
+        }, index=dates)
+        volume = pd.DataFrame({
+            "A": np.full(400, 100_000.0), "B": np.full(400, 100_000.0),
+            "C": np.linspace(300_000.0, 50_000.0, 400),  # persistently declining participation
+        }, index=dates)
+        cfg = BacktestConfig(holding_period=1, lookback_period=3,
+                              use_volume_confirmation=True, volume_confirmation_min_ratio=1.0)
+        picks = generate_strategy_monthly_picks(prices, ["A", "B", "C"], cfg, cfg.lookback_period,
+                                                  top_n=1, daily_volume=volume)
+        assert not picks.empty
+        for tickers in picks.values:
+            assert "C" not in tickers
+
     def test_negative_universe_cash_filter_produces_explicit_empty_picks(self):
         # Epic 6, backtest side: a synthetic universe with a strong, consistent NEGATIVE drift
         # (every trailing window's return negative) must produce explicit [] entries, not

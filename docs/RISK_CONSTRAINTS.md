@@ -634,6 +634,54 @@ and `logs/signal_rankings_log_<portfolio>.csv` as `"Excluded (Technical)"` (`act
 liquidity filter but before this one, so the two exclusion reasons are never conflated when both
 are enabled at once).
 
+## Volume-Confirmed Signal Quality [New] [`use_volume_confirmation`]
+
+The last of the four gaps found reviewing IBKR's Quant "Momentum Trading" Parts I & II against
+this codebase: Part I states plainly that rising volume confirms a momentum move. The Liquidity
+/ Universe Filter above already exists, but it checks something different: an ABSOLUTE
+dollar-volume THRESHOLD (tradability, "can I actually execute this size"). Nothing previously
+checked the RELATIVE volume TREND, whether a ticker's own participation is confirming its price
+move or merely coasting on stale, declining interest. A ticker can easily pass the liquidity
+filter (plenty of absolute dollar volume) while failing this one (that volume is flat or
+declining, not rising to confirm the move).
+
+**Formula**: the trailing `volume_confirmation_lookback_days` window (default `20`) splits into
+two EQUAL halves, the RECENT half (closest to the rebalance date) and the EARLIER half
+(immediately before it). A ticker remains eligible only if
+`recent_half_avg_volume / earlier_half_avg_volume >= volume_confirmation_min_ratio`.
+`min_ratio: 1.0` (the default) requires at least flat-or-rising participation; a higher value
+demands an accelerating volume trend.
+
+```yaml
+risk_overrides:
+  use_volume_confirmation: true
+  volume_confirmation_lookback_days: 20   # default, split into two 10-day halves
+  volume_confirmation_min_ratio: 1.0      # default, at least flat-or-rising participation
+```
+
+**LIVE + BACKTEST parity, and zero new plumbing on the live side**: `core/functions_quant_
+extensions.py`'s `volume_confirmation_filter()` (a new function, same "zero out ineligible
+(ticker, date) ranks" shape as `liquidity_filter()`) is applied at the same rank-NaN'ing point,
+right after the Technical-Indicator Entry Confirmation filter. On the LIVE side
+(`execution/live_signal.py`'s `run()`), it reuses the EXACT SAME `fetch_ohlcv_for_tickers()`
+volume fetch already gated for `use_liquidity_filter`, now gated on `use_liquidity_filter OR
+use_volume_confirmation`, so enabling this feature costs no additional API call when the
+liquidity filter is also on, and only one extra fetch (same call, same shape) when it's the only
+one enabled. On the BACKTEST side (`core/strategy_signals.py`'s
+`generate_strategy_monthly_picks()`), it reuses the SAME `daily_volume` parameter already
+threaded through for the liquidity filter; enabling `use_volume_confirmation` WITHOUT supplying
+`daily_volume` raises a loud `ValueError`, same "historical volume genuinely exists, fail loud
+rather than silently skip" precedent the liquidity filter and `hybrid_multi_factor` both
+established.
+
+A ticker excluded by this filter appears in the rebalance email's "Full Signal Universe" table
+and `logs/signal_rankings_log_<portfolio>.csv` as `"Excluded (Low Volume Confirmation)"`
+(`action = "EXCLUDED"`), distinguishable from every other exclusion reason via a third
+pre/post-rank snapshot (`pre_volume_ranks_row`, captured after the technical-confirmation filter
+but before this one), the same chained-snapshot technique now used for all three opt-in
+selection filters, so a ticker excluded by more than one enabled filter is always attributed to
+whichever ran FIRST in the pipeline (liquidity, then technical, then volume), never conflated.
+
 ## Regime Filter: Volatility Dimension
 
 The pre-existing regime filter (see "Absolute Momentum (Macro)" above) only ever looked at ONE

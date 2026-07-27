@@ -63,7 +63,9 @@ from ..backtest.momentum_backtest import (
     compute_vol_scalar,
     resolve_ticker_stop_loss_pct,
 )
-from ..core.functions_quant_extensions import absolute_momentum_overlay, liquidity_filter, technical_confirmation_filter
+from ..core.functions_quant_extensions import (
+    absolute_momentum_overlay, liquidity_filter, technical_confirmation_filter, volume_confirmation_filter,
+)
 
 logger = logging.getLogger("live_signal")
 if not logger.handlers:
@@ -2489,17 +2491,25 @@ def run(
     #     illiquid ticker with positive absolute momentum is NOT excluded by this filter under
     #     that one strategy_type today, a known, documented gap, not silently glossed over, see
     #     docs/RISK_CONSTRAINTS.md's "Liquidity / Universe Filter". ---
-    if cfg.use_liquidity_filter and not ranks.empty:
+    #
+    #     The OHLCV fetch below is shared with the Volume-Confirmed Signal Quality filter further
+    #     down (Epic 4, "Institutional Momentum Best-Practice Gaps" plan): both need the SAME
+    #     daily volume data (an absolute dollar-volume threshold for this filter, a relative
+    #     recent-vs-earlier volume-trend ratio for that one), fetched at most once per rebalance
+    #     regardless of which one(s) are enabled.
+    df_volume = None
+    if (cfg.use_liquidity_filter or cfg.use_volume_confirmation) and not ranks.empty:
         ohlcv = fetch_ohlcv_for_tickers(tickers, fmp_api_key=fmp_api_key, eodhd_api_key=eodhd_api_key)
         volume_by_ticker = {t: df["volume"] for t, df in ohlcv.items() if "volume" in df.columns}
         if volume_by_ticker:
             df_volume = pd.DataFrame(volume_by_ticker)
-            ranks = liquidity_filter(ranks, daily_prices[tickers], df_volume,
-                                      cfg.min_avg_dollar_volume, cfg.liquidity_lookback_days)
         else:
-            logger.warning("[%s] use_liquidity_filter is set but no volume data could be "
-                            "fetched for any ticker, liquidity filter skipped this rebalance.",
-                            portfolio)
+            logger.warning("[%s] use_liquidity_filter/use_volume_confirmation is set but no "
+                            "volume data could be fetched for any ticker, both filters skipped "
+                            "this rebalance.", portfolio)
+    if cfg.use_liquidity_filter and df_volume is not None:
+        ranks = liquidity_filter(ranks, daily_prices[tickers], df_volume,
+                                  cfg.min_avg_dollar_volume, cfg.liquidity_lookback_days)
 
     # Captured AFTER the liquidity filter (if any) but BEFORE the technical-confirmation filter
     # (if any), so a ticker excluded specifically by the LATTER can be distinguished from one
@@ -2519,6 +2529,22 @@ def run(
         ranks = technical_confirmation_filter(
             ranks, daily_prices[tickers], cfg.technical_confirmation_min_sma_window,
             cfg.technical_confirmation_max_rsi, cfg.technical_confirmation_require_macd_bullish,
+        )
+
+    # Captured AFTER the technical-confirmation filter (if any) but BEFORE the volume-
+    # confirmation filter (if any), same pre/post-snapshot technique as
+    # pre_liquidity_ranks_row/pre_technical_ranks_row above.
+    pre_volume_ranks_row = ranks.iloc[-1] if not ranks.empty else None
+
+    # --- Volume-confirmed signal quality (opt-in, cfg.use_volume_confirmation, Epic 4,
+    #     "Institutional Momentum Best-Practice Gaps" plan): excludes a ticker whose recent
+    #     trading volume isn't at least volume_confirmation_min_ratio times its own earlier
+    #     volume, a relative volume-TREND confirmation of the price move, distinct from
+    #     use_liquidity_filter's absolute dollar-volume THRESHOLD above. Reuses the SAME
+    #     df_volume already fetched for that filter, no new OHLCV fetch. ---
+    if cfg.use_volume_confirmation and df_volume is not None:
+        ranks = volume_confirmation_filter(
+            ranks, df_volume, cfg.volume_confirmation_lookback_days, cfg.volume_confirmation_min_ratio,
         )
 
     latest_scores = scores.iloc[-1] if not scores.empty else None
@@ -2654,10 +2680,17 @@ def run(
                     and pre_technical_ranks_row is not None
                     and t in pre_technical_ranks_row.index and pd.notna(pre_technical_ranks_row[t])
                 )
+                was_volume_filtered = (
+                    cfg.use_volume_confirmation and rank is None
+                    and pre_volume_ranks_row is not None
+                    and t in pre_volume_ranks_row.index and pd.notna(pre_volume_ranks_row[t])
+                )
                 if was_liquidity_filtered:
                     status = "Excluded (Illiquid)"
                 elif was_technical_filtered:
                     status = "Excluded (Technical)"
+                elif was_volume_filtered:
+                    status = "Excluded (Low Volume Confirmation)"
                 elif score < 0:
                     status = "Excluded (Negative Momentum)"
                 else:

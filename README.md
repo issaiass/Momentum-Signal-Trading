@@ -111,7 +111,13 @@ README says so on purpose.
   stop-loss distance and `risk_per_trade_pct` so a full stop-out loses a fixed fraction of
   capital (the standard CTA/Van Tharp "risk 1-2% per trade" rule), the only one of the four that
   doesn't force full investment, aggregate exposure emerges from the risk budget instead, see
-  `docs/RISK_CONSTRAINTS.md`'s "Risk-Based Position Sizing" section. Regime
+  `docs/RISK_CONSTRAINTS.md`'s "Risk-Based Position Sizing" section. Volume-confirmed signal
+  quality (`use_volume_confirmation`, opt-in, LIVE + BACKTEST): distinct from the liquidity
+  filter's absolute dollar-volume threshold, this is a relative volume-TREND confirmation of the
+  price move itself, a ticker's recent trading volume must be at least
+  `volume_confirmation_min_ratio` times its own earlier volume to remain eligible, reusing the
+  same fetched volume data as the liquidity filter, no extra API calls, see
+  `docs/RISK_CONSTRAINTS.md`'s "Volume-Confirmed Signal Quality" section. Regime
   filter volatility dimension
   (`regime_vol_threshold`, opt-in, `None` default byte-identical to before, LIVE + BACKTEST):
   blends the regime benchmark's own trailing realized volatility into the existing SMA-trend

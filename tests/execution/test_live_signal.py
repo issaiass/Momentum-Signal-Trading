@@ -1038,7 +1038,7 @@ class TestRunLiquidityFilter:
                 tickers=["A", "B", "C"], current_holdings={}, total_value=1000.0, cfg=cfg,
                 top_n=1, lookback_period=1.0, dry_run=True, **self._run_kwargs(tmp_path),
             )
-        assert "liquidity filter skipped" in caplog.text
+        assert "filters skipped" in caplog.text
         assert set(orders.keys()) == {"C"}  # filter effectively a no-op when no volume at all
 
 
@@ -1129,6 +1129,108 @@ class TestRunTechnicalConfirmation:
 
         statuses = {t: info["selection_status"] for t, info in orders.full_signal_universe.items()}
         assert "Excluded (Technical)" not in statuses.values()
+
+
+class TestRunVolumeConfirmation:
+    """
+    cfg.use_volume_confirmation end-to-end through run() (Epic 4, "Institutional Momentum
+    Best-Practice Gaps" plan): wired right after the technical-confirmation filter, reusing the
+    SAME OHLCV/volume fetch already threaded through for use_liquidity_filter, no new fetch.
+    """
+
+    def _ranked_prices(self, seed=11):
+        dates = pd.bdate_range("2024-01-01", "2024-05-15")
+        rng = np.random.default_rng(seed)
+        n = len(dates)
+        a = np.linspace(50, 70, n) * (1 + rng.normal(0, 0.0005, n))
+        b = np.linspace(50, 65, n) * (1 + rng.normal(0, 0.0005, n))
+        c = np.linspace(50, 120, n) * (1 + rng.normal(0, 0.0005, n))
+        return pd.DataFrame({"A": a, "B": b, "C": c}, index=dates)
+
+    def _install_declining_volume(self, monkeypatch, prices, declining_ticker="C"):
+        n = len(prices)
+        def fake_ohlcv(tickers, **k):
+            result = {}
+            for t in tickers:
+                vol = np.linspace(200_000.0, 20_000.0, n) if t == declining_ticker else np.full(n, 100_000.0)
+                result[t] = pd.DataFrame({
+                    "open": prices[t], "high": prices[t], "low": prices[t], "close": prices[t],
+                    "volume": vol,
+                }, index=prices.index)
+            return result
+        monkeypatch.setattr(live_signal, "fetch_ohlcv_for_tickers", fake_ohlcv)
+
+    def _run_kwargs(self, tmp_path):
+        return dict(
+            log_path=str(tmp_path / "trade_log.csv"),
+            signal_rankings_log_path=str(tmp_path / "signal_rankings_log.csv"),
+            alerts_log_path=str(tmp_path / "alerts_log.csv"),
+        )
+
+    def test_declining_volume_top_ranked_ticker_is_never_selected(self, monkeypatch, tmp_path):
+        prices = self._ranked_prices()
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        self._install_declining_volume(monkeypatch, prices)
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False,
+                              use_volume_confirmation=True, volume_confirmation_min_ratio=1.0)
+        orders = live_signal.run(
+            tickers=["A", "B", "C"], current_holdings={}, total_value=1000.0, cfg=cfg,
+            top_n=1, lookback_period=1.0, dry_run=True, **self._run_kwargs(tmp_path),
+        )
+
+        assert "C" not in orders  # never picked despite being the strongest signal
+        assert orders.picks_were_empty is False  # a real pick (A or B) still made it through
+
+    def test_default_disabled_is_byte_identical(self, monkeypatch, tmp_path):
+        prices = self._ranked_prices()
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        self._install_declining_volume(monkeypatch, prices)
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False)  # flag omitted, default False
+        orders = live_signal.run(
+            tickers=["A", "B", "C"], current_holdings={}, total_value=1000.0, cfg=cfg,
+            top_n=1, lookback_period=1.0, dry_run=True, **self._run_kwargs(tmp_path),
+        )
+
+        # C has the strongest momentum and, with the filter OFF, must be picked as before.
+        assert set(orders.keys()) == {"C"}
+
+    def test_filtered_ticker_shows_excluded_low_volume_confirmation_not_watchlist(self, monkeypatch, tmp_path):
+        prices = self._ranked_prices()
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        self._install_declining_volume(monkeypatch, prices)
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False,
+                              use_volume_confirmation=True, volume_confirmation_min_ratio=1.0)
+        orders = live_signal.run(
+            tickers=["A", "B", "C"], current_holdings={}, total_value=1000.0, cfg=cfg,
+            top_n=1, lookback_period=1.0, dry_run=True, **self._run_kwargs(tmp_path),
+        )
+
+        universe = orders.full_signal_universe
+        assert "C" in universe  # not silently invisible
+        assert universe["C"]["selection_status"] == "Excluded (Low Volume Confirmation)"
+        assert universe["C"]["rank"] is None  # NaN-ranked, correctly blank not a stale number
+        assert universe["C"]["signal_score"] > 0  # positive momentum, excluded for volume only
+
+    def test_volume_confirmation_flag_off_never_produces_that_status(self, monkeypatch, tmp_path):
+        prices = self._ranked_prices()
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        self._install_declining_volume(monkeypatch, prices)
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False)  # flag omitted, default False
+        orders = live_signal.run(
+            tickers=["A", "B", "C"], current_holdings={}, total_value=1000.0, cfg=cfg,
+            top_n=1, lookback_period=1.0, dry_run=True, **self._run_kwargs(tmp_path),
+        )
+
+        statuses = {t: info["selection_status"] for t, info in orders.full_signal_universe.items()}
+        assert "Excluded (Low Volume Confirmation)" not in statuses.values()
 
 
 class TestRunMultiTimeframeComposite:

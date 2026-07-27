@@ -78,6 +78,65 @@ def liquidity_filter(
 
 
 # --------------------------------------------------------------------------- #
+# VOLUME-CONFIRMED SIGNAL QUALITY (Epic 4, "Institutional Momentum
+# Best-Practice Gaps" plan)
+# --------------------------------------------------------------------------- #
+def volume_confirmation_filter(
+    df_ranks: pd.DataFrame,
+    df_volume: pd.DataFrame | None,
+    lookback_days: int = 20,
+    min_ratio: float = 1.0,
+) -> pd.DataFrame:
+    """
+    Zero out (set to NaN) any ticker's rank on any date its RECENT trading volume isn't at
+    least min_ratio times its own EARLIER trading volume, a relative volume-TREND confirmation
+    of the price move itself (IBKR Quant "Momentum Trading" Part I: "rising volume confirms the
+    move"). Distinct from liquidity_filter() above, which is an absolute dollar-volume
+    tradability THRESHOLD, this is a relative participation-trend check, a ticker can easily
+    pass liquidity_filter (plenty of absolute volume) while failing this one (that volume is
+    flat or declining, not confirming the price move).
+
+    The trailing lookback_days window is split into two equal halves: the RECENT half (the
+    lookback_days // 2 days closest to each date) and the EARLIER half (the lookback_days // 2
+    days immediately before that). min_ratio=1.0 (the default) requires at least flat-or-rising
+    participation; a higher value requires an accelerating volume trend.
+
+    Parameters
+    ----------
+    df_ranks : pd.DataFrame
+        Output of assign_ranks(), index=rebalance dates, columns=tickers.
+    df_volume : pd.DataFrame, optional
+        Daily share volume, columns=tickers. If None, the filter is a no-op (returns df_ranks
+        unchanged), same "can't assess without volume data, make the missing-data case explicit
+        rather than silently skipping the check" precedent as liquidity_filter() above.
+    lookback_days : int
+        Total trading-day window (split into two equal halves) used to compute the recent-vs-
+        earlier volume comparison.
+    min_ratio : float
+        Minimum recent-half-average-volume / earlier-half-average-volume ratio required for a
+        ticker to remain eligible on a given date.
+
+    Returns
+    -------
+    pd.DataFrame
+        Copy of df_ranks with ineligible (ticker, date) cells set to NaN.
+    """
+    if df_volume is None:
+        return df_ranks.copy()
+
+    half = max(1, lookback_days // 2)
+    recent_avg = df_volume.rolling(half, min_periods=half).mean()
+    earlier_avg = df_volume.shift(half).rolling(half, min_periods=half).mean()
+    ratio = recent_avg / earlier_avg
+    ratio_at_rank_dates = ratio.reindex(df_ranks.index, method="ffill")
+
+    eligible = ratio_at_rank_dates >= min_ratio
+    filtered_ranks = df_ranks.copy()
+    filtered_ranks = filtered_ranks.where(eligible.reindex_like(filtered_ranks), np.nan)
+    return filtered_ranks
+
+
+# --------------------------------------------------------------------------- #
 # TECHNICAL-INDICATOR ENTRY CONFIRMATION (Epic 2, "Institutional Momentum
 # Best-Practice Gaps" plan)
 # --------------------------------------------------------------------------- #

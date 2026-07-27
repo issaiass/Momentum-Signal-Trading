@@ -1042,6 +1042,95 @@ class TestRunLiquidityFilter:
         assert set(orders.keys()) == {"C"}  # filter effectively a no-op when no volume at all
 
 
+class TestRunTechnicalConfirmation:
+    """
+    cfg.use_technical_confirmation end-to-end through run() (Epic 2, "Institutional Momentum
+    Best-Practice Gaps" plan): wired right after the liquidity filter, before picks are
+    selected, close-price-only so no separate OHLCV/volume fetch is needed (unlike the
+    liquidity filter above).
+    """
+
+    def _overbought_prices(self, seed=11):
+        dates = pd.bdate_range("2024-01-01", "2024-05-15")
+        rng = np.random.default_rng(seed)
+        n = len(dates)
+        # C: near-monotonic, extreme drift (almost no down days), by far the strongest
+        # momentum (would be rank 1 every date), but persistently overbought (RSI pinned near
+        # 100). A/B: modest, realistic (noisy) drift, RSI stays moderate.
+        a = 50 * np.cumprod(1 + rng.normal(0.0008, 0.01, n))
+        b = 50 * np.cumprod(1 + rng.normal(0.0006, 0.01, n))
+        c = 50 * np.cumprod(1 + rng.normal(0.02, 0.002, n))
+        return pd.DataFrame({"A": a, "B": b, "C": c}, index=dates)
+
+    def _run_kwargs(self, tmp_path):
+        return dict(
+            log_path=str(tmp_path / "trade_log.csv"),
+            signal_rankings_log_path=str(tmp_path / "signal_rankings_log.csv"),
+            alerts_log_path=str(tmp_path / "alerts_log.csv"),
+        )
+
+    def test_overbought_top_ranked_ticker_is_never_selected(self, monkeypatch, tmp_path):
+        prices = self._overbought_prices()
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False,
+                              use_technical_confirmation=True, technical_confirmation_max_rsi=70.0)
+        orders = live_signal.run(
+            tickers=["A", "B", "C"], current_holdings={}, total_value=1000.0, cfg=cfg,
+            top_n=1, lookback_period=1.0, dry_run=True, **self._run_kwargs(tmp_path),
+        )
+
+        assert "C" not in orders  # never picked despite being the strongest signal
+        assert orders.picks_were_empty is False  # a real pick (A or B) still made it through
+
+    def test_default_disabled_is_byte_identical(self, monkeypatch, tmp_path):
+        prices = self._overbought_prices()
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False)  # flag omitted, default False
+        orders = live_signal.run(
+            tickers=["A", "B", "C"], current_holdings={}, total_value=1000.0, cfg=cfg,
+            top_n=1, lookback_period=1.0, dry_run=True, **self._run_kwargs(tmp_path),
+        )
+
+        # C has the strongest momentum and, with the filter OFF, must be picked as before.
+        assert set(orders.keys()) == {"C"}
+
+    def test_filtered_ticker_shows_excluded_technical_not_watchlist(self, monkeypatch, tmp_path):
+        prices = self._overbought_prices()
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False,
+                              use_technical_confirmation=True, technical_confirmation_max_rsi=70.0)
+        orders = live_signal.run(
+            tickers=["A", "B", "C"], current_holdings={}, total_value=1000.0, cfg=cfg,
+            top_n=1, lookback_period=1.0, dry_run=True, **self._run_kwargs(tmp_path),
+        )
+
+        universe = orders.full_signal_universe
+        assert "C" in universe  # not silently invisible
+        assert universe["C"]["selection_status"] == "Excluded (Technical)"
+        assert universe["C"]["rank"] is None  # NaN-ranked, correctly blank not a stale number
+        assert universe["C"]["signal_score"] > 0  # positive momentum, excluded for RSI only
+
+    def test_technical_flag_off_never_produces_technical_status(self, monkeypatch, tmp_path):
+        prices = self._overbought_prices()
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False)  # flag omitted, default False
+        orders = live_signal.run(
+            tickers=["A", "B", "C"], current_holdings={}, total_value=1000.0, cfg=cfg,
+            top_n=1, lookback_period=1.0, dry_run=True, **self._run_kwargs(tmp_path),
+        )
+
+        statuses = {t: info["selection_status"] for t, info in orders.full_signal_universe.items()}
+        assert "Excluded (Technical)" not in statuses.values()
+
+
 class TestRunMultiTimeframeComposite:
     """
     cfg.strategy_type == "multi_timeframe_composite" end-to-end through run(), Epic 2 of the

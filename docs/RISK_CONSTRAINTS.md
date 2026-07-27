@@ -582,6 +582,58 @@ ticker in a small portfolio getting filtered at once. Both functions now call `.
 `.nsmallest()`, guaranteeing a filtered ticker can never be selected, correctly returning FEWER
 than `top_n` picks (down to zero, holding cash) rather than padding with invalid ones.
 
+## Technical-Indicator Entry Confirmation [New] [`use_technical_confirmation`]
+
+Motivated by a real gap found reviewing IBKR's Quant "Momentum Trading: Types, Strategies, and
+More" Parts I & II against this codebase: `core/technical_indicators.py` computes
+SMA/EMA/RSI/MACD, but before this feature existed they were used ONLY for the email report's
+indicator section, never to gate or time a selection decision, entirely disconnected from the
+signal-generation/ranking pipeline. This closes that gap: an opt-in **hard gate** (excludes a
+ticker from selection, same convention as `skip_month_guardrail`/`use_absolute_momentum`/
+`use_negative_universe_cash_filter`, default off, changes what gets traded only when explicitly
+enabled), not an advisory-only annotation.
+
+Three independently-optional sub-checks, close-price-only (no volume/high/low needed, so this
+works identically in LIVE and BACKTEST off the same `daily_prices` panel every scorer already
+uses, full parity by construction, unlike `hybrid_multi_factor`'s fundamentals, which has no
+point-in-time historical source and is LIVE-ONLY as a result). A ticker must pass EVERY enabled
+sub-check to remain eligible on a given date:
+
+| Sub-check | Rule | Rationale |
+|---|---|---|
+| `technical_confirmation_min_sma_window` | close > `SMA(window)` | Trend confirmation, Part II's SMA-crossover framing: only enter a name whose price is above its own trailing trend line. |
+| `technical_confirmation_max_rsi` | `RSI(14) <= max_rsi` | Excludes an already-overbought/extended ticker AT ENTRY (Part I/II's overbought definition, `RSI > 70`), a momentum winner that has run too far too fast is a real short-term-reversal risk this filter lets you avoid buying into. |
+| `technical_confirmation_require_macd_bullish` | MACD line > signal line | A second, independent trend-confirmation signal. |
+
+```yaml
+risk_overrides:
+  use_technical_confirmation: true
+  technical_confirmation_max_rsi: 70.0        # avoid buying an already-overbought winner
+  # technical_confirmation_min_sma_window: 50   # optional, additive
+  # technical_confirmation_require_macd_bullish: true   # optional, additive
+```
+
+`__post_init__` requires at least one sub-check set when the toggle is `true` (fails loud, same
+precedent as `hybrid_multi_factor`'s `NotImplementedError`/`use_liquidity_filter`'s missing-
+`daily_volume` `ValueError`), an enabled-but-empty gate would be a silent no-op otherwise.
+
+**Wiring, same rank-NaN'ing point as the Liquidity / Universe Filter above** (applied
+immediately after it, in `execution/live_signal.py`'s `run()` and `core/strategy_signals.py`'s
+`generate_strategy_monthly_picks()`): `core/functions_quant_extensions.py`'s
+`technical_confirmation_filter()` zeroes a failing ticker's RANK (not its score), so
+`nsmallest()`-based selection naturally skips it, the same "excluded from selection, not from the
+universe" mechanism `liquidity_filter()` uses. A ticker without enough trailing history yet to
+compute an enabled indicator is treated as not-yet-eligible (a `NaN` comparison is `False`), same
+safe-default precedent as the liquidity filter's own early-history handling.
+
+A ticker excluded by this filter appears in the rebalance email's "Full Signal Universe" table
+and `logs/signal_rankings_log_<portfolio>.csv` as `"Excluded (Technical)"` (`action =
+"EXCLUDED"`), distinguishable from `"Excluded (Illiquid)"`/`"Excluded (Negative Momentum)"`/
+`"Watchlist / Reserve"`, via the same pre/post-rank snapshot technique
+`pre_liquidity_ranks_row` already uses (a new `pre_technical_ranks_row`, captured after the
+liquidity filter but before this one, so the two exclusion reasons are never conflated when both
+are enabled at once).
+
 ## Regime Filter: Volatility Dimension
 
 The pre-existing regime filter (see "Absolute Momentum (Macro)" above) only ever looked at ONE

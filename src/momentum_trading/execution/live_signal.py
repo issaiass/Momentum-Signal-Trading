@@ -62,7 +62,7 @@ from ..backtest.momentum_backtest import (
     detect_correlation_spike,
     compute_vol_scalar,
 )
-from ..core.functions_quant_extensions import absolute_momentum_overlay, liquidity_filter
+from ..core.functions_quant_extensions import absolute_momentum_overlay, liquidity_filter, technical_confirmation_filter
 
 logger = logging.getLogger("live_signal")
 if not logger.handlers:
@@ -2518,6 +2518,26 @@ def run(
                             "fetched for any ticker, liquidity filter skipped this rebalance.",
                             portfolio)
 
+    # Captured AFTER the liquidity filter (if any) but BEFORE the technical-confirmation filter
+    # (if any), so a ticker excluded specifically by the LATTER can be distinguished from one
+    # already excluded by liquidity, same pre/post-snapshot technique as pre_liquidity_ranks_row
+    # above (see full_signal_universe's selection_status logic below).
+    pre_technical_ranks_row = ranks.iloc[-1] if not ranks.empty else None
+
+    # --- Technical-indicator entry confirmation (opt-in, cfg.use_technical_confirmation), an
+    #     opt-in HARD GATE (Epic 2, "Institutional Momentum Best-Practice Gaps" plan): excludes a
+    #     ticker from selection on any date it fails an ENABLED SMA/RSI/MACD sub-check. Applied
+    #     at the same rank-NaN'ing point as the liquidity filter above, close-price-only so it
+    #     needs nothing beyond daily_prices already in scope (no separate OHLCV fetch, unlike the
+    #     liquidity filter's volume requirement). See
+    #     core/functions_quant_extensions.py's technical_confirmation_filter() and
+    #     docs/RISK_CONSTRAINTS.md's "Technical-Indicator Entry Confirmation". ---
+    if cfg.use_technical_confirmation and not ranks.empty:
+        ranks = technical_confirmation_filter(
+            ranks, daily_prices[tickers], cfg.technical_confirmation_min_sma_window,
+            cfg.technical_confirmation_max_rsi, cfg.technical_confirmation_require_macd_bullish,
+        )
+
     latest_scores = scores.iloc[-1] if not scores.empty else None
     latest_ranks_row = ranks.iloc[-1] if not ranks.empty else None
     # resolve_strategy_picks() (core/strategy_signals.py) dispatches on cfg.strategy_type:
@@ -2646,8 +2666,15 @@ def run(
                     and pre_liquidity_ranks_row is not None
                     and t in pre_liquidity_ranks_row.index and pd.notna(pre_liquidity_ranks_row[t])
                 )
+                was_technical_filtered = (
+                    cfg.use_technical_confirmation and rank is None
+                    and pre_technical_ranks_row is not None
+                    and t in pre_technical_ranks_row.index and pd.notna(pre_technical_ranks_row[t])
+                )
                 if was_liquidity_filtered:
                     status = "Excluded (Illiquid)"
+                elif was_technical_filtered:
+                    status = "Excluded (Technical)"
                 elif score < 0:
                     status = "Excluded (Negative Momentum)"
                 else:

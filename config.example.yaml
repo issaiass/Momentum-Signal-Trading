@@ -521,6 +521,22 @@ default_risk:
   liquidity_lookback_days: 63         # trading-day window for the trailing average above
                                        # (~3 months)
 
+  # Technical-indicator entry confirmation, LIVE + BACKTEST, an opt-in HARD GATE (excludes a
+  # ticker from selection, not just an advisory annotation), close-price-only so it works
+  # identically in both live and backtest, no new data source. False default is byte-identical
+  # to before this existed. Each sub-check below is independently optional; a ticker must pass
+  # every ENABLED one to remain eligible. Requires at least one sub-check set when the toggle is
+  # true (validated at load time). See docs/RISK_CONSTRAINTS.md's "Technical-Indicator Entry
+  # Confirmation".
+  use_technical_confirmation: false
+  technical_confirmation_min_sma_window: null  # e.g. 50, close must be above SMA(window) to
+                                       # remain eligible, null (default) = this sub-check disabled
+  technical_confirmation_max_rsi: null          # e.g. 70.0, excludes an already-overbought/
+                                       # extended ticker at entry (RSI(14) > this), applied at
+                                       # SELECTION time, not exit. null (default) = disabled
+  technical_confirmation_require_macd_bullish: false  # true = MACD line must be above its
+                                       # signal line to remain eligible
+
   # Backtest-only (research/notebook use, no effect on daily-runner). run_risk_managed_backtest()
   # is the ONLY consumer of every field in this block, none of them are read anywhere in the
   # --live or dry-run execution path, setting these in a portfolio's risk_overrides has zero

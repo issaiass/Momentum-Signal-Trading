@@ -20,6 +20,7 @@ import numpy as np
 import pandas as pd
 
 from . import functions as fn
+from . import technical_indicators as ti
 from .paths import data_dir
 
 
@@ -73,6 +74,78 @@ def liquidity_filter(
     eligible = dollar_volume_at_rank_dates >= min_avg_dollar_volume
     filtered_ranks = df_ranks.copy()
     filtered_ranks = filtered_ranks.where(eligible.reindex_like(filtered_ranks), np.nan)
+    return filtered_ranks
+
+
+# --------------------------------------------------------------------------- #
+# TECHNICAL-INDICATOR ENTRY CONFIRMATION (Epic 2, "Institutional Momentum
+# Best-Practice Gaps" plan)
+# --------------------------------------------------------------------------- #
+def technical_confirmation_filter(
+    df_ranks: pd.DataFrame,
+    df_prices: pd.DataFrame,
+    min_sma_window: int | None = None,
+    max_rsi: float | None = None,
+    require_macd_bullish: bool = False,
+) -> pd.DataFrame:
+    """
+    Zero out (set to NaN) any ticker's rank on any date it fails an ENABLED
+    technical-confirmation sub-check, an opt-in HARD GATE (excludes a ticker from selection
+    entirely, same "excluded from selection, not from the universe" mechanism liquidity_filter()
+    above uses), not an advisory-only annotation. Close-price-only (no volume/high/low needed),
+    so it works identically against live's daily_prices and a full historical backtest panel, no
+    new data source, full live/backtest parity by construction, unlike hybrid_multi_factor's
+    fundamentals (see core/strategy_signals.py's generate_strategy_monthly_picks() docstring).
+
+    Each sub-check is independently optional (None/False = that check doesn't apply); a ticker
+    must pass EVERY enabled sub-check to remain eligible on a given date:
+      min_sma_window : close must be above SMA(min_sma_window), a trend-confirmation filter
+        (IBKR Quant "Momentum Trading" Part II's SMA-crossover framing).
+      max_rsi : RSI(14) must be <= max_rsi, excludes an already-overbought/extended ticker at
+        entry (Part II's overbought definition, RSI > 70), applied at SELECTION time, not exit.
+      require_macd_bullish : MACD line must be above its signal line.
+
+    A ticker without enough trailing history yet to compute an enabled indicator (NaN) is treated
+    as not-yet-eligible (a NaN comparison is False), same safe-default precedent as
+    liquidity_filter()'s own early-history NaN handling above.
+
+    Parameters
+    ----------
+    df_ranks : pd.DataFrame
+        Output of assign_ranks(), index=rebalance dates, columns=tickers.
+    df_prices : pd.DataFrame
+        Daily close prices, columns=tickers (same universe as df_ranks), typically a superset
+        date range (indicators need trailing history before df_ranks' own first date).
+
+    Returns
+    -------
+    pd.DataFrame
+        Copy of df_ranks with ineligible (ticker, date) cells set to NaN.
+    """
+    if min_sma_window is None and max_rsi is None and not require_macd_bullish:
+        return df_ranks.copy()
+
+    eligible_by_ticker = {}
+    for t in df_ranks.columns:
+        if t not in df_prices.columns:
+            continue
+        close = df_prices[t]
+        eligible = pd.Series(True, index=close.index)
+        if min_sma_window is not None:
+            eligible &= close > ti.sma(close, min_sma_window)
+        if max_rsi is not None:
+            eligible &= ti.rsi(close, 14) <= max_rsi
+        if require_macd_bullish:
+            macd_df = ti.macd(close)
+            eligible &= macd_df["macd"] > macd_df["signal"]
+        eligible_by_ticker[t] = eligible
+
+    if not eligible_by_ticker:
+        return df_ranks.copy()
+
+    eligible_df = pd.DataFrame(eligible_by_ticker).reindex(df_ranks.index, method="ffill")
+    filtered_ranks = df_ranks.copy()
+    filtered_ranks = filtered_ranks.where(eligible_df.reindex_like(filtered_ranks), np.nan)
     return filtered_ranks
 
 

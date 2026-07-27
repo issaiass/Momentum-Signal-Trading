@@ -62,6 +62,26 @@ class TestBacktestConfigValidation:
     def test_max_sector_weight_none_default_is_accepted(self):
         assert BacktestConfig().max_sector_weight is None  # should not raise
 
+    def test_use_technical_confirmation_defaults_false(self):
+        assert BacktestConfig().use_technical_confirmation is False
+
+    def test_use_technical_confirmation_without_any_subcheck_raises(self):
+        with pytest.raises(ValueError, match="technical_confirmation"):
+            BacktestConfig(use_technical_confirmation=True)
+
+    def test_use_technical_confirmation_with_one_subcheck_is_accepted(self):
+        BacktestConfig(use_technical_confirmation=True, technical_confirmation_max_rsi=70.0)
+        BacktestConfig(use_technical_confirmation=True, technical_confirmation_min_sma_window=50)
+        BacktestConfig(use_technical_confirmation=True, technical_confirmation_require_macd_bullish=True)
+
+    def test_invalid_technical_confirmation_max_rsi_raises(self):
+        with pytest.raises(ValueError, match="technical_confirmation_max_rsi"):
+            BacktestConfig(use_technical_confirmation=True, technical_confirmation_max_rsi=150.0)
+
+    def test_invalid_technical_confirmation_min_sma_window_raises(self):
+        with pytest.raises(ValueError, match="technical_confirmation_min_sma_window"):
+            BacktestConfig(use_technical_confirmation=True, technical_confirmation_min_sma_window=0)
+
     def test_ticker_sectors_non_dict_raises(self):
         with pytest.raises(ValueError, match="ticker_sectors"):
             BacktestConfig(ticker_sectors=["XLK"])

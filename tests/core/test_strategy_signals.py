@@ -534,6 +534,43 @@ class TestGenerateStrategyMonthlyPicks:
         for tickers in picks.values:
             assert tickers == []  # every date correctly recorded as an explicit "hold cash" decision
 
+    def test_use_technical_confirmation_off_is_byte_identical(self):
+        # Epic 2 ("Institutional Momentum Best-Practice Gaps" plan): the flag off (default)
+        # must not change picks at all, even though technical_confirmation_max_rsi is set,
+        # since use_technical_confirmation itself gates whether the filter runs at all.
+        prices = _synthetic_prices()
+        cfg_off = BacktestConfig(holding_period=1, lookback_period=3)
+        cfg_with_unused_field = BacktestConfig(holding_period=1, lookback_period=3,
+                                                technical_confirmation_max_rsi=70.0)
+        without = generate_strategy_monthly_picks(prices, ["A", "B", "C"], cfg_off, cfg_off.lookback_period, top_n=2)
+        with_unused = generate_strategy_monthly_picks(prices, ["A", "B", "C"], cfg_with_unused_field,
+                                                        cfg_with_unused_field.lookback_period, top_n=2)
+        for date in without.index:
+            assert set(without[date]) == set(with_unused[date])
+
+    def test_use_technical_confirmation_without_any_subcheck_raises(self):
+        with pytest.raises(ValueError, match="technical_confirmation"):
+            BacktestConfig(holding_period=1, lookback_period=3, use_technical_confirmation=True)
+
+    def test_persistently_overbought_ticker_never_selected_even_if_top_ranked(self):
+        # C is given an extreme, near-monotonic drift (almost no down days), the strongest
+        # momentum by far (would be rank 1 every date), but its persistently-pinned-near-100
+        # RSI must exclude it once technical_confirmation_max_rsi is set below that, the exact
+        # "don't buy an already-overbought/extended momentum winner" case Epic 2 targets.
+        dates = pd.bdate_range("2023-01-01", periods=400)
+        rng = np.random.default_rng(7)
+        prices = pd.DataFrame({
+            "A": 100 * np.cumprod(1 + rng.normal(0.0003, 0.01, 400)),
+            "B": 100 * np.cumprod(1 + rng.normal(0.0002, 0.01, 400)),
+            "C": 100 * np.cumprod(1 + rng.normal(0.02, 0.002, 400)),  # near-monotonic, RSI pinned high
+        }, index=dates)
+        cfg = BacktestConfig(holding_period=1, lookback_period=3,
+                              use_technical_confirmation=True, technical_confirmation_max_rsi=70.0)
+        picks = generate_strategy_monthly_picks(prices, ["A", "B", "C"], cfg, cfg.lookback_period, top_n=1)
+        assert not picks.empty
+        for tickers in picks.values:
+            assert "C" not in tickers
+
     def test_negative_universe_cash_filter_produces_explicit_empty_picks(self):
         # Epic 6, backtest side: a synthetic universe with a strong, consistent NEGATIVE drift
         # (every trailing window's return negative) must produce explicit [] entries, not

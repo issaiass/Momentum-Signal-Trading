@@ -30,7 +30,7 @@ import pandas as pd
 
 from ..backtest.momentum_backtest import BacktestConfig
 from ..execution.live_signal import resolve_momentum_scores, assign_ranks
-from .functions_quant_extensions import blend_momentum_scores, liquidity_filter
+from .functions_quant_extensions import blend_momentum_scores, liquidity_filter, technical_confirmation_filter
 from .fundamentals import get_cached_or_fetch_fundamentals
 
 # strategy_type values whose SCORING is identical to the base per-ticker trailing-return score
@@ -456,6 +456,11 @@ def generate_strategy_monthly_picks(
     if cfg.use_liquidity_filter and daily_volume is not None:
         ranks = liquidity_filter(ranks, daily_prices[tickers], daily_volume,
                                   cfg.min_avg_dollar_volume, cfg.liquidity_lookback_days)
+    if cfg.use_technical_confirmation:
+        ranks = technical_confirmation_filter(
+            ranks, daily_prices[tickers], cfg.technical_confirmation_min_sma_window,
+            cfg.technical_confirmation_max_rsi, cfg.technical_confirmation_require_macd_bullish,
+        )
     picks = {}
     for date in ranks.index:
         ranks_row = ranks.loc[date].dropna()

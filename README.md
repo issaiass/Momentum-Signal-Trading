@@ -99,7 +99,14 @@ README says so on purpose.
   entirely (not just an advisory warning) on any rebalance its trailing average dollar volume
   falls below a threshold, see `docs/RISK_CONSTRAINTS.md`'s "Liquidity / Universe Filter"
   section (including a documented caveat: not effective under the `absolute_momentum`
-  `strategy_type`, which selects by score, not rank). Regime filter volatility dimension
+  `strategy_type`, which selects by score, not rank). Technical-indicator entry confirmation
+  (`use_technical_confirmation`, opt-in, LIVE + BACKTEST): an opt-in hard gate excluding a
+  ticker from selection if it fails an enabled SMA-trend, RSI-overbought, or MACD-bullish
+  sub-check, close-price-only so it works identically live and backtest, motivated by a real gap
+  found reviewing IBKR's own Quant momentum-trading articles against this codebase (SMA/RSI/MACD
+  were computed for the email report only, never wired into a selection decision before this),
+  see `docs/RISK_CONSTRAINTS.md`'s "Technical-Indicator Entry Confirmation" section. Regime
+  filter volatility dimension
   (`regime_vol_threshold`, opt-in, `None` default byte-identical to before, LIVE + BACKTEST):
   blends the regime benchmark's own trailing realized volatility into the existing SMA-trend
   regime scalar, so a bullish-but-suddenly-volatile market also gets throttled, not just a

@@ -446,6 +446,23 @@ class BacktestConfig:
     liquidity_lookback_days: int = 63       # trading-day window for the trailing average above
                                              # (~3 months), liquidity_filter()'s own default
 
+    # --- Technical-indicator entry confirmation (Epic 2, "Institutional Momentum Best-Practice
+    #     Gaps" plan), an opt-in HARD GATE (excludes a ticker from selection, not just an
+    #     advisory annotation), LIVE + BACKTEST, close-price-only so it works identically in
+    #     both (no new data source, unlike hybrid_multi_factor's fundamentals). False default is
+    #     byte-identical to before this existed. Each of the three sub-checks below is
+    #     independently optional; a ticker must pass every ENABLED one to remain eligible. See
+    #     core/functions_quant_extensions.py's technical_confirmation_filter() and
+    #     docs/RISK_CONSTRAINTS.md's "Technical-Indicator Entry Confirmation". ---
+    use_technical_confirmation: bool = False
+    technical_confirmation_min_sma_window: int | None = None  # e.g. 50, close must be above
+                                             # SMA(window) to remain eligible
+    technical_confirmation_max_rsi: float | None = None       # e.g. 70.0, excludes an
+                                             # already-overbought/extended ticker at entry
+                                             # (RSI(14) > this)
+    technical_confirmation_require_macd_bullish: bool = False  # MACD line must be above its
+                                             # signal line
+
     # --- Additional execution safety checks ---
     max_dollar_drawdown: float | None = None       # e.g. 500.0, halt if equity drops this many $ from peak, independent of the % breaker
     max_slippage_tolerance_pct: float | None = None  # e.g. 0.02, alert (not un-fill) if actual fill deviates from expected price by more than this
@@ -508,6 +525,26 @@ class BacktestConfig:
             errors.append("use_trailing_stop is True but trailing_stop_pct is None, set a width")
         if self.trailing_stop_pct is not None and not (0 < self.trailing_stop_pct < 1.0):
             errors.append(f"trailing_stop_pct ({self.trailing_stop_pct}) should be in (0, 1.0) or None")
+        if self.use_technical_confirmation and (
+            self.technical_confirmation_min_sma_window is None
+            and self.technical_confirmation_max_rsi is None
+            and not self.technical_confirmation_require_macd_bullish
+        ):
+            errors.append(
+                "use_technical_confirmation is True but none of technical_confirmation_"
+                "min_sma_window/technical_confirmation_max_rsi/"
+                "technical_confirmation_require_macd_bullish is set, enable at least one sub-check"
+            )
+        if self.technical_confirmation_max_rsi is not None and not (0 < self.technical_confirmation_max_rsi <= 100.0):
+            errors.append(
+                f"technical_confirmation_max_rsi ({self.technical_confirmation_max_rsi}) "
+                f"should be in (0, 100.0] or None"
+            )
+        if self.technical_confirmation_min_sma_window is not None and self.technical_confirmation_min_sma_window < 1:
+            errors.append(
+                f"technical_confirmation_min_sma_window ({self.technical_confirmation_min_sma_window}) "
+                f"should be >= 1 or None"
+            )
         if not isinstance(self.ticker_risk_overrides, dict):
             errors.append(f"ticker_risk_overrides ({self.ticker_risk_overrides!r}) must be a dict")
         else:

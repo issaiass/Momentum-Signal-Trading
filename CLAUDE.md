@@ -805,6 +805,28 @@ that tests enforce, don't casually violate these when editing:
   still surfaces in `full_signal_universe`/the Full Signal Universe table as `"Watchlist /
   Reserve"` with a blank rank, that code's existing `pd.notna()` guard on the rank already
   handles this correctly with no changes needed there.
+  `use_technical_confirmation`/`technical_confirmation_min_sma_window`/
+  `technical_confirmation_max_rsi`/`technical_confirmation_require_macd_bullish` (`BacktestConfig`,
+  Epic 2, "Institutional Momentum Best-Practice Gaps" plan, opt-in, `False` default
+  byte-identical to before) wire `core/functions_quant_extensions.py`'s NEW
+  `technical_confirmation_filter()` into selection, motivated by a real gap found reviewing IBKR's
+  Quant "Momentum Trading" Parts I/II against this codebase: `core/technical_indicators.py`'s
+  SMA/RSI/MACD were computed for the email report ONLY, never wired into a selection decision.
+  Applied at the SAME rank-NaN'ing point as `use_liquidity_filter` immediately above (right after
+  it, in both `run()` and `core/strategy_signals.py`'s `generate_strategy_monthly_picks()`),
+  close-price-only (no separate OHLCV/volume fetch needed, unlike the liquidity filter), so it
+  achieves full LIVE+BACKTEST parity by construction off the same `daily_prices` panel every
+  scorer already uses, unlike `hybrid_multi_factor`'s fundamentals (no point-in-time historical
+  source, LIVE-ONLY). `__post_init__` requires at least one of the three sub-checks set when the
+  toggle is `true` (fail loud, same precedent as `hybrid_multi_factor`'s `NotImplementedError`/
+  `use_liquidity_filter`'s missing-`daily_volume` `ValueError`). A new `pre_technical_ranks_row`
+  snapshot (captured after the liquidity filter but before this one) lets a technically-excluded
+  ticker get its own `"Excluded (Technical)"` `full_signal_universe`/`selection_status` value,
+  distinct from `"Excluded (Illiquid)"`/`"Excluded (Negative Momentum)"`/`"Watchlist / Reserve"`;
+  `log_signal_rankings()`'s and `notifications.py`'s existing `selection_status.startswith
+  ("Excluded")` derivation of the `EXCLUDED` action is already generic, confirmed by reading both,
+  needed no change to pick up the new status. See `docs/RISK_CONSTRAINTS.md`'s "Technical-Indicator
+  Entry Confirmation".
   `compute_target_weights()`'s regime filter block now also blends in `cfg.regime_vol_threshold`
   (see `BacktestConfig`'s own bullet above for the shared formula and backtest-parity
   implementation): when set, the regime benchmark's trailing realized volatility

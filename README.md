@@ -105,7 +105,13 @@ README says so on purpose.
   sub-check, close-price-only so it works identically live and backtest, motivated by a real gap
   found reviewing IBKR's own Quant momentum-trading articles against this codebase (SMA/RSI/MACD
   were computed for the email report only, never wired into a selection decision before this),
-  see `docs/RISK_CONSTRAINTS.md`'s "Technical-Indicator Entry Confirmation" section. Regime
+  see `docs/RISK_CONSTRAINTS.md`'s "Technical-Indicator Entry Confirmation" section. Risk-based
+  ("fixed-fractional") position sizing (`sizing_method: risk_based`, a 4th sizing option
+  alongside `inverse_vol`/`score_proportional`/`equal_weight`): sizes each position off its own
+  stop-loss distance and `risk_per_trade_pct` so a full stop-out loses a fixed fraction of
+  capital (the standard CTA/Van Tharp "risk 1-2% per trade" rule), the only one of the four that
+  doesn't force full investment, aggregate exposure emerges from the risk budget instead, see
+  `docs/RISK_CONSTRAINTS.md`'s "Risk-Based Position Sizing" section. Regime
   filter volatility dimension
   (`regime_vol_threshold`, opt-in, `None` default byte-identical to before, LIVE + BACKTEST):
   blends the regime benchmark's own trailing realized volatility into the existing SMA-trend

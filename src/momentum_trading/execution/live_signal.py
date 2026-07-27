@@ -61,6 +61,7 @@ from ..backtest.momentum_backtest import (
     resolve_target_weights,
     detect_correlation_spike,
     compute_vol_scalar,
+    resolve_ticker_stop_loss_pct,
 )
 from ..core.functions_quant_extensions import absolute_momentum_overlay, liquidity_filter, technical_confirmation_filter
 
@@ -708,24 +709,6 @@ def compute_aggregate_drift(target_dollar: dict, current_value: dict, total_valu
     all_tickers = set(current_value) | set(target_dollar)
     raw_trades = sum(abs(target_dollar.get(t, 0.0) - current_value.get(t, 0.0)) for t in all_tickers)
     return raw_trades / total_value
-
-
-def resolve_ticker_stop_loss_pct(ticker: str, cfg: BacktestConfig) -> float | None:
-    """
-    Resolves the EFFECTIVE stop-loss width for one ticker, honoring cfg.ticker_risk_overrides
-    (see BacktestConfig's own field docstring) over the portfolio-wide cfg.stop_loss_pct.
-
-    Returns None when the stop-loss check is disabled entirely for this ticker
-    ('enabled': false in its override), the caller must treat None as "never check this
-    ticker's drawdown," not as "0% stop." Returns the ticker-specific 'stop_loss_pct' when one
-    is given, otherwise the portfolio's own cfg.stop_loss_pct. A ticker with no override entry
-    at all resolves to cfg.stop_loss_pct, byte-identical to this codebase's behavior before
-    per-ticker overrides existed.
-    """
-    override = cfg.ticker_risk_overrides.get(ticker, {})
-    if override.get("enabled", True) is False:
-        return None
-    return override.get("stop_loss_pct", cfg.stop_loss_pct)
 
 
 def compute_stop_loss_price(action: str, cfg: BacktestConfig, money_invested: float | None,

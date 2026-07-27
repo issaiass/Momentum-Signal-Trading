@@ -438,8 +438,20 @@ default_risk:
                                            # strategy_type.
 
   # Alternative sizing
-  sizing_method: inverse_vol          # "inverse_vol" (default, underweights noisier names) or
-                                       # "score_proportional" (stronger momentum gets more capital)
+  sizing_method: inverse_vol          # "inverse_vol" (default, underweights noisier names),
+                                       # "score_proportional" (stronger momentum gets more
+                                       # capital), "equal_weight" (non-parametric, every pick
+                                       # gets an identical 1/N weight), or "risk_based"
+                                       # (fixed-fractional, sizes off risk_per_trade_pct below
+                                       # and each pick's own stop-loss distance, see
+                                       # docs/RISK_CONSTRAINTS.md's "Risk-Based Position
+                                       # Sizing"; the only one of the four that does NOT
+                                       # normalize weights to sum to 1.0, aggregate exposure
+                                       # emerges from the risk budget instead)
+  risk_per_trade_pct: 0.02            # only meaningful when sizing_method is "risk_based":
+                                       # sizes each position so a full stop-out loses exactly
+                                       # this fraction of total capital, e.g. 0.02 = risk 2% of
+                                       # capital per trade
 
   # Selectable momentum strategy (docs/MOMENTUM_STRATEGIES.md), per-portfolio via risk_overrides,
   # same mechanism as every other field here (portfolio A can run dual_momentum while portfolio B

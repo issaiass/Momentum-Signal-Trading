@@ -479,9 +479,18 @@ class BacktestConfig:
                                              # into a real-time bid-ask spread wider than 1%.
 
     # --- Alternative position-sizing method ---
-    sizing_method: str = "inverse_vol"   # "inverse_vol" (default), "score_proportional", or
+    sizing_method: str = "inverse_vol"   # "inverse_vol" (default), "score_proportional",
                                           # "equal_weight" (non-parametric, ignores both score
-                                          # magnitude and trailing vol, every pick gets 1/N)
+                                          # magnitude and trailing vol, every pick gets 1/N), or
+                                          # "risk_based" (fixed-fractional, see risk_per_trade_pct
+                                          # below and docs/RISK_CONSTRAINTS.md's "Risk-Based
+                                          # Position Sizing")
+    risk_per_trade_pct: float = 0.02     # only meaningful when sizing_method == "risk_based":
+                                          # sizes each position so a full stop-out loses exactly
+                                          # this fraction of total capital, e.g. 0.02 = risk 2%
+                                          # of capital per trade (Part I's "1-2% of capital"
+                                          # sizing rule). Validated (0, 1) unconditionally, same
+                                          # as stop_loss_pct.
 
     # --- Selectable momentum strategy type (docs/MOMENTUM_STRATEGIES.md), config-driven per
     #     portfolio via default_risk/risk_overrides, same mechanism as every other field here.
@@ -626,11 +635,13 @@ class BacktestConfig:
             errors.append(f"max_price_staleness_minutes ({self.max_price_staleness_minutes}) must be > 0 or None")
         if self.max_holding_days is not None and self.max_holding_days <= 0:
             errors.append(f"max_holding_days ({self.max_holding_days}) must be > 0 or None")
-        if self.sizing_method not in ("inverse_vol", "score_proportional", "equal_weight"):
+        if self.sizing_method not in ("inverse_vol", "score_proportional", "equal_weight", "risk_based"):
             errors.append(
                 f"sizing_method ({self.sizing_method!r}) must be 'inverse_vol', "
-                f"'score_proportional', or 'equal_weight'"
+                f"'score_proportional', 'equal_weight', or 'risk_based'"
             )
+        if not (0 < self.risk_per_trade_pct < 1.0):
+            errors.append(f"risk_per_trade_pct ({self.risk_per_trade_pct}) should be in (0, 1.0)")
         if self.strategy_type not in ALLOWED_STRATEGY_TYPES:
             errors.append(f"strategy_type ({self.strategy_type!r}) must be one of {ALLOWED_STRATEGY_TYPES}")
         if self.regime_vol_threshold is not None and self.regime_vol_threshold <= 0:
@@ -801,6 +812,72 @@ def _equal_weight_weights(picks: list[str]) -> dict:
     return {t: 1.0 / len(picks) for t in picks}
 
 
+def resolve_ticker_stop_loss_pct(ticker: str, cfg: "BacktestConfig") -> float | None:
+    """
+    Resolves the EFFECTIVE stop-loss width for one ticker, honoring cfg.ticker_risk_overrides
+    (see BacktestConfig's own field docstring) over the portfolio-wide cfg.stop_loss_pct.
+
+    Returns None when the stop-loss check is disabled entirely for this ticker
+    ('enabled': false in its override), the caller must treat None as "never check this
+    ticker's drawdown," not as "0% stop." Returns the ticker-specific 'stop_loss_pct' when one
+    is given, otherwise the portfolio's own cfg.stop_loss_pct. A ticker with no override entry
+    at all resolves to cfg.stop_loss_pct, byte-identical to this codebase's behavior before
+    per-ticker overrides existed.
+
+    Lives here (not execution/live_signal.py, which re-exports it for its own call sites and
+    daily_runner.py's import) because it's a pure function of BacktestConfig alone, needed by
+    THIS module's own _risk_based_weights() (Epic 3, "Institutional Momentum Best-Practice
+    Gaps" plan) without introducing a backtest/ -> execution/ import (the reverse of every
+    existing dependency direction between these two modules, which would be circular:
+    execution/live_signal.py already imports BacktestConfig/resolve_target_weights/etc. FROM
+    this module at module load time).
+    """
+    override = cfg.ticker_risk_overrides.get(ticker, {})
+    if override.get("enabled", True) is False:
+        return None
+    return override.get("stop_loss_pct", cfg.stop_loss_pct)
+
+
+def _risk_based_weights(picks: list[str], cfg: "BacktestConfig") -> dict:
+    """
+    Fixed-fractional ("risk 1-2% of capital per trade") position sizing, standard CTA/Van Tharp
+    practice: sizes each position so a full stop-out loses exactly cfg.risk_per_trade_pct of
+    total capital, weight = risk_per_trade_pct / that ticker's own resolved stop-loss width.
+    A tighter stop gets a LARGER weight (less room to the stop, so more shares needed to risk
+    the same dollar amount); a wider stop gets a smaller weight.
+
+    A pick whose stop-loss is disabled (resolve_ticker_stop_loss_pct() returns None via
+    ticker_risk_overrides) can't be sized by this formula at all (no stop distance to size
+    against), falls back to an equal-weight slice for just that one ticker, same
+    per-ticker-fallback precedent _score_proportional_weights() already uses for a pick missing
+    a usable score.
+
+    Deliberately does NOT normalize to sum to 1.0 the way the other three sizing_methods do:
+    real fixed-fractional sizing lets aggregate exposure emerge from the risk budget, not force
+    full investment. If the raw weights sum to MORE than 1.0 (e.g. several tight-stop picks),
+    they're scaled down proportionally so the portfolio never exceeds 100% invested, preserving
+    each position's RELATIVE risk allocation. If they sum to LESS than 1.0 (e.g. wide stops),
+    the shortfall is left as genuine unallocated cash, same "leave undistributable weight as
+    cash" precedent already established by _apply_position_caps()'s redistribution_incomplete
+    and _apply_sector_caps() elsewhere in this module.
+    """
+    raw = {}
+    for t in picks:
+        stop_pct = resolve_ticker_stop_loss_pct(t, cfg)
+        raw[t] = (cfg.risk_per_trade_pct / stop_pct) if stop_pct is not None else None
+
+    fallback_tickers = [t for t, w in raw.items() if w is None]
+    weights = {t: w for t, w in raw.items() if w is not None}
+    if fallback_tickers:
+        for t in fallback_tickers:
+            weights[t] = 1.0 / len(picks)
+
+    total = sum(weights.values())
+    if total > 1.0:
+        weights = {t: w / total for t, w in weights.items()}
+    return weights
+
+
 def resolve_target_weights(
     picks: list[str], daily_prices: pd.DataFrame, as_of: pd.Timestamp, cfg: "BacktestConfig",
     custom_weights: dict | None = None, momentum_scores: pd.Series | None = None,
@@ -818,9 +895,11 @@ def resolve_target_weights(
     "inverse_vol" (default, weight inversely to trailing volatility),
     "score_proportional" (weight proportional to each
     pick's momentum score, requires momentum_scores to be passed in; falls
-    back to equal-weight if scores aren't available), and "equal_weight"
+    back to equal-weight if scores aren't available), "equal_weight"
     (non-parametric, every pick gets an identical 1/N weight, see
-    _equal_weight_weights()).
+    _equal_weight_weights()), and "risk_based" (fixed-fractional sizing off each pick's own
+    stop-loss distance, see _risk_based_weights(), the only one of the four that doesn't
+    normalize weights to sum to 1.0 by construction).
     """
     if custom_weights is not None:
         provided = {t: w for t, w in custom_weights.items() if t in picks and w > 0}
@@ -838,6 +917,12 @@ def resolve_target_weights(
             )
     elif cfg.sizing_method == "equal_weight":
         weights = _equal_weight_weights(picks)
+        if cfg.use_correlation_penalty:
+            weights = _correlation_penalty_weights(
+                weights, daily_prices, as_of, cfg.correlation_lookback_days, cfg.correlation_penalty_strength
+            )
+    elif cfg.sizing_method == "risk_based":
+        weights = _risk_based_weights(picks, cfg)
         if cfg.use_correlation_penalty:
             weights = _correlation_penalty_weights(
                 weights, daily_prices, as_of, cfg.correlation_lookback_days, cfg.correlation_penalty_strength
@@ -915,8 +1000,19 @@ def _apply_position_caps(weights: dict, max_weight: float) -> dict:
     because capping+redistribution fully succeeded) and skips the final renormalize, correctly
     leaving the undistributable excess as unallocated capital/cash, the whole point of a
     position cap. The normal multi-ticker successful-redistribution path is unchanged.
+
+    The final renormalize targets `original_total` (the input's OWN pre-cap sum), not a
+    hardcoded `1.0`: a real, confirmed bug found while adding "risk_based" sizing (Epic 3,
+    "Institutional Momentum Best-Practice Gaps" plan), whose weights are DELIBERATELY often
+    under 1.0 by design (aggregate exposure emerges from the risk budget, not forced full
+    investment, see _risk_based_weights()). Every PRE-EXISTING sizing_method already sums to
+    ~1.0 before this function ever runs, so targeting `original_total` is byte-identical to the
+    old hardcoded `1.0` for all of them; only "risk_based"'s genuinely-under-1.0 input is
+    affected, correctly no longer silently inflated back up to full investment by a cap step
+    that never even triggered (no ticker was over max_weight at all).
     """
     weights = dict(weights)
+    original_total = sum(weights.values())
     redistribution_incomplete = False
     for _ in range(10):  # a few passes converges caps without a full LP solve
         over = {t: w for t, w in weights.items() if w > max_weight}
@@ -935,8 +1031,8 @@ def _apply_position_caps(weights: dict, max_weight: float) -> dict:
     if redistribution_incomplete:
         return weights
     total = sum(weights.values())
-    if total > 0:
-        weights = {t: w / total for t, w in weights.items()}
+    if total > 0 and original_total > 0:
+        weights = {t: w / total * original_total for t, w in weights.items()}
     return weights
 
 

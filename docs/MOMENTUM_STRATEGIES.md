@@ -124,6 +124,11 @@ caps and the correlation penalty (if enabled) still apply afterward, same as the
 `sizing_method` values. Fully implemented, live AND backtest (sizing is already the one shared
 function both engines call via `resolve_target_weights()`).
 
+A 4th `sizing_method` value, `risk_based` (fixed-fractional, sizes off `risk_per_trade_pct` and
+each pick's own stop-loss distance instead of score/volatility/count), is NOT a preset for any
+`strategy_type` here, independently usable the same way `equal_weight` is, see
+`docs/RISK_CONSTRAINTS.md`'s "Risk-Based Position Sizing" for the full formula and rationale.
+
 ## Multi-Timeframe Composite [`multi_timeframe_composite`]
 
 Aligns signals across multiple horizons: blends momentum scores across several lookback windows

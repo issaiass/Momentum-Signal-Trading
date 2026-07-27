@@ -446,6 +446,46 @@ that tests enforce, don't casually violate these when editing:
   the time-based stop, or a normal rebalance SELL), so a closed-then-reopened position always
   starts a fresh trail rather than inheriting a stale high. `execution/live_signal.py`'s
   `check_and_handle_trailing_stops()` is the LIVE counterpart, see that file's own bullet.
+  `sizing_method` gained a 4th value, `"risk_based"` (Epic 3, "Institutional Momentum
+  Best-Practice Gaps" plan), fixed-fractional/Van Tharp sizing, Part I's "risk 1-2% of capital
+  per trade" rule: `_risk_based_weights(picks, cfg)`, parallel to `_score_proportional_weights()`/
+  `_equal_weight_weights()`, `weight = cfg.risk_per_trade_pct / resolve_ticker_stop_loss_pct(t,
+  cfg)` per pick (a tighter stop gets a larger weight), a pick with a disabled per-ticker stop
+  falls back to an equal-weight `1/N` slice for just that ticker (same per-ticker-fallback
+  precedent `_score_proportional_weights()`'s missing-score case uses). New `risk_per_trade_pct:
+  float = 0.02` field, validated `(0, 1)` unconditionally same as `stop_loss_pct`; `sizing_method`'s
+  `__post_init__` validation extended to accept `"risk_based"`. Deliberately does NOT normalize
+  to sum to `1.0` the way the other three `sizing_method`s do (aggregate exposure emerges from
+  the risk budget): a raw sum over `1.0` scales down proportionally (preserving each position's
+  relative risk allocation), a raw sum under `1.0` is left as genuine unallocated cash, same
+  "leave undistributable weight as cash" precedent `_apply_position_caps()`'s
+  `redistribution_incomplete` and `_apply_sector_caps()` already establish. Wired into
+  `resolve_target_weights()` as a 4th `elif cfg.sizing_method == "risk_based":` branch, same
+  correlation-penalty/position-cap/vol-budget/sector-cap pipeline applied afterward as the other
+  three.
+  `resolve_ticker_stop_loss_pct(ticker, cfg)` MOVED here from `execution/live_signal.py` (which
+  now `from ..backtest.momentum_backtest import (..., resolve_ticker_stop_loss_pct)` and
+  re-exports it unchanged for its own call sites and `daily_runner.py`'s existing import, zero
+  behavior change, confirmed by every pre-existing test of it still passing unmodified): a pure
+  function of `BacktestConfig` alone, needed by this module's own new `_risk_based_weights()`
+  without introducing a `backtest/` -> `execution/` import, which would be circular
+  (`execution/live_signal.py` already imports `BacktestConfig`/`resolve_target_weights`/
+  `compute_vol_scalar`/etc. FROM this module at module load time, the established one-directional
+  dependency the whole codebase already follows).
+  A real, confirmed bug found and fixed while adding `risk_based` sizing, in
+  `_apply_position_caps()`, a function unrelated to this feature at the code level but shared by
+  every `sizing_method`: its final renormalize targeted a hardcoded `1.0`, not the input's own
+  pre-cap total, invisible until now because every PRE-EXISTING `sizing_method` already sums to
+  `~1.0` before this function runs. `risk_based`'s deliberately-often-under-`1.0` input exposed
+  it directly: even when NO ticker was anywhere near `max_position_weight` (nothing to cap at
+  all), the old code still silently rescaled the whole book back up to `1.0`, defeating
+  `risk_based` sizing's entire point. Fixed: the renormalize now targets `original_total` (the
+  input's own sum captured before the cap-and-redistribute loop runs), byte-identical to the old
+  hardcoded `1.0` for every sizing method whose input already summed to `1.0` (confirmed by the
+  full pre-existing `TestApplyPositionCaps`/`TestResolveTargetWeights` suites passing unchanged),
+  and correctly a no-op for `risk_based`'s genuinely-under-invested input. See
+  `docs/RISK_CONSTRAINTS.md`'s "Risk-Based (\"Fixed-Fractional\") Position Sizing" and "Position
+  Size Hard-Cap"'s own updated section.
 - **`execution/live_signal.py`**, live signal/order generation, IBKR integration (`ibapi`
   `EClient`/`EWrapper`, not a third-party wrapper), multi-portfolio orchestration, FIFO P&L,
   hash-chained audit log. `fetch_ohlcv_for_tickers()` is distinct from `fetch_live_prices()`,

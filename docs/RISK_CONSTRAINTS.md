@@ -732,6 +732,67 @@ starting point. `position_vol_budget` (Allow/disallow constraints above) is a co
 NOT redundant, per-ticker cap applied AFTER this flat one, varying by each ticker's own
 volatility rather than being identical for every ticker.
 
+**A second real, confirmed bug in this same function, found and fixed while adding Risk-Based
+Position Sizing below**: the final renormalize targeted a hardcoded `1.0`, not the input's own
+pre-cap total. Every PRE-EXISTING `sizing_method` already sums to `~1.0` before this function
+ever runs, so that was invisible until `"risk_based"` sizing's DELIBERATELY-often-under-`1.0`
+input exposed it: even when NO ticker was anywhere near the cap (nothing to cap at all), the old
+code still silently rescaled the whole book back up to `1.0`, defeating `risk_based` sizing's
+entire point. Fixed: the renormalize now targets `original_total` (the input's own sum before
+this function ran), byte-identical to the old hardcoded `1.0` for every sizing method whose
+input already summed to `1.0`, and correctly a no-op for `risk_based`'s genuinely-under-invested
+input.
+
+## Risk-Based ("Fixed-Fractional") Position Sizing [New] [`sizing_method: risk_based`]
+
+Motivated by the same IBKR Quant "Momentum Trading" review that motivated Technical-Indicator
+Entry Confirmation above: Part I's explicit sizing rule, "risk only 1-2% of capital per trade,"
+standard CTA/Van Tharp fixed-fractional practice. Confirmed by reading `resolve_target_weights()`
+before this existed: the three pre-existing `sizing_method`s (`inverse_vol`, `score_proportional`,
+`equal_weight`) size by trailing volatility, score strength, or count, never by a position's own
+stop-loss distance, so this genuinely closes a gap, not a re-implementation of something already
+possible.
+
+**Formula**: `weight = risk_per_trade_pct / that ticker's own resolved stop-loss width`
+(`resolve_ticker_stop_loss_pct()`, honoring `ticker_risk_overrides` the same way
+`check_and_handle_stop_losses()` already does). Sizes the position so a full stop-out loses
+exactly `risk_per_trade_pct` of total capital: a TIGHTER stop gets a LARGER weight (less room to
+the stop, so more shares needed to risk the same dollar amount), a WIDER stop gets a smaller
+weight. A pick whose stop-loss is disabled for that ticker (`ticker_risk_overrides[t]['enabled']
+= false`) has no stop distance to size against, falls back to an equal-weight `1/N` slice for
+just that one ticker, same per-ticker-fallback precedent `score_proportional`'s missing-score
+case already uses.
+
+```yaml
+risk_overrides:
+  sizing_method: risk_based
+  risk_per_trade_pct: 0.02        # risk 2% of capital per trade (Part I's "1-2%" rule)
+  stop_loss_pct: 0.10             # this position's own stop-loss distance (or a per-ticker
+                                   # ticker_risk_overrides entry), what the formula sizes against
+```
+
+**Deliberately does NOT normalize to sum to `1.0`**, unlike the other three `sizing_method`s: real
+fixed-fractional sizing lets aggregate exposure emerge from the risk budget, not force full
+investment. Several tight-stop picks can push the raw sum ABOVE `1.0` (scaled down proportionally,
+preserving each position's RELATIVE risk allocation, so the portfolio never exceeds 100%
+invested); several wide-stop picks can leave it genuinely BELOW `1.0` (left as real, unallocated
+cash for that rebalance, same "leave undistributable weight as cash" precedent
+`_apply_position_caps()`'s `redistribution_incomplete` and `_apply_sector_caps()` already
+establish). `resolve_target_weights()`'s shared `_apply_position_caps()`/`position_vol_budget`/
+`max_sector_weight` pipeline still applies afterward exactly as it does for every other
+`sizing_method`.
+
+**LIVE + BACKTEST parity by construction, zero extra work**: `_risk_based_weights()`
+(`backtest/momentum_backtest.py`) flows through the SAME `resolve_target_weights()` both
+`execution/live_signal.py`'s `compute_target_weights()` and the backtest engine already share,
+unlike several other constraints in this document that needed separate live/backtest wiring.
+`resolve_ticker_stop_loss_pct()` itself now also lives in `backtest/momentum_backtest.py` (moved
+from `execution/live_signal.py`, which imports and re-exports it for its own call sites and
+`daily_runner.py`'s import), a pure function of `BacktestConfig` needed here without introducing
+a `backtest/` -> `execution/` import, which would be circular (`execution/live_signal.py` already
+imports `BacktestConfig`/`resolve_target_weights`/etc. FROM `backtest/momentum_backtest.py` at
+module load time).
+
 ## Sector / Asset-Class Concentration Cap [New, Nice-to-Have tier, LIVE + BACKTEST, opt-in]
 
 `max_position_weight` and `position_vol_budget` above only ever constrain a SINGLE ticker's

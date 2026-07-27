@@ -710,6 +710,50 @@ class TestResolveTargetWeights:
         assert weights["SPY"] <= 0.5 + 1e-6
         assert weights["QQQ"] <= 0.5 + 1e-6
 
+    def test_risk_based_weight_matches_formula_and_is_left_underinvested(self, synthetic_daily_prices):
+        # Epic 3 ("Institutional Momentum Best-Practice Gaps" plan): weight = risk_per_trade_pct
+        # / stop_loss_pct. Two picks at 0.02/0.10 = 0.20 each, summing to 0.40 (< 1.0),
+        # deliberately NOT forced up to full investment, unlike the other three sizing methods.
+        cfg = BacktestConfig(sizing_method="risk_based", risk_per_trade_pct=0.02,
+                              stop_loss_pct=0.10, max_position_weight=0.9)
+        as_of = synthetic_daily_prices.index[-1]
+        weights = resolve_target_weights(["SPY", "QQQ"], synthetic_daily_prices, as_of, cfg)
+        assert weights["SPY"] == pytest.approx(0.20, abs=1e-6)
+        assert weights["QQQ"] == pytest.approx(0.20, abs=1e-6)
+        assert sum(weights.values()) == pytest.approx(0.40, abs=1e-6)
+
+    def test_risk_based_disabled_ticker_falls_back_to_equal_weight(self, synthetic_daily_prices):
+        cfg = BacktestConfig(sizing_method="risk_based", risk_per_trade_pct=0.02, stop_loss_pct=0.10,
+                              max_position_weight=0.9,
+                              ticker_risk_overrides={"SPY": {"enabled": False}})
+        as_of = synthetic_daily_prices.index[-1]
+        weights = resolve_target_weights(["SPY", "QQQ"], synthetic_daily_prices, as_of, cfg)
+        assert weights["SPY"] == pytest.approx(0.5, abs=1e-6)  # 1/N fallback, not risk-sized
+        assert weights["QQQ"] == pytest.approx(0.20, abs=1e-6)  # unaffected, normal risk-based sizing
+
+    def test_risk_based_over_one_sum_scales_down_preserving_relative_proportions(self, synthetic_daily_prices):
+        # Tight stops push the raw (unnormalized) sum above 1.0; must scale down to exactly
+        # 1.0 while preserving each ticker's RELATIVE risk allocation (SPY's tighter stop still
+        # gets proportionally more weight than QQQ's wider one after scaling).
+        cfg = BacktestConfig(sizing_method="risk_based", risk_per_trade_pct=0.05, stop_loss_pct=0.10,
+                              max_position_weight=0.9,
+                              ticker_risk_overrides={"SPY": {"stop_loss_pct": 0.05}})  # SPY: 0.05/0.05=1.0, QQQ: 0.05/0.10=0.5
+        as_of = synthetic_daily_prices.index[-1]
+        weights = resolve_target_weights(["SPY", "QQQ"], synthetic_daily_prices, as_of, cfg)
+        assert sum(weights.values()) == pytest.approx(1.0, abs=1e-6)
+        assert weights["SPY"] == pytest.approx(2 / 3, abs=1e-6)  # 1.0 / (1.0 + 0.5)
+        assert weights["QQQ"] == pytest.approx(1 / 3, abs=1e-6)  # 0.5 / (1.0 + 0.5)
+
+    def test_risk_based_still_subject_to_position_caps(self, synthetic_daily_prices):
+        # Confirms _risk_based_weights() output still flows through the shared
+        # _apply_position_caps() step afterward, same as every other sizing_method.
+        cfg = BacktestConfig(sizing_method="risk_based", risk_per_trade_pct=0.05, stop_loss_pct=0.05,
+                              max_position_weight=0.35)  # raw weight would be 1.0 each, way over cap
+        as_of = synthetic_daily_prices.index[-1]
+        weights = resolve_target_weights(["SPY", "QQQ"], synthetic_daily_prices, as_of, cfg)
+        assert weights["SPY"] <= 0.35 + 1e-6
+        assert weights["QQQ"] <= 0.35 + 1e-6
+
     def test_volatility_budget_caps_high_vol_position_more_than_low_vol(self):
         # The "Volatility-Adjustment" (Scaling) constraint: two tickers start at an equal
         # custom_weights split, position_vol_budget should cap the high-vol ticker well
@@ -785,6 +829,19 @@ class TestApplyPositionCaps:
         result = _apply_position_caps(weights, max_weight=0.5)
         for t in weights:
             assert result[t] == pytest.approx(weights[t])
+
+    def test_under_one_total_is_not_inflated_when_no_cap_triggers(self):
+        # Real, confirmed bug found while adding "risk_based" sizing (Epic 3, "Institutional
+        # Momentum Best-Practice Gaps" plan): the old code's final renormalize always targeted a
+        # hardcoded 1.0, so a genuinely-under-invested input (no ticker anywhere near
+        # max_weight, nothing to cap at all) got silently rescaled UP to full investment,
+        # defeating risk_based sizing's whole point of leaving an under-1.0 sum as real cash.
+        # Must now preserve the input's OWN total (0.4), not force it to 1.0.
+        from momentum_trading.backtest.momentum_backtest import _apply_position_caps
+        result = _apply_position_caps({"A": 0.2, "B": 0.2}, max_weight=0.9)
+        assert result["A"] == pytest.approx(0.2)
+        assert result["B"] == pytest.approx(0.2)
+        assert sum(result.values()) == pytest.approx(0.4)
 
     def test_single_ticker_cap_is_not_defeated_by_renormalization(self):
         # Real, confirmed bug (Epic 4, found via a single-ticker portfolio): with no other

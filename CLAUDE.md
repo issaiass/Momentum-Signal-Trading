@@ -432,6 +432,20 @@ that tests enforce, don't casually violate these when editing:
   `monthly_picks` series used elsewhere in this project's own tests/notebooks never surface this
   (losing only the very first of many rebalances doesn't visibly break anything), which is
   presumably why it was never caught before. Not fixed here, flagged for a future look.
+  `use_trailing_stop: bool = False` + `trailing_stop_pct: float | None = None` (Epic 1,
+  "Institutional Momentum Best-Practice Gaps" plan, opt-in, `False` byte-identical to before)
+  back the "Trailing Stop-Loss" constraint: distinct from `stop_loss_pct` (fixed from entry,
+  never ratchets), this exits once price has fallen `trailing_stop_pct` from a position's OWN
+  highest price since entry, locking in gains as a position runs up, not just capping losses. A
+  deliberate Python-side daily ratchet (same "daily check" philosophy as the existing fixed
+  stop-loss block right above it in `run_risk_managed_backtest()`'s day loop), NOT a
+  broker-native IBKR `TRAIL` order (a considered choice, not an oversight, see
+  `docs/RISK_CONSTRAINTS.md`'s "Trailing Stop-Loss" for the full rationale). A `running_high: dict`
+  tracked alongside the pre-existing `entry_prices: dict`, identical lifecycle (both set on a new
+  BUY, both cleared together on any exit, whether triggered by the fixed stop, the trailing stop,
+  the time-based stop, or a normal rebalance SELL), so a closed-then-reopened position always
+  starts a fresh trail rather than inheriting a stale high. `execution/live_signal.py`'s
+  `check_and_handle_trailing_stops()` is the LIVE counterpart, see that file's own bullet.
 - **`execution/live_signal.py`**, live signal/order generation, IBKR integration (`ibapi`
   `EClient`/`EWrapper`, not a third-party wrapper), multi-portfolio orchestration, FIFO P&L,
   hash-chained audit log. `fetch_ohlcv_for_tickers()` is distinct from `fetch_live_prices()`,
@@ -807,6 +821,23 @@ that tests enforce, don't casually violate these when editing:
   through to real order sizing, and real paper `BUY 5 EFA`/`BUY 7 EEM` orders were placed at
   that throttled size rather than the 100% an SMA-only check would have allowed. See
   `docs/RISK_CONSTRAINTS.md`'s "Regime Filter: Volatility Dimension".
+  A real, confirmed bug found and fixed while paper-verifying Epic 1's trailing stop (below),
+  unrelated to trailing-stop logic itself: `generate_orders()`'s price-validity guard,
+  `if price is None or price <= 0:`, does not catch a `NaN` price (`NaN <= 0` is `False` in
+  Python, a comparison against `NaN` is always `False`), so a `NaN` price silently fell through
+  as if valid, reaching `int(shares)` further down and crashing with `ValueError: cannot convert
+  float NaN to integer`. Confirmed directly against a real paper-account run, not synthetic:
+  yfinance's most recent trading-day row for XLRE was `NaN` (a vendor data-lag case, the
+  most-recent session's close not yet populated), not a hypothetical edge case. Fixed by adding
+  an explicit `pd.isna(price)` check alongside the existing `None`/`<= 0` checks, a `NaN` price
+  now correctly resolves to the same safe `"no live price available"` HOLD every other
+  missing-price case already gets, rather than propagating into share-count arithmetic. See
+  `docs/RISK_CONSTRAINTS.md`'s "Trailing Stop-Loss" for the full incident writeup.
+  `check_and_handle_trailing_stops()` (`daily_runner.py`, Epic 1, "Institutional Momentum
+  Best-Practice Gaps" plan) is the LIVE counterpart to this file's `run_risk_managed_backtest()`
+  trailing-stop block (see that file's own bullet for the shared design rationale); this
+  function's own bullet lives under `daily_runner.py` below, alongside its two siblings
+  `check_and_handle_stop_losses()`/`check_and_handle_time_stops()`.
 - **`risk/circuit_breaker.py`**, extracted from `daily_runner.py` with alerting
   dependency-injected (`alert_fn` param) specifically so `risk/` has zero import dependency on
   `interfaces/`, enforced by an AST-based test
@@ -1186,6 +1217,33 @@ that tests enforce, don't casually violate these when editing:
   day, a real, newly-relevant risk once this check runs unconditionally rather than only
   alongside an already-successful rebalance. See `docs/EMAIL_REPORTING.md`'s updated PERIODIC
   section.
+  `check_and_handle_trailing_stops()` (Epic 1, "Institutional Momentum Best-Practice Gaps" plan)
+  is a third daily exit check, parallel to and following the exact same flag-or-auto-execute
+  shape as `check_and_handle_stop_losses()`/`check_and_handle_time_stops()` (same
+  `cfg.auto_execute_stop_loss` toggle, same `log_alert()`/`log_orders()`/`place_orders_ibkr()`
+  triple-step). Persists a per-portfolio high-water-mark JSON file,
+  `data_dir() / f"trailing_stop_hwm_{portfolio}.json"` (`{ticker: high_price}`), same
+  flat-file-in-`data_dir()` convention as `risk/circuit_breaker.py`'s `_peak_equity_path()` and
+  `detect_and_log_config_change()`'s config snapshot, written atomically (temp file +
+  `os.replace()`, matching `_write_rebalance_in_progress_marker()`'s precedent). Each run: prune
+  any ticker no longer in `current_positions` (a full exit, so a later re-entry starts a fresh
+  trail rather than inheriting a stale high), update `hwm = max(stored.get(t, entry_price),
+  latest_price)` for every currently-held ticker, flag for exit once drawdown from that high
+  breaches `cfg.trailing_stop_pct`. Reuses `resolve_ticker_stop_loss_pct()`'s existing
+  `ticker_risk_overrides[ticker]['enabled']` kill-switch, same single "stop-checking off for this
+  ticker" semantics the fixed stop-loss check already uses.
+  A real, confirmed pre-existing gap found and fixed while wiring this third check in, unrelated
+  to trailing-stop logic itself: `check_and_handle_stop_losses()` and
+  `check_and_handle_time_stops()` already ran back-to-back against the SAME `current_positions`
+  snapshot with zero de-duplication, confirmed by reading the call site, a ticker breaching BOTH
+  in the same run would already generate two independent live SELL orders before this fix, adding
+  a third independent check without fixing this would have made a three-way collision possible.
+  All three functions now take an optional `already_flagged: set | None = None` param (`None`
+  default byte-identical to before this param existed for any pre-existing caller/test): a ticker
+  already in the set (flagged by an earlier check this run) is skipped, and each function's own
+  newly-flagged tickers are added to the set (mutated in place) before returning. The
+  per-portfolio loop's call site now constructs one `already_flagged_this_run: set` and threads
+  it through all three calls.
 
 **Config flow**: `config.yaml` (gitignored; copy from `config.example.yaml`) →
 `daily_runner.load_config()` builds one `BacktestConfig` per portfolio from

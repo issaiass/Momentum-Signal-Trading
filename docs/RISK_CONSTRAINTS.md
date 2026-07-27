@@ -386,12 +386,60 @@ research, a wider fixed stop is genuinely less likely to trigger on routine vola
 from entry offers zero additional protection to an already-profitable position beyond the same
 flat percentage every other position gets; a position up 40% still only exits if it round-trips
 all the way back down 15-20% from its ORIGINAL entry, not from its peak. If you specifically want
-the gain-locking behavior, that's a genuine trailing stop, which does not exist anywhere in this
-codebase today, neither the Python-side `auto_execute_stop_loss` check nor the broker-side
-`attach_broker_stop_loss` bracket (IBKR's native `TRAIL` order type exists and would implement
-this, but `attach_broker_stop_loss` submits a plain `STP` at a fixed `auxPrice`, not a `TRAIL`
-order that IBKR itself would ratchet). Tracked as a real, documented gap, not implemented, see
-`README.md`'s Known Gaps.
+the gain-locking behavior, that's a genuine trailing stop, see "Trailing Stop-Loss" below (a
+Python-side daily ratchet, not a broker-native `TRAIL` order, that half remains a documented gap,
+see `README.md`'s Known Gaps).
+
+## Trailing Stop-Loss [New, LIVE + BACKTEST, opt-in] [`use_trailing_stop`/`trailing_stop_pct`]
+
+Closes the gain-locking gap the section above documents. Distinct from `stop_loss_pct` (measured
+from entry, never moves): `trailing_stop_pct` is measured from a position's own highest price
+seen since entry, exits once the current price has fallen `trailing_stop_pct` from that high, so
+a position up 50% that pulls back 10% from its peak exits with most of the gain locked in, a
+fixed from-entry stop would never trigger on that same pullback at all. Independent of and
+complementary to `stop_loss_pct` (a portfolio can run both at once, whichever triggers first
+wins; `stop_loss_pct` still bounds the worst case on a position that never rallies).
+
+**Implementation, deliberately a Python-side daily ratchet, not a broker-native IBKR `TRAIL`
+order** (a considered, explicit choice, not an oversight): `TRAIL` would protect intraday and
+even while this app isn't running, but is a new, unexercised IBKR order type on a project with a
+real history of IBKR API surprises (see `README.md`'s Project Maturity section), and can't be
+exercised in dry-run at all. The Python-side check mirrors this project's own established
+`auto_execute_stop_loss` pattern instead: checked once per invocation (not intraday), fully
+testable in dry-run, no new broker order type. A future broker-native `TRAIL` bracket (alongside
+the existing `attach_broker_stop_loss` fixed `STP`) remains a documented, not-yet-built option.
+
+- LIVE (`daily_runner.py`'s `check_and_handle_trailing_stops()`, in the same "ALWAYS runs"
+  per-portfolio block as `check_and_handle_stop_losses()`/`check_and_handle_time_stops()`):
+  persists each ticker's high-water-mark to `data/trailing_stop_hwm_<portfolio>.json`, since
+  `daily-runner` is a stateless CLI process re-invoked by cron, this file is what lets the trail
+  survive across separate invocations. A ticker no longer held is pruned from this file, so a
+  later re-entry always starts a fresh trail rather than inheriting a stale high. Honors
+  `ticker_risk_overrides[ticker]['enabled']`, the same kill-switch `stop_loss_pct` already uses
+  (a disabled ticker is skipped by both checks); flag-vs-auto-execute follows the same
+  `auto_execute_stop_loss` toggle as every other exit check here.
+- BACKTEST (`backtest/momentum_backtest.py`'s `run_risk_managed_backtest()`): a `running_high`
+  dict tracked alongside the existing `entry_prices` dict in the day loop, same lifecycle (both
+  cleared together on exit or re-entry). Same daily-bar gap-risk limitation as the fixed
+  stop-loss check documented above, a real overnight gap will not be caught at its true level.
+
+```yaml
+risk_overrides:
+  use_trailing_stop: true         # opt-in, false (default) is byte-identical to before this
+                                   # existed
+  trailing_stop_pct: 0.10         # exit once price has fallen 10% from its post-entry high
+```
+
+**A real, confirmed bug found while paper-verifying this feature, unrelated to the trailing-stop
+logic itself, fixed alongside it**: `execution/live_signal.py`'s `generate_orders()` crashed with
+`ValueError: cannot convert float NaN to integer` when a ticker's latest fetched price was `NaN`
+(confirmed directly against a real paper-account run: yfinance's most recent trading-day row for
+XLRE was `NaN`, a vendor data-lag case, not synthetic). The price-validity guard,
+`if price is None or price <= 0:`, does not catch `NaN` (`NaN <= 0` is `False` in Python, so a
+`NaN` price silently fell through as if valid, reaching `int(shares)` further down). Fixed with
+an explicit `pd.isna(price)` check alongside the existing `None`/`<= 0` checks, now correctly
+resolves to the same safe `"no live price available"` HOLD every other missing-price case already
+gets. See `README.md`'s Known Gaps for the full incident writeup.
 
 **Configuring the recommended widths** (`config.yaml`, per-portfolio):
 

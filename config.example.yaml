@@ -304,6 +304,19 @@ default_risk:
                                    # (tighter control), 0.15-0.20 for a long-term/monthly
                                    # portfolio (room to breathe through normal pullbacks, still
                                    # not a true trailing stop, see that doc section)
+  use_trailing_stop: false        # opt-in, LIVE + BACKTEST, false (default) is byte-identical to
+                                   # before this existed. Distinct from stop_loss_pct above
+                                   # (fixed from entry): exits once price has fallen
+                                   # trailing_stop_pct below from its OWN highest price since
+                                   # entry, locking in gains as a position runs up, not just
+                                   # capping losses. A Python-side daily ratchet (checked once per
+                                   # invocation, works in dry-run), NOT a broker-native IBKR TRAIL
+                                   # order, no intraday enforcement. Can run alongside
+                                   # stop_loss_pct, whichever triggers first wins. See
+                                   # docs/RISK_CONSTRAINTS.md's "Trailing Stop-Loss".
+  trailing_stop_pct: 0.10         # required (0, 1) when use_trailing_stop is true, else ignored.
+                                   # e.g. 0.10 = exit once price has fallen 10% from its post-entry
+                                   # high.
   auto_execute_stop_loss: false   # true = auto-sell on stop-loss trigger; false = flag + email only
   attach_broker_stop_loss: false  # LIVE-ONLY. Belt-and-suspenders alongside
                                    # auto_execute_stop_loss above, NOT a replacement for it:

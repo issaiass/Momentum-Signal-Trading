@@ -9,6 +9,7 @@ Run with: pytest tests/test_daily_runner.py -v
 See TESTING.md for fixture explanations and how to interpret a failure.
 """
 import csv
+import json
 import os
 import pandas as pd
 import yaml
@@ -18,7 +19,8 @@ import momentum_trading.daily_runner as daily_runner
 from momentum_trading.backtest.momentum_backtest import BacktestConfig
 from momentum_trading.daily_runner import (
     load_config, validate_config_schema, already_ran_today, mark_ran_today, send_alert_email,
-    check_and_handle_time_stops, check_and_handle_stop_losses, resolve_total_values, check_ticker_overlap,
+    check_and_handle_time_stops, check_and_handle_stop_losses, check_and_handle_trailing_stops,
+    resolve_total_values, check_ticker_overlap,
     has_run_on_or_after,
 )
 from momentum_trading.core.audit_log import read_recent_alerts
@@ -1162,6 +1164,168 @@ class TestStopLossCheck:
             log_path=str(tmp_path / "out.csv"), portfolio="p1",
         )
         assert flagged == ["AMD"]
+
+
+class TestTrailingStopCheck:
+    """
+    check_and_handle_trailing_stops() (Epic 1, "Institutional Momentum Best-Practice Gaps"
+    plan): a daily Python-side high-water-mark ratchet, distinct from check_and_handle_stop_losses()
+    above (fixed from entry, never ratchets). Persists the high-water-mark to a per-portfolio
+    JSON file resolved via data_dir() (_trailing_stop_hwm_path() calls it directly, not the
+    LOCK_DIR module-level binding), so data_dir() itself must be patched, same pattern
+    detect_and_log_config_change()'s own tests use, LOCK_DIR patching alone (as
+    TestStopLossCheck/TestTimeStops do for the alert log) would not redirect it.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolate_alerts_log(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(daily_runner, "LOCK_DIR", tmp_path / "data")
+        monkeypatch.setattr(daily_runner, "data_dir", lambda: tmp_path / "data")
+        monkeypatch.setattr(daily_runner, "ALERTS_LOG_PATH", str(tmp_path / "data" / "alerts_log.csv"))
+
+    def test_disabled_when_use_trailing_stop_is_false(self, tmp_path):
+        cfg = BacktestConfig(use_trailing_stop=False)
+        flagged = check_and_handle_trailing_stops(
+            tickers=["XLK"],
+            current_positions={"XLK": {"shares": 10, "avg_entry_price": 100.0}},
+            latest_prices={"XLK": 50.0}, cfg=cfg, dry_run=True, ibkr_port=7497,
+            log_path=str(tmp_path / "out.csv"), portfolio="p1",
+        )
+        assert flagged == []
+
+    def test_triggers_on_drawdown_from_a_new_high_not_from_entry(self, tmp_path):
+        # Entry at 100, price ran up to 150 (a new high), then fell to 130.5: down 13% from the
+        # 150 high (breaches a 10% trail) but still UP overall from the 100 entry, a fixed
+        # from-entry stop-loss would never catch this.
+        cfg = BacktestConfig(use_trailing_stop=True, trailing_stop_pct=0.10)
+        positions = {"XLK": {"shares": 10, "avg_entry_price": 100.0}}
+        # first run: price at the 150 high, establishes the HWM, must not trigger
+        flagged = check_and_handle_trailing_stops(
+            tickers=["XLK"], current_positions=positions, latest_prices={"XLK": 150.0},
+            cfg=cfg, dry_run=True, ibkr_port=7497,
+            log_path=str(tmp_path / "out.csv"), portfolio="p1",
+        )
+        assert flagged == []
+        # second run: price falls to 130.5 (13% off the persisted 150 high)
+        flagged = check_and_handle_trailing_stops(
+            tickers=["XLK"], current_positions=positions, latest_prices={"XLK": 130.5},
+            cfg=cfg, dry_run=True, ibkr_port=7497,
+            log_path=str(tmp_path / "out.csv"), portfolio="p1",
+        )
+        assert flagged == ["XLK"]
+        rows = read_recent_alerts(portfolio="p1", log_path=str(tmp_path / "data" / "alerts_log.csv"))
+        assert rows[-1]["alert_type"] == "TRAILING_STOP_TRIGGERED"
+
+    def test_high_water_mark_persists_across_invocations(self, tmp_path):
+        cfg = BacktestConfig(use_trailing_stop=True, trailing_stop_pct=0.10)
+        positions = {"XLK": {"shares": 10, "avg_entry_price": 100.0}}
+        check_and_handle_trailing_stops(
+            tickers=["XLK"], current_positions=positions, latest_prices={"XLK": 200.0},
+            cfg=cfg, dry_run=True, ibkr_port=7497,
+            log_path=str(tmp_path / "out.csv"), portfolio="p1",
+        )
+        hwm_path = tmp_path / "data" / "trailing_stop_hwm_p1.json"
+        assert hwm_path.is_file()
+        assert json.loads(hwm_path.read_text())["XLK"] == 200.0
+
+    def test_closed_position_prunes_stale_high_water_mark(self, tmp_path):
+        # Pruning only happens for a ticker genuinely ABSENT from current_positions (the real
+        # broker/dry-run reconstruction no longer reports it once fully sold), so this
+        # reproduces the real close-then-reopen sequence: seed a stale high, run once with the
+        # ticker absent (prunes it), THEN run again with a fresh, much-lower re-entry.
+        cfg = BacktestConfig(use_trailing_stop=True, trailing_stop_pct=0.10)
+        hwm_path = tmp_path / "data" / "trailing_stop_hwm_p1.json"
+        hwm_path.parent.mkdir(parents=True, exist_ok=True)
+        hwm_path.write_text(json.dumps({"XLK": 200.0}))
+
+        check_and_handle_trailing_stops(
+            tickers=["XLK"], current_positions={}, latest_prices={},
+            cfg=cfg, dry_run=True, ibkr_port=7497,
+            log_path=str(tmp_path / "out.csv"), portfolio="p1",
+        )
+        assert json.loads(hwm_path.read_text()) == {}  # pruned while absent
+
+        flagged = check_and_handle_trailing_stops(
+            tickers=["XLK"],
+            current_positions={"XLK": {"shares": 10, "avg_entry_price": 50.0}},
+            latest_prices={"XLK": 46.0},  # 8% below the new 50 entry, under a 10% trail
+            cfg=cfg, dry_run=True, ibkr_port=7497,
+            log_path=str(tmp_path / "out.csv"), portfolio="p1",
+        )
+        assert flagged == []
+        assert json.loads(hwm_path.read_text())["XLK"] == 50.0
+
+    def test_per_ticker_disabled_override_is_never_flagged(self, tmp_path):
+        cfg = BacktestConfig(use_trailing_stop=True, trailing_stop_pct=0.10,
+                              ticker_risk_overrides={"XLK": {"enabled": False}})
+        flagged = check_and_handle_trailing_stops(
+            tickers=["XLK"],
+            current_positions={"XLK": {"shares": 10, "avg_entry_price": 100.0}},
+            latest_prices={"XLK": 50.0}, cfg=cfg, dry_run=True, ibkr_port=7497,
+            log_path=str(tmp_path / "out.csv"), portfolio="p1",
+        )
+        assert flagged == []
+
+    def test_auto_executed_when_enabled(self, tmp_path):
+        cfg = BacktestConfig(use_trailing_stop=True, trailing_stop_pct=0.10, auto_execute_stop_loss=True)
+        out_path = tmp_path / "out.csv"
+        positions = {"XLK": {"shares": 10, "avg_entry_price": 100.0}}
+        check_and_handle_trailing_stops(
+            tickers=["XLK"], current_positions=positions, latest_prices={"XLK": 150.0},
+            cfg=cfg, dry_run=True, ibkr_port=7497, log_path=str(out_path), portfolio="p1",
+        )
+        flagged = check_and_handle_trailing_stops(
+            tickers=["XLK"], current_positions=positions, latest_prices={"XLK": 130.0},
+            cfg=cfg, dry_run=True, ibkr_port=7497, log_path=str(out_path), portfolio="p1",
+        )
+        assert flagged == ["XLK"]
+        logged = pd.read_csv(out_path)
+        assert logged.iloc[0]["action"] == "SELL"
+        assert logged.iloc[0]["reason"] == "trailing-stop auto-exit"
+
+
+class TestStopCheckDedup:
+    """
+    Epic 1, Story 1.3: check_and_handle_stop_losses()/check_and_handle_time_stops()/
+    check_and_handle_trailing_stops() run back-to-back against the SAME current_positions
+    snapshot in daily_runner.py's per-portfolio loop; a ticker breaching more than one check in
+    the same run must be sold exactly once, not once per check, via a shared already_flagged
+    set threaded through all three.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolate_alerts_log(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(daily_runner, "LOCK_DIR", tmp_path / "data")
+        monkeypatch.setattr(daily_runner, "ALERTS_LOG_PATH", str(tmp_path / "data" / "alerts_log.csv"))
+
+    def test_ticker_breaching_two_checks_is_flagged_by_only_the_first(self, tmp_path):
+        old = pd.Timestamp.now() - pd.Timedelta(days=40)
+        trade_log = tmp_path / "trade_log.csv"
+        with open(trade_log, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["timestamp", "ticker", "action", "shares"])
+            w.writerow([old.isoformat(), "XLK", "BUY", 10])
+
+        # XLK is down 20% from entry (breaches a 10% fixed stop) AND held 40 days
+        # (breaches a 30-day max_holding_days), both checks would independently flag it.
+        cfg = BacktestConfig(stop_loss_pct=0.10, max_holding_days=30)
+        positions = {"XLK": {"shares": 10, "avg_entry_price": 100.0}}
+        prices = {"XLK": 80.0}
+        already_flagged: set = set()
+
+        first = check_and_handle_stop_losses(
+            tickers=["XLK"], current_positions=positions, latest_prices=prices, cfg=cfg,
+            dry_run=True, ibkr_port=7497, log_path=str(tmp_path / "out.csv"), portfolio="p1",
+            already_flagged=already_flagged,
+        )
+        second = check_and_handle_time_stops(
+            tickers=["XLK"], current_positions=positions, latest_prices=prices, cfg=cfg,
+            dry_run=True, ibkr_port=7497, log_path=str(tmp_path / "out.csv"),
+            trade_log_path=str(trade_log), portfolio="p1", already_flagged=already_flagged,
+        )
+        assert first == ["XLK"]
+        assert second == []  # already flagged by the first check, not re-flagged
+        assert already_flagged == {"XLK"}
 
 
 class TestAlertsReportEmailCommand:

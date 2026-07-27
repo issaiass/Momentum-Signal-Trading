@@ -1977,6 +1977,24 @@ class TestGenerateOrders:
         assert orders["GHOST"]["money_invested"] == pytest.approx(500.0)
         assert orders["GHOST"]["pct_money_invested"] == pytest.approx(0.5)
 
+    def test_nan_price_is_treated_as_no_live_price_not_a_crash(self):
+        # Real, confirmed bug found during Epic 1 ("Institutional Momentum Best-Practice Gaps"
+        # plan) real paper-account verification: a vendor's most recent trading-day row can be
+        # NaN (confirmed directly: yfinance returned a NaN close for XLRE's latest row), which
+        # `price is None or price <= 0` does NOT catch (NaN comparisons are always False in
+        # Python), silently flowing through to `int(shares)` and crashing with
+        # `ValueError: cannot convert float NaN to integer`. Must resolve to the same safe HOLD
+        # branch a None or non-positive price already does, not raise.
+        import numpy as np
+        cfg = BacktestConfig(drift_threshold=0.0, min_trade_size=1.0)
+        orders = generate_orders(
+            current_holdings={}, target_weights={"XLRE": 1.0}, gross_exposure=1.0,
+            total_value=200.0, latest_prices={"XLRE": np.nan}, cfg=cfg,
+        )
+        assert orders["XLRE"]["action"] == "HOLD"
+        assert orders["XLRE"]["reason"] == "no live price available"
+        assert orders["XLRE"]["shares"] == 0
+
     def test_buy_order_stop_loss_price_is_money_invested_times_pct(self):
         cfg = BacktestConfig(drift_threshold=0.0, min_trade_size=1.0, stop_loss_pct=0.10)
         orders = generate_orders(

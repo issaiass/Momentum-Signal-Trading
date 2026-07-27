@@ -84,7 +84,13 @@ README says so on purpose.
   stop-loss check for any single ticker, or give it its own width instead of the portfolio-wide
   `stop_loss_pct`, honored everywhere `stop_loss_pct` is consulted (the daily drawdown check,
   reporting, and the broker-side bracket above), see `docs/RISK_CONSTRAINTS.md`'s "Per-Ticker
-  Stop-Loss Override" section. Flooring remainder redeployment (`redeploy_flooring_remainder`,
+  Stop-Loss Override" section. Trailing stop-loss (`use_trailing_stop`/`trailing_stop_pct`,
+  opt-in, LIVE + BACKTEST): distinct from the fixed-from-entry `stop_loss_pct` above, exits once
+  price has fallen `trailing_stop_pct` from a position's OWN highest price since entry, locking
+  in gains as a position runs up rather than only capping losses; a Python-side daily ratchet
+  (works in dry-run, no new IBKR order type), not a broker-native `TRAIL` order, see
+  `docs/RISK_CONSTRAINTS.md`'s "Trailing Stop-Loss" section. Flooring remainder redeployment
+  (`redeploy_flooring_remainder`,
   opt-in): since IBKR has no fractional equity order support, every BUY floors to a whole share
   count, leaving a small per-ticker leftover unused, this pools that leftover across the
   rebalance's BUYs and redeploys it as extra whole shares of the single top-ranked pick, see
@@ -476,19 +482,32 @@ answer whether the strategy actually works.
   fetch call sites, plus a defensive `INSUFFICIENT_PRICE_HISTORY` warning for the residual edge
   case (a vendor genuinely lacking that much real history for a ticker) that sizing alone can't
   fix. LIVE-ONLY, `lookback_period` has no effect on the backtest engine.
-- **Stop-loss is fixed-from-entry, not trailing, and `risk_monitor.py`'s Docker schedule is one
-  value shared by every portfolio, now documented, no code change**: `stop_loss_pct` is measured
-  from each position's entry price in both the backtest and live paths, confirmed by reading
-  both, it never ratchets up as a position gains, so widening it to 15-20% for a long-term/
-  monthly portfolio (as literature recommends) gives room to breathe through normal pullbacks
-  but does NOT lock in gains the way a genuine trailing stop would; no trailing-stop mechanism
-  exists anywhere in this codebase today. Separately, Docker's `RISK_MONITOR_CRON` applies one
-  schedule to every portfolio in `RISK_MONITOR_PORTFOLIOS`, so a container mixing a short-term
-  portfolio (recommended: check twice daily, 10:00 AM + 3:30 PM ET) with a long-term one
-  (recommended: closing-bell only, 3:45 PM ET) can't express both schedules via `.env` alone.
-  Both gaps, recommended widths/timings, and a zero-code-change host-cron workaround for the
-  scheduling gap are documented in `docs/RISK_CONSTRAINTS.md`'s "Stop-Loss Width" section and
+- **Stop-loss is fixed-from-entry, not trailing (a trailing option now exists, opt-in), and
+  `risk_monitor.py`'s Docker schedule is one value shared by every portfolio, now documented**:
+  `stop_loss_pct` is measured from each position's entry price in both the backtest and live
+  paths, confirmed by reading both, it never ratchets up as a position gains, so widening it to
+  15-20% for a long-term/monthly portfolio (as literature recommends) gives room to breathe
+  through normal pullbacks but does NOT lock in gains the way a genuine trailing stop would.
+  `use_trailing_stop`/`trailing_stop_pct` (opt-in, `false`/`None` default byte-identical to
+  before) now closes this gap: a Python-side daily high-water-mark ratchet, LIVE + BACKTEST,
+  deliberately not a broker-native IBKR `TRAIL` order (documented, considered choice, not an
+  oversight), see `docs/RISK_CONSTRAINTS.md`'s "Trailing Stop-Loss". Separately, Docker's
+  `RISK_MONITOR_CRON` applies one schedule to every portfolio in `RISK_MONITOR_PORTFOLIOS`, so a
+  container mixing a short-term portfolio (recommended: check twice daily, 10:00 AM + 3:30 PM ET)
+  with a long-term one (recommended: closing-bell only, 3:45 PM ET) can't express both schedules
+  via `.env` alone. Recommended widths/timings and a zero-code-change host-cron workaround for
+  the scheduling gap are documented in `docs/RISK_CONSTRAINTS.md`'s "Stop-Loss Width" section and
   `docs/DEPLOYMENT.md`'s "Recommended `risk_monitor.py` timing" section.
+- **A real, confirmed `NaN`-price crash in `generate_orders()`, found during Epic 1's
+  ("Institutional Momentum Best-Practice Gaps" plan) real paper-account trailing-stop
+  verification, now fixed**: a vendor's most recent trading-day row can be `NaN` (confirmed
+  directly, not synthetic: yfinance returned a `NaN` close for XLRE's latest row, a data-lag
+  case), which the price-validity guard `if price is None or price <= 0:` did not catch (`NaN`
+  comparisons are always `False` in Python), silently flowing through to `int(shares)` and
+  crashing with `ValueError: cannot convert float NaN to integer` on an otherwise-normal
+  rebalance. Fixed with an explicit `pd.isna(price)` check; a `NaN` price now resolves to the
+  same safe `"no live price available"` HOLD every other missing-price case already gets. See
+  `docs/RISK_CONSTRAINTS.md`'s "Trailing Stop-Loss" for the full incident writeup.
 - **A real, confirmed hash-chain race in the trade/alert/email-command logs (2026-07-21), now
   fixed**: two `daily-runner --force-rebalance` invocations run seconds apart broke a real
   trade log's tamper-evident hash chain, both read the same "last row hash" before either had

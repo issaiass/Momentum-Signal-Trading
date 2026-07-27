@@ -474,9 +474,24 @@ def load_config(path: str = "config.yaml") -> dict:
 def check_and_handle_stop_losses(
     tickers: list, current_positions: dict, latest_prices: dict, cfg: BacktestConfig,
     dry_run: bool, ibkr_port: int, log_path: str, portfolio: str = "",
+    already_flagged: set | None = None,
 ) -> list:
+    """
+    already_flagged : a set shared across THIS check, check_and_handle_time_stops(), and
+        check_and_handle_trailing_stops() when a caller runs more than one of them against the
+        same current_positions snapshot in one invocation (daily_runner.py's per-portfolio loop
+        does). A ticker already in the set (flagged for exit by an earlier check this run) is
+        skipped here rather than generating a second, redundant SELL order for a position an
+        earlier check already exited; this function's own newly-flagged tickers are added to the
+        set (mutated in place) before returning, so a later check in the same run sees them too.
+        None (default) is byte-identical to this function's behavior before this param existed.
+    """
+    if already_flagged is None:
+        already_flagged = set()
     flagged = []
     for ticker, pos in current_positions.items():
+        if ticker in already_flagged:
+            continue
         entry_price = pos.get("avg_entry_price")
         shares = pos.get("shares", 0)
         if not entry_price or shares <= 0 or ticker not in latest_prices:
@@ -495,6 +510,7 @@ def check_and_handle_stop_losses(
 
     if not flagged:
         return []
+    already_flagged.update(flagged)
 
     if not cfg.auto_execute_stop_loss:
         logger.warning("auto_execute_stop_loss=False: flagged only, no orders placed. Tickers: %s", flagged)
@@ -530,13 +546,22 @@ def check_and_handle_stop_losses(
 def check_and_handle_time_stops(
     tickers: list, current_positions: dict, latest_prices: dict, cfg: BacktestConfig,
     dry_run: bool, ibkr_port: int, log_path: str, trade_log_path: str, portfolio: str = "",
+    already_flagged: set | None = None,
 ) -> list:
+    """
+    already_flagged : see check_and_handle_stop_losses()'s docstring, same shared-set
+        de-duplication contract, shared across all three daily exit checks.
+    """
     if cfg.max_holding_days is None:
         return []
+    if already_flagged is None:
+        already_flagged = set()
 
     flagged = []
     now = pd.Timestamp.now()
     for ticker, pos in current_positions.items():
+        if ticker in already_flagged:
+            continue
         shares = pos.get("shares", 0)
         if shares <= 0 or ticker not in latest_prices:
             continue
@@ -554,6 +579,7 @@ def check_and_handle_time_stops(
 
     if not flagged:
         return []
+    already_flagged.update(flagged)
 
     if not cfg.auto_execute_stop_loss:
         logger.warning("auto_execute_stop_loss=False: flagged only, no orders placed. Tickers: %s", flagged)
@@ -576,6 +602,111 @@ def check_and_handle_time_stops(
                                           expected_prices=latest_prices, alerts_log_path=ALERTS_LOG_PATH,
                                           allow_extended_hours=cfg.allow_extended_hours)
         send_alert_email("Time-stop(s) AUTO-EXECUTED",
+                          f"Tickers exited: {flagged}\nFill results: {fill_results}")
+    return flagged
+
+
+def _trailing_stop_hwm_path(name: str) -> Path:
+    return data_dir() / f"trailing_stop_hwm_{name}.json"
+
+
+# --------------------------------------------------------------------------- #
+# TRAILING STOP CHECK (opt-in, cfg.use_trailing_stop), a daily Python-side
+# ratchet, distinct from the fixed-from-entry check_and_handle_stop_losses()
+# above: exits when price has fallen trailing_stop_pct from a position's OWN
+# highest LATEST-PRICE seen since entry (locks in momentum gains), not from
+# entry price (only caps losses, that function's job). Not a broker-native
+# IBKR TRAIL order (documented future gap, docs/RISK_CONSTRAINTS.md), so
+# protection only applies once per invocation, no intraday enforcement.
+# --------------------------------------------------------------------------- #
+def check_and_handle_trailing_stops(
+    tickers: list, current_positions: dict, latest_prices: dict, cfg: BacktestConfig,
+    dry_run: bool, ibkr_port: int, log_path: str, portfolio: str = "",
+    already_flagged: set | None = None,
+) -> list:
+    """
+    Persists a per-portfolio high-water-mark file, data_dir()'s
+    trailing_stop_hwm_<portfolio>.json ({ticker: high_price}), same flat-JSON-file-in-data_dir()
+    convention as risk/circuit_breaker.py's peak-equity files and
+    detect_and_log_config_change()'s config snapshot, written atomically (temp file +
+    os.replace()) matching _write_rebalance_in_progress_marker()'s precedent. A ticker no longer
+    in current_positions is pruned from the stored file each run, so a closed-then-reopened
+    position always starts a fresh trail (mirrors the backtest day-loop's identical
+    running_high/entry_prices lifecycle in backtest/momentum_backtest.py). Honors
+    resolve_ticker_stop_loss_pct()'s ticker_risk_overrides['enabled'] kill-switch, same single
+    "stop-checking off for this ticker" semantics check_and_handle_stop_losses() already uses;
+    trailing_stop_pct itself is portfolio-wide only, no per-ticker trailing width yet.
+
+    already_flagged : see check_and_handle_stop_losses()'s docstring, same shared-set
+        de-duplication contract.
+    """
+    if not cfg.use_trailing_stop:
+        return []
+    if already_flagged is None:
+        already_flagged = set()
+
+    hwm_path = _trailing_stop_hwm_path(portfolio)
+    try:
+        stored_hwm = json.loads(hwm_path.read_text()) if hwm_path.is_file() else {}
+    except (json.JSONDecodeError, OSError):
+        stored_hwm = {}
+
+    # prune tickers no longer held so a re-entry starts a fresh trail
+    held_tickers = {t for t, pos in current_positions.items() if pos.get("shares", 0) > 0}
+    stored_hwm = {t: h for t, h in stored_hwm.items() if t in held_tickers}
+
+    flagged = []
+    for ticker, pos in current_positions.items():
+        if ticker in already_flagged:
+            continue
+        entry_price = pos.get("avg_entry_price")
+        shares = pos.get("shares", 0)
+        if not entry_price or shares <= 0 or ticker not in latest_prices:
+            continue
+        if resolve_ticker_stop_loss_pct(ticker, cfg) is None:
+            continue  # stop-loss disabled for this ticker (ticker_risk_overrides), never checked
+
+        hwm = max(stored_hwm.get(ticker, entry_price), latest_prices[ticker])
+        stored_hwm[ticker] = hwm
+        drawdown_from_high = (latest_prices[ticker] - hwm) / hwm
+        if drawdown_from_high <= -cfg.trailing_stop_pct:
+            logger.warning("TRAILING-STOP TRIGGERED: %s down %.1f%% from high $%.2f (now $%.2f)",
+                            ticker, drawdown_from_high * 100, hwm, latest_prices[ticker])
+            log_alert(portfolio, "TRAILING_STOP_TRIGGERED", "CRITICAL",
+                      f"{ticker} down {drawdown_from_high:.1%} from high (${hwm:.2f} -> ${latest_prices[ticker]:.2f})",
+                      log_path=ALERTS_LOG_PATH)
+            flagged.append(ticker)
+
+    hwm_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = hwm_path.with_suffix(hwm_path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(stored_hwm))
+    os.replace(tmp_path, hwm_path)
+
+    if not flagged:
+        return []
+    already_flagged.update(flagged)
+
+    if not cfg.auto_execute_stop_loss:
+        logger.warning("auto_execute_stop_loss=False: flagged only, no orders placed. Tickers: %s", flagged)
+        send_alert_email("Trailing stop(s) flagged (manual review needed)",
+                          f"Tickers past trailing-stop threshold: {flagged}\nauto_execute_stop_loss is False, review and exit manually.")
+        return flagged
+
+    # auto-execute: build SELL orders for the full flagged position
+    exit_orders = {
+        t: {"action": "SELL", "shares": current_positions[t]["shares"], "reason": "trailing-stop auto-exit"}
+        for t in flagged
+    }
+    log_orders(exit_orders, latest_prices, dry_run, path=log_path, cfg=cfg)
+
+    if dry_run:
+        logger.info("DRY RUN: trailing-stop exits computed but not sent to broker: %s", flagged)
+    else:
+        logger.warning("AUTO-EXECUTING trailing-stop exits via IBKR: %s", flagged)
+        fill_results = place_orders_ibkr(exit_orders, port=ibkr_port, portfolio=portfolio,
+                                          expected_prices=latest_prices, alerts_log_path=ALERTS_LOG_PATH,
+                                          allow_extended_hours=cfg.allow_extended_hours)
+        send_alert_email("Trailing stop(s) AUTO-EXECUTED",
                           f"Tickers exited: {flagged}\nFill results: {fill_results}")
     return flagged
 
@@ -1837,16 +1968,28 @@ def main():
 
             # --- ALWAYS runs: daily stop-loss check ---
             if current_positions:
+                # shared across all three exit checks below so a ticker breaching more than one
+                # in the same run is sold exactly once, not once per check (Epic 1, Story 1.3)
+                already_flagged_this_run: set = set()
                 check_and_handle_stop_losses(
                     tickers, current_positions, latest_prices, cfg,
                     dry_run=not args.live, ibkr_port=args.port,
                     log_path=trade_log_path, portfolio=name,
+                    already_flagged=already_flagged_this_run,
                 )
                 # --- Daily time-based stop check (max_holding_days) ---
                 check_and_handle_time_stops(
                     tickers, current_positions, latest_prices, cfg,
                     dry_run=not args.live, ibkr_port=args.port,
                     log_path=trade_log_path, trade_log_path=trade_log_path, portfolio=name,
+                    already_flagged=already_flagged_this_run,
+                )
+                # --- Daily trailing-stop check (opt-in, cfg.use_trailing_stop) ---
+                check_and_handle_trailing_stops(
+                    tickers, current_positions, latest_prices, cfg,
+                    dry_run=not args.live, ibkr_port=args.port,
+                    log_path=trade_log_path, portfolio=name,
+                    already_flagged=already_flagged_this_run,
                 )
 
             # --- ALWAYS runs: portfolio snapshot, independent

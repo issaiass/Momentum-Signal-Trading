@@ -269,6 +269,17 @@ class BacktestConfig:
         # 'stop_loss_pct' key uses that ticker-specific width instead of the portfolio
         # default. See execution/live_signal.py's resolve_ticker_stop_loss_pct() and
         # docs/RISK_CONSTRAINTS.md's "Per-Ticker Stop-Loss Override".
+    use_trailing_stop: bool = False         # opt-in (False byte-identical to before this
+        # existed). Unlike stop_loss_pct above (fixed from entry, never ratchets), this exits
+        # a position when price drops trailing_stop_pct from its OWN highest close since entry,
+        # locking in momentum gains rather than only capping losses. LIVE + BACKTEST (both
+        # daily-close checks, not a broker-native TRAIL order, no intraday enforcement). Honors
+        # ticker_risk_overrides['enabled'] the same kill-switch as stop_loss_pct (a
+        # disabled ticker is skipped by both checks); no separate per-ticker trailing width
+        # exists yet, trailing_stop_pct below is portfolio-wide only. See
+        # docs/RISK_CONSTRAINTS.md's "Trailing Stop-Loss".
+    trailing_stop_pct: float | None = None  # required in (0, 1) when use_trailing_stop is True,
+        # else ignored. e.g. 0.10 exits once price has fallen 10% from its post-entry high.
     use_regime_filter: bool = True
     regime_benchmark: str = "SPY"
     regime_sma_window: int = 200
@@ -493,6 +504,10 @@ class BacktestConfig:
             errors.append(f"ticker_sectors ({self.ticker_sectors!r}) must be a dict")
         if not (0 < self.stop_loss_pct < 1.0):
             errors.append(f"stop_loss_pct ({self.stop_loss_pct}) should be in (0, 1.0)")
+        if self.use_trailing_stop and self.trailing_stop_pct is None:
+            errors.append("use_trailing_stop is True but trailing_stop_pct is None, set a width")
+        if self.trailing_stop_pct is not None and not (0 < self.trailing_stop_pct < 1.0):
+            errors.append(f"trailing_stop_pct ({self.trailing_stop_pct}) should be in (0, 1.0) or None")
         if not isinstance(self.ticker_risk_overrides, dict):
             errors.append(f"ticker_risk_overrides ({self.ticker_risk_overrides!r}) must be a dict")
         else:
@@ -1129,6 +1144,9 @@ def run_risk_managed_backtest(
     cash = config.initial_capital
     holdings: dict[str, float] = {}
     entry_prices: dict[str, float] = {}
+    running_high: dict[str, float] = {}  # trailing-stop high-water-mark, mirrors entry_prices'
+        # lifecycle exactly (set together on entry, cleared together on exit) so a
+        # closed-then-reopened position always starts a fresh trail
     entry_dates: dict[str, pd.Timestamp] = {}  # time-based stops
     portfolio_history = [(prices.index[0], config.initial_capital)]
     months_held = 0
@@ -1179,11 +1197,45 @@ def run_risk_managed_backtest(
                     total_commission_paid += config.commission
                     del holdings[ticker]
                     del entry_prices[ticker]
+                    running_high.pop(ticker, None)
                     log_file.write(
                         f"{today.strftime('%Y-%m-%d')} STOP-LOSS: sold {shares:,.0f} {ticker} "
                         f"@ ${exec_price:,.2f} (drawdown {dd:.1%})\n"
                     )
                     entry_dates.pop(ticker, None)
+
+            # ---------------- TRAILING STOP (opt-in, use_trailing_stop) --------------
+            # Same daily-close-only, no-intraday-enforcement limitation documented on the
+            # fixed stop-loss block above: exits when price has fallen trailing_stop_pct from
+            # its OWN highest close since entry (locks in gains), not from entry price (only
+            # caps losses, the fixed stop-loss block's job). running_high is bootstrapped from
+            # entry_prices via .get()'s fallback on a position's first day held, so no special
+            # case is needed at the BUY site.
+            if config.use_trailing_stop:
+                for ticker in list(holdings.keys()):
+                    if ticker not in prices.columns or pd.isna(today_prices.get(ticker)):
+                        continue
+                    entry = entry_prices.get(ticker)
+                    if entry is None or entry <= 0:
+                        continue
+                    running_high[ticker] = max(running_high.get(ticker, entry), today_prices[ticker])
+                    high = running_high[ticker]
+                    dd_from_high = (today_prices[ticker] - high) / high
+                    if dd_from_high <= -config.trailing_stop_pct:
+                        shares = holdings[ticker]
+                        fill_ref = today_exec.get(ticker, today_prices[ticker])
+                        exec_price = fill_ref * (1 - config.base_slippage_bps / 10_000)
+                        proceeds = shares * exec_price - config.commission
+                        cash += proceeds
+                        total_commission_paid += config.commission
+                        del holdings[ticker]
+                        del entry_prices[ticker]
+                        running_high.pop(ticker, None)
+                        log_file.write(
+                            f"{today.strftime('%Y-%m-%d')} TRAILING-STOP: sold {shares:,.0f} {ticker} "
+                            f"@ ${exec_price:,.2f} (drawdown {dd_from_high:.1%} from high ${high:,.2f})\n"
+                        )
+                        entry_dates.pop(ticker, None)
 
             # ---------------- TIME-BASED STOP -----------------
             # Force-exits a position after max_holding_days regardless of price,
@@ -1209,6 +1261,7 @@ def run_risk_managed_backtest(
                         total_commission_paid += config.commission
                         del holdings[ticker]
                         entry_prices.pop(ticker, None)
+                        running_high.pop(ticker, None)
                         entry_dates.pop(ticker, None)
                         log_file.write(
                             f"{today.strftime('%Y-%m-%d')} TIME-STOP: sold {shares:,.0f} {ticker} "
@@ -1396,6 +1449,7 @@ def run_risk_managed_backtest(
                                 if holdings[ticker] < 1e-6:
                                     del holdings[ticker]
                                     entry_prices.pop(ticker, None)
+                                    running_high.pop(ticker, None)
                                     entry_dates.pop(ticker, None)
                                 proceeds = shares_to_sell * exec_price - config.commission
                                 cash += proceeds

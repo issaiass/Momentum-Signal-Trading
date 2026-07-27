@@ -845,7 +845,14 @@ def generate_orders(
     for t in all_tickers:
         tgt_dollar = target_dollar.get(t, 0.0)
         price = latest_prices.get(t)
-        if price is None or price <= 0:
+        # pd.isna() is required alongside the <= 0 check: a NaN price (a real, confirmed case,
+        # a vendor's most recent trading-day row not yet populated, e.g. yfinance lagging a
+        # single ticker's latest close) passes `price is None` (False) AND `price <= 0` (also
+        # False, NaN comparisons are always False in Python), silently flowing through as if it
+        # were a valid price and crashing generate_orders()'s later int(shares) conversion on
+        # `ValueError: cannot convert float NaN to integer`, confirmed directly against a real
+        # paper-account run during Epic 1 verification, not a hypothetical.
+        if price is None or pd.isna(price) or price <= 0:
             orders[t] = _with_context({"action": "HOLD", "shares": 0, "reason": "no live price available"}, t, tgt_dollar, price)
             continue
 

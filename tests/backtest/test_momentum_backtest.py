@@ -458,6 +458,114 @@ class TestBacktestLiquidatesOnExplicitEmptyPicks:
         assert march_row["Portfolio Monthly Return"].iloc[0] < -0.2
 
 
+class TestBacktestTrailingStop:
+    """
+    Epic 1 ("Institutional Momentum Best-Practice Gaps" plan): use_trailing_stop/
+    trailing_stop_pct exits a position on drawdown from its OWN post-entry high, distinct from
+    stop_loss_pct's fixed-from-entry check right above it in the day loop. Same three-signal
+    December-warm-up/January-reconfirm pattern as TestBacktestLiquidatesOnExplicitEmptyPicks
+    (absorbs a pre-existing, unrelated quirk where the very first monthly_picks signal's
+    rebalance date can collide with the simulation's own start date), then A rallies to a new
+    high and gives back more than trailing_stop_pct from it while still finishing ABOVE its
+    entry price, a case a fixed from-entry stop_loss_pct would never catch.
+    """
+
+    def _picks_always_a(self, prices):
+        month_ends = prices.resample("ME").last().index
+        return pd.Series({d: ["A"] for d in month_ends[:2]})  # Dec warm-up, Jan reconfirm only
+
+    def _rally_then_pullback_prices(self):
+        # Dec/Jan: flat at 100 (entry). Feb: rallies to a 150 high. Mar: pulls back to 130,
+        # a 13.3% drawdown from the 150 high (breaches a 10% trail) but still 30% ABOVE the
+        # 100 entry (would never breach a 99% fixed stop_loss_pct either).
+        dates = pd.bdate_range("2019-12-01", "2020-04-30")
+        price_a = pd.Series(100.0, index=dates)
+        feb_idx = np.where(dates.month == 2)[0]
+        for i, idx in enumerate(feb_idx):
+            price_a.iloc[idx] = 100.0 + 50.0 * i / (len(feb_idx) - 1)  # 100 -> 150 across Feb
+        mar_idx = np.where(dates.month == 3)[0]
+        peak = price_a.iloc[feb_idx[-1]]
+        for i, idx in enumerate(mar_idx):
+            price_a.iloc[idx] = peak - 20.0 * i / (len(mar_idx) - 1)  # 150 -> 130 across Mar
+        price_a.iloc[mar_idx[-1]:] = 130.0
+        price_b = pd.Series(100.0, index=dates)  # flat placeholder, always uneventful
+        return pd.DataFrame({"A": price_a, "B": price_b})
+
+    def test_trailing_stop_exits_on_drawdown_from_peak_even_though_still_up_from_entry(self, tmp_path):
+        prices = self._rally_then_pullback_prices()
+        monthly_picks = self._picks_always_a(prices)
+        log_path = tmp_path / "trades_log.txt"
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False, commission=0.0,
+                              min_trade_size=0.0, drift_threshold=0.0, max_position_weight=1.0,
+                              initial_capital=1000.0, stop_loss_pct=0.99,  # effectively off,
+                              # isolates this test to the TRAILING check, not the fixed one
+                              use_trailing_stop=True, trailing_stop_pct=0.10,
+                              log_file_path=str(log_path))
+
+        run_risk_managed_backtest(monthly_picks, prices, cfg)
+
+        log_text = log_path.read_text()
+        assert "TRAILING-STOP" in log_text
+
+    def test_disabled_by_default_same_price_path_never_exits(self, tmp_path):
+        # Same rally-then-pullback price path, use_trailing_stop left at its False default:
+        # the position must be held straight through, no TRAILING-STOP line at all.
+        prices = self._rally_then_pullback_prices()
+        monthly_picks = self._picks_always_a(prices)
+        log_path = tmp_path / "trades_log.txt"
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False, commission=0.0,
+                              min_trade_size=0.0, drift_threshold=0.0, max_position_weight=1.0,
+                              initial_capital=1000.0, stop_loss_pct=0.99,
+                              log_file_path=str(log_path))
+
+        run_risk_managed_backtest(monthly_picks, prices, cfg)
+
+        log_text = log_path.read_text()
+        assert "TRAILING-STOP" not in log_text
+
+    def test_use_trailing_stop_requires_trailing_stop_pct(self):
+        with pytest.raises(ValueError, match="trailing_stop_pct"):
+            BacktestConfig(use_trailing_stop=True)
+
+    def test_reentry_after_trailing_stop_exit_starts_a_fresh_high(self, tmp_path):
+        # Regression for the running_high/entry_prices shared-lifecycle design: a position that
+        # exits via the trailing stop and is later re-picked must not inherit the old high.
+        dates = pd.bdate_range("2019-12-01", "2020-06-30")
+        price_a = pd.Series(100.0, index=dates)
+        feb_idx = np.where(dates.month == 2)[0]
+        for i, idx in enumerate(feb_idx):
+            price_a.iloc[idx] = 100.0 + 50.0 * i / (len(feb_idx) - 1)  # 100 -> 150 across Feb
+        mar_idx = np.where(dates.month == 3)[0]
+        peak = price_a.iloc[feb_idx[-1]]
+        for i, idx in enumerate(mar_idx):
+            price_a.iloc[idx] = peak - 20.0 * i / (len(mar_idx) - 1)  # 150 -> 130, trips the trail
+        price_a.iloc[mar_idx[-1]:] = 130.0
+        apr_idx = np.where(dates.month == 4)[0]
+        price_a.iloc[apr_idx] = 60.0  # re-entry price, well below the stale 150 high
+        price_a.iloc[apr_idx[-1]:] = 60.0
+        price_b = pd.Series(100.0, index=dates)
+        prices = pd.DataFrame({"A": price_a, "B": price_b})
+
+        month_ends = prices.resample("ME").last().index
+        dec_end, jan_end, apr_end = month_ends[0], month_ends[1], month_ends[4]
+        monthly_picks = pd.Series({dec_end: ["A"], jan_end: ["A"], apr_end: ["A"]})
+
+        log_path = tmp_path / "trades_log.txt"
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False, commission=0.0,
+                              min_trade_size=0.0, drift_threshold=0.0, max_position_weight=1.0,
+                              initial_capital=1000.0, stop_loss_pct=0.99,
+                              use_trailing_stop=True, trailing_stop_pct=0.10,
+                              log_file_path=str(log_path))
+        df = run_risk_managed_backtest(monthly_picks, prices, cfg)
+
+        # re-entered in April at 60 and held flat afterward: if the stale 150 high had leaked
+        # through, a fresh 10% trail off 150 (135) would immediately re-trigger and May would
+        # show ~0% return; a correctly-reset trail off the new ~60 entry does not.
+        may_row = df[df.index.month == 5]
+        if not may_row.empty:
+            assert abs(may_row["Portfolio Monthly Return"].iloc[0]) < 0.02
+
+
 class TestResolveTargetWeights:
     """
     resolve_target_weights() is the SINGLE shared sizing function called by

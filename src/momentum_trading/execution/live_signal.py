@@ -2439,15 +2439,18 @@ def run(
     #
     # Deliberately reads FMP_API_KEY/EODHD_API_KEY directly from the environment here, NOT this
     # function's own fmp_api_key/eodhd_api_key params (those are scoped to fetch_live_prices()'s
-    # PRICE vendor selection above, and daily_runner.py deliberately never populates them, real
-    # production price data comes from yfinance, confirmed by every prior epic's live
-    # validation). Reusing them here would have silently switched the real production price
-    # vendor for EVERY portfolio/strategy_type the first time daily_runner.py started passing
-    # real keys through, an unrelated, unbudgeted side effect of wiring up ONLY
-    # hybrid_multi_factor's fundamentals fetch. Same os.environ.get() pattern daily_runner.py's
-    # OTHER existing fundamentals call sites already use, is a no-op (get_cached_or_fetch_
-    # fundamentals() returns {} gracefully) for every strategy_type except hybrid_multi_factor,
-    # which is the only branch that actually calls it.
+    # PRICE vendor selection above). UPDATED (Epic 6, "Stale-Price Reporting + Live Price-Vendor
+    # Priority" plan): daily_runner.py NOW does populate run()'s own fmp_api_key/eodhd_api_key
+    # (previously it deliberately never did, production price data came from yfinance only, see
+    # CLAUDE.md's daily_runner.py bullet for the full reversal). Even so, this fundamentals fetch
+    # still keeps its OWN independent os.environ.get() read rather than reusing run()'s params:
+    # price-vendor selection and fundamentals-vendor selection are deliberately separate
+    # concerns that happen to read the same two env vars today, not the same concern, coupling
+    # them would silently break if either one's source ever needs to diverge (e.g. a paid
+    # fundamentals-only key distinct from the price-feed key). Same os.environ.get() pattern
+    # daily_runner.py's OTHER existing fundamentals call sites already use, is a no-op
+    # (get_cached_or_fetch_fundamentals() returns {} gracefully) for every strategy_type except
+    # hybrid_multi_factor, which is the only branch that actually calls it.
     scores = resolve_strategy_scores(
         daily_prices, tickers, cfg, lookback_period,
         os.environ.get("FMP_API_KEY"), os.environ.get("EODHD_API_KEY"),

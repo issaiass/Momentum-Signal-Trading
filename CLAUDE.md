@@ -627,12 +627,20 @@ that tests enforce, don't casually violate these when editing:
   `FMP_API_KEY`/`EODHD_API_KEY` to fetch real fundamentals; `run()` reads them directly via
   `os.environ.get(...)` at that one call site, DELIBERATELY NOT reusing this function's own
   `fmp_api_key`/`eodhd_api_key` params (those remain scoped to `fetch_live_prices()`'s
-  PRICE-vendor selection only, and `daily_runner.py` deliberately never populates them, confirmed
-  by every strategy-plan epic's live validation, production price data comes from `yfinance`).
-  Reusing the price-fetch keys for fundamentals too would have silently switched the real
-  production price vendor for EVERY portfolio the first time `daily_runner.py` started passing
-  real keys through, an unrelated, unbudgeted side effect discovered and avoided while wiring up
-  `hybrid_multi_factor`.
+  PRICE-vendor selection only). UPDATED (Epic 6, "Stale-Price Reporting + Live Price-Vendor
+  Priority" plan): `daily_runner.py` USED TO deliberately never populate `run()`'s own
+  `fmp_api_key`/`eodhd_api_key` params at all (confirmed by every strategy-plan epic's live
+  validation at the time, production price data came from `yfinance` only); it now does, a
+  deliberate, informed reversal, see this file's own `daily_runner.py` bullet below. This
+  fundamentals-fetch call site's own independent `os.environ.get(...)` read is UNCHANGED by that
+  reversal: price-vendor selection and fundamentals-vendor selection are deliberately kept as
+  separate concerns that happen to read the same two env vars today, not coupled, so either can
+  diverge in the future (e.g. a fundamentals-only key distinct from the price-feed key) without
+  silently affecting the other. Reusing the price-fetch keys for fundamentals here would have
+  silently switched the real production price vendor for EVERY portfolio the first time
+  `daily_runner.py` started passing real keys through for fundamentals ALONE, an unrelated,
+  unbudgeted side effect discovered and avoided while wiring up `hybrid_multi_factor`, still true
+  today even though `daily_runner.py` now legitimately passes real price-vendor keys elsewhere.
   `place_orders_ibkr()`'s `attach_broker_stop_loss`/`stop_loss_pct` params (from
   `BacktestConfig`, belt-and-suspenders alongside `auto_execute_stop_loss`, see
   `docs/RISK_CONSTRAINTS.md`'s "Broker-Side Protective Stop") attach a real IBKR bracket at BUY
@@ -1352,6 +1360,61 @@ that tests enforce, don't casually violate these when editing:
   newly-flagged tickers are added to the set (mutated in place) before returning. The
   per-portfolio loop's call site now constructs one `already_flagged_this_run: set` and threads
   it through all three calls.
+  Live price-vendor priority (Epic 6, "Stale-Price Reporting + Live Price-Vendor Priority" plan):
+  all THREE of this file's `fetch_live_prices()`-related call sites (the `TRIGGER_REPORT` email-
+  command branch, the per-portfolio "ALWAYS runs" block, and the call to `execution/
+  live_signal.py`'s `run()` itself) now read `os.environ.get("FMP_API_KEY")`/
+  `os.environ.get("EODHD_API_KEY")` and pass them through as `fmp_api_key=`/`eodhd_api_key=`
+  kwargs, same inline-read pattern the existing fundamentals call site already used. This is a
+  **deliberate, informed reversal** of a prior deliberate choice (this file previously NEVER
+  populated these params at all, confirmed by every earlier epic's own live validation,
+  production price data came from `yfinance` only regardless of whether these keys were
+  configured), not an oversight, prompted by a real, confirmed incident: investigating a `$nan`
+  "Current Close Price" in a real rebalance email led to discovering `yf.download()` currently
+  returns `NaN` OHLC for the most recent trading day across many tickers at once (see Epic 5,
+  same plan). `core/functions.py`'s `get_bulk_prices()` already implemented a real `FMP ->
+  EODHD -> yfinance` auto-fallback for VENDOR SELECTION (`source=None` mode tries FMP on the
+  FIRST ticker only, catches ANY exception including a quota-exceeded `HTTPError` from
+  `urlopen()`, falls to EODHD, catches, falls to `yfinance`), and `fetch_live_prices()` already
+  accepted and forwarded these params, so wiring real keys through was expected to be the whole
+  fix.
+  **A second real, confirmed bug found via this epic's own real-key production verification
+  (not synthetic, not anticipated by the plan)**: the vendor chosen above is detected from ONE
+  ticker only, but a real API key can fail for a SUBSET of tickers under that SAME vendor even
+  after the first one succeeded, confirmed directly against the real `.env` `FMP_API_KEY`: it
+  returned `402 Payment Required` for several symbols (`ADI`, `ARM`, `ASML`, `AVGO`, `IBKR`,
+  `ORCL`, `QCOM`, `VGT`, `VOO`) while succeeding for others (`AAPL`, `AMD`, `AMZN`, `GOOGL`,
+  `META`, `MSFT`, `NVDA`, `PLTR`, `TSLA`, `TSM`) in the exact same batch, a real plan-tier
+  limitation, not a bug in the key itself. The OLD per-ticker loop passed a FIXED
+  `source=source_used` for every ticker (no fallback for an individual ticker's failure,
+  `get_stock_prices()`'s explicit-source mode raises straight through), silently DROPPING any
+  ticker that failed under the batch-detected vendor from the returned DataFrame entirely;
+  with enough tickers dropped this way, `daily_prices` no longer covered every configured
+  ticker, crashing `execution/live_signal.py`'s `run()` with a `KeyError` several frames away in
+  `core/strategy_signals.py`'s `resolve_strategy_scores()` (`daily_prices[list(tickers)]`), not
+  obviously connected to a vendor `402` at a glance, confirmed via a real
+  `daily-runner --force-rebalance` crash against the real production `config.yaml`. Fixed: when
+  the vendor was auto-detected (`source is None`, the only mode any real call site in this
+  project uses), each ticker's own fetch now cascades through the REMAINING vendors in priority
+  order (starting from `source_used`, so the common, all-succeed case is unchanged, exactly one
+  attempt per ticker) before giving up on that specific ticker, matching "if exhausted, continue
+  to the next API, download the whole portfolio's data" exactly. A second, smaller bug found
+  and fixed alongside it: the adjusted-close COLUMN NAME to extract (`adjClose` for FMP,
+  `adjusted_close` for EODHD, `Adj Close` for yfinance) was computed ONCE for the whole batch
+  from `source_used`, so a ticker that fell back to a DIFFERENT vendor had its real data present
+  but its price column unrecognized (`"Warning: No price column found"`, silently dropped
+  again); `_price_col_for()` (new small helper) is now resolved PER TICKER, from whichever
+  vendor actually answered for it. Explicit-source callers (`source` passed directly to
+  `get_bulk_prices()` itself, not auto-detected) are UNCHANGED by both fixes, no cascade,
+  preserving that strict single-vendor contract. See `tests/core/test_functions.py` (a
+  brand-new file, this module had zero prior pytest coverage).
+  Deliberately scoped to `fetch_live_prices()` only
+  (the momentum-ranking/reporting price feed); `fetch_ohlcv_for_tickers()` (technical indicators,
+  the liquidity filter, technical-confirmation volume) is untouched, still never receives real
+  keys from any `daily_runner.py` call site, out of scope for this epic. Real, immediate
+  production impact once `.env`'s `FMP_API_KEY`/`EODHD_API_KEY` are valid and not already
+  exhausted: every real portfolio's live price feed genuinely starts sourcing from FMP first
+  instead of always falling through to `yfinance`.
 
 **Config flow**: `config.yaml` (gitignored; copy from `config.example.yaml`) →
 `daily_runner.load_config()` builds one `BacktestConfig` per portfolio from

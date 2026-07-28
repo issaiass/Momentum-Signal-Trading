@@ -386,44 +386,93 @@ def get_bulk_prices(
         source_used = source.upper() if source.lower() != 'yf' else 'yf'
     
     # -------------------------------------------------------------------------
-    # Determine adjusted close column name based on source
+    # Determine adjusted close column name based on source. A per-vendor lookup (not just a
+    # single price_col computed from source_used) since a ticker that falls back to a DIFFERENT
+    # vendor mid-batch (see the per-ticker cascade below) needs ITS OWN vendor's column name,
+    # not the batch-detected one, or its real adjusted-close column goes unrecognized even
+    # though the fetch itself succeeded.
     # -------------------------------------------------------------------------
-    if source_used == 'FMP':
-        price_col = 'adjClose'
-    elif source_used == 'EOD':
-        price_col = 'adjusted_close'
-    else:  # yf
-        price_col = 'Adj Close'
-    
+    def _price_col_for(vendor: str) -> str:
+        if vendor == 'FMP':
+            return 'adjClose'
+        elif vendor == 'EOD':
+            return 'adjusted_close'
+        else:  # yf
+            return 'Adj Close'
+
+    price_col = _price_col_for(source_used)
+
     # -------------------------------------------------------------------------
     # Fetch prices for all tickers
+    #
+    # Real, confirmed bug found via Epic 6's ("Stale-Price Reporting + Live Price-Vendor
+    # Priority" plan) real production verification, not synthetic: the vendor chosen above is
+    # detected from ONE ticker only, but a real API key can fail for a SUBSET of tickers under
+    # that SAME vendor even after the first one succeeded (confirmed directly: FMP's free-tier
+    # key here returns `402 Payment Required` for some symbols, e.g. ADI/ARM/ASML, while
+    # succeeding for others, e.g. AAPL/AMD, on the exact same request). Passing a FIXED
+    # `source=source_used` per ticker (the old behavior) has no fallback at all for that one
+    # ticker, `get_stock_prices()`'s explicit-source mode raises straight through, silently
+    # dropping the ticker from the result entirely, if enough tickers drop this way the caller's
+    # OWN required-ticker set no longer matches df_prices.columns, a real `KeyError` several
+    # frames away in resolve_strategy_scores(), not obviously connected to a vendor 402 at a
+    # glance. Fixed: when the vendor itself was auto-detected (source is None, the ONLY mode any
+    # real call site in this project uses), each ticker's own fetch cascades through the
+    # remaining vendors in priority order (starting from source_used, so the common case is
+    # unchanged, exactly one attempt) before giving up on that ticker, matching "if exhausted,
+    # continue to the next API, download the whole portfolio's data" exactly. Explicit-source
+    # callers (source passed directly to get_bulk_prices(), e.g. a test pinning one vendor) are
+    # UNCHANGED, no cascade, preserving that strict single-vendor contract.
     # -------------------------------------------------------------------------
+    vendor_cascade = (
+        [source_used] + [s for s in ('FMP', 'EOD', 'yf') if s != source_used]
+        if source is None else [source_used]
+    )
     price_frames = []
-    
+
     for ticker in tickers:
-        try:
-            df = get_stock_prices(
-                ticker, start_date, end_date,
-                fmp_api_key=fmp_api_key,
-                eodhd_api_key=eodhd_api_key,
-                source=source_used
-            )
-            
-            # Extract adjusted close column, fallback to close if not available
-            if price_col in df.columns:
-                price_series = df[price_col]
-            elif 'close' in df.columns:
-                price_series = df['close']
-            elif 'Close' in df.columns:
-                price_series = df['Close']
-            else:
-                print(f"Warning: No price column found for {ticker}, skipping")
+        df = None
+        last_error = None
+        ticker_price_col = price_col
+        for candidate_source in vendor_cascade:
+            if candidate_source == 'FMP' and not fmp_api_key:
                 continue
-            
-            price_frames.append(price_series.rename(ticker))
-        
-        except Exception as e:
-            print(f"Error retrieving data for {ticker}: {e}")
+            if candidate_source == 'EOD' and not eodhd_api_key:
+                continue
+            try:
+                df = get_stock_prices(
+                    ticker, start_date, end_date,
+                    fmp_api_key=fmp_api_key,
+                    eodhd_api_key=eodhd_api_key,
+                    source=candidate_source
+                )
+                ticker_price_col = _price_col_for(candidate_source)
+                if candidate_source != source_used:
+                    print(f"{ticker}: {source_used} unavailable, fell back to {candidate_source}")
+                break
+            except Exception as e:
+                last_error = e
+                print(f"Error retrieving data for {ticker} from {candidate_source}: {e}")
+                df = None
+
+        if df is None:
+            print(f"Warning: all available sources failed for {ticker} ({last_error}), skipping")
+            continue
+
+        # Extract this ticker's OWN vendor's adjusted-close column (ticker_price_col, not the
+        # shared batch-level price_col, see _price_col_for()'s own comment above), falling back
+        # to plain close if not available.
+        if ticker_price_col in df.columns:
+            price_series = df[ticker_price_col]
+        elif 'close' in df.columns:
+            price_series = df['close']
+        elif 'Close' in df.columns:
+            price_series = df['Close']
+        else:
+            print(f"Warning: No price column found for {ticker}, skipping")
+            continue
+
+        price_frames.append(price_series.rename(ticker))
     
     # Check if any data was retrieved
     if not price_frames:

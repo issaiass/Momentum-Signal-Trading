@@ -1178,6 +1178,8 @@ def check_and_apply_email_commands(portfolio_names: list[str], ibkr_port: int, d
                     daily_prices = with_retry(
                         fetch_live_prices, 3, 2.0, tickers,
                         lookback_days=compute_required_lookback_days(cfg),
+                        fmp_api_key=os.environ.get("FMP_API_KEY"),
+                        eodhd_api_key=os.environ.get("EODHD_API_KEY"),
                     )
                     latest_prices = daily_prices.iloc[-1].to_dict() if not daily_prices.empty else {}
                     report_type = cmd.report_type.lower()
@@ -1895,6 +1897,8 @@ def main():
             daily_prices = with_retry(
                 fetch_live_prices, 3, 2.0, price_fetch_tickers,
                 lookback_days=compute_required_lookback_days(cfg),
+                fmp_api_key=os.environ.get("FMP_API_KEY"),
+                eodhd_api_key=os.environ.get("EODHD_API_KEY"),
             )
             latest_prices = daily_prices.iloc[-1].to_dict() if not daily_prices.empty else {}
 
@@ -2077,6 +2081,8 @@ def main():
                         extra_price_tickers=confirmed_orphaned,
                         daily_prices=daily_prices,
                         signal_rankings_log_path=signal_rankings_log_path,
+                        fmp_api_key=os.environ.get("FMP_API_KEY"),
+                        eodhd_api_key=os.environ.get("EODHD_API_KEY"),
                     )
                 finally:
                     _clear_rebalance_in_progress_marker(name)

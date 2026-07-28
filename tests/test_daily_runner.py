@@ -1866,6 +1866,115 @@ class TestMonthlyReportDecoupledFromRebalanceDay:
         assert "monthly" not in calls
 
 
+class TestVendorPriorityWiring:
+    """
+    Epic 6, "Stale-Price Reporting + Live Price-Vendor Priority" plan: daily_runner.py now reads
+    FMP_API_KEY/EODHD_API_KEY and passes them through to fetch_live_prices() at its "ALWAYS
+    runs" price-fetch call site, a deliberate, informed reversal of the prior choice to never
+    populate them (see CLAUDE.md's daily_runner.py bullet for why), closing the gap that meant
+    production price data always silently fell through to yfinance regardless of whether these
+    keys were configured. core/functions.py's get_bulk_prices() already implements the actual
+    FMP -> EODHD -> yfinance fallback chain (untouched by this epic, no new code there), this
+    just closes the "the keys never even got passed in" gap.
+    """
+
+    def _write_config(self, tmp_path, sample_config_dict):
+        cfg = dict(sample_config_dict)
+        cfg["notifications"] = {}
+        path = tmp_path / "config.yaml"
+        with open(path, "w") as f:
+            yaml.safe_dump(cfg, f)
+        return str(path)
+
+    def _common_mocks(self, monkeypatch, tmp_path, fetch_spy):
+        import momentum_trading.execution.live_signal as live_signal
+        import numpy as np
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(daily_runner, "LOCK_DIR", tmp_path / "data")
+        monkeypatch.setattr(daily_runner, "ALERTS_LOG_PATH", str(tmp_path / "data" / "alerts_log.csv"))
+
+        dates = pd.bdate_range("2026-01-01", periods=30)
+        prices = pd.DataFrame({
+            "SPY": np.linspace(400, 410, 30), "QQQ": np.linspace(300, 310, 30),
+            "XLK": np.linspace(150, 160, 30),
+        }, index=dates)
+
+        def fake_fetch(tickers, **kwargs):
+            fetch_spy.append(kwargs)
+            return prices[list(tickers)]
+
+        monkeypatch.setattr(live_signal, "fetch_live_prices", fake_fetch)
+        monkeypatch.setattr(daily_runner, "get_cached_or_fetch_macro_indicators", lambda **k: {})
+        monkeypatch.setattr(daily_runner, "check_and_apply_email_commands", lambda *a, **k: None)
+        monkeypatch.setattr(daily_runner, "apply_shared_log_retention", lambda *a, **k: None)
+        monkeypatch.setattr(daily_runner, "apply_portfolio_log_retention", lambda *a, **k: None)
+        monkeypatch.setattr(daily_runner, "detect_and_log_config_change", lambda *a, **k: None)
+        monkeypatch.setattr(daily_runner, "write_portfolio_snapshot", lambda *a, **k: None)
+        monkeypatch.setattr(daily_runner, "send_alert_email", lambda *a, **k: None)
+        monkeypatch.setattr(daily_runner, "send_action_email", lambda *a, **k: None)
+        monkeypatch.setattr(daily_runner, "build_and_send_portfolio_report", lambda *a, **k: True)
+        monkeypatch.setattr(daily_runner, "is_rebalance_day", lambda **k: False)
+
+    def test_env_keys_set_are_passed_through_to_fetch_live_prices(self, tmp_path, monkeypatch, sample_config_dict):
+        fetch_spy = []
+        self._common_mocks(monkeypatch, tmp_path, fetch_spy)
+        monkeypatch.setenv("FMP_API_KEY", "test-fmp-key")
+        monkeypatch.setenv("EODHD_API_KEY", "test-eodhd-key")
+        config_path = self._write_config(tmp_path, sample_config_dict)
+        monkeypatch.setattr("sys.argv", ["daily-runner", "--config", config_path])
+
+        daily_runner.main()
+
+        assert fetch_spy  # at least one fetch happened
+        assert any(c.get("fmp_api_key") == "test-fmp-key" for c in fetch_spy)
+        assert any(c.get("eodhd_api_key") == "test-eodhd-key" for c in fetch_spy)
+
+    def test_env_keys_unset_is_byte_identical_to_before(self, tmp_path, monkeypatch, sample_config_dict):
+        fetch_spy = []
+        self._common_mocks(monkeypatch, tmp_path, fetch_spy)
+        monkeypatch.delenv("FMP_API_KEY", raising=False)
+        monkeypatch.delenv("EODHD_API_KEY", raising=False)
+        config_path = self._write_config(tmp_path, sample_config_dict)
+        monkeypatch.setattr("sys.argv", ["daily-runner", "--config", config_path])
+
+        daily_runner.main()
+
+        assert fetch_spy
+        for call_kwargs in fetch_spy:
+            assert call_kwargs.get("fmp_api_key") is None
+            assert call_kwargs.get("eodhd_api_key") is None
+
+    def test_run_call_site_also_receives_the_keys_on_a_rebalance_day(self, tmp_path, monkeypatch, sample_config_dict):
+        # The "ALWAYS runs" fetch above covers the common case; this confirms the run() call
+        # site (the third of the three wired call sites) also receives the keys, for the case
+        # where run()'s own internal fallback fetch is the one that ends up firing.
+        fetch_spy = []
+        self._common_mocks(monkeypatch, tmp_path, fetch_spy)
+        monkeypatch.setattr(daily_runner, "is_rebalance_day", lambda **k: True)
+        monkeypatch.setenv("FMP_API_KEY", "test-fmp-key")
+        monkeypatch.setenv("EODHD_API_KEY", "test-eodhd-key")
+
+        run_spy = []
+
+        class _FakeOrdersResult(dict):
+            picks_were_empty = False
+            full_signal_universe = {}
+
+        def fake_run(*args, **kwargs):
+            run_spy.append(kwargs)
+            return _FakeOrdersResult()
+
+        monkeypatch.setattr(daily_runner, "run", fake_run)
+        config_path = self._write_config(tmp_path, sample_config_dict)
+        monkeypatch.setattr("sys.argv", ["daily-runner", "--config", config_path, "--force-rebalance"])
+
+        daily_runner.main()
+
+        assert run_spy
+        assert run_spy[0].get("fmp_api_key") == "test-fmp-key"
+        assert run_spy[0].get("eodhd_api_key") == "test-eodhd-key"
+
+
 class TestCheckCommandsOnlyFlag:
     """
     --check-commands-only (Epic 3, "Fast, Auto-Applied Email-Triggered Reports" plan) is the

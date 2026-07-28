@@ -583,6 +583,32 @@ answer whether the strategy actually works.
   this fallback, still sees the genuine `NaN` and still correctly holds/skips exactly as before.
   See `docs/SIGNAL_RANKINGS_LOG.md`'s `close_price_as_of` documentation and `CLAUDE.md`'s
   `execution/live_signal.py` bullet.
+- **Live price-vendor priority, a deliberate, informed reversal, not an oversight, plus a
+  second real bug found and fixed via its own real-key production verification**: the
+  momentum-ranking/reporting price feed (`fetch_live_prices()`) previously always fell through to
+  `yfinance` regardless of whether `FMP_API_KEY`/`EODHD_API_KEY` were configured, confirmed by
+  reading every real `daily_runner.py` call site, none of them ever passed real keys in.
+  `daily_runner.py`'s three `fetch_live_prices()`/`run()` call sites now read
+  `FMP_API_KEY`/`EODHD_API_KEY` from the environment and pass them through, closing that gap.
+  Testing this against the REAL `.env` keys surfaced a genuine, previously-invisible bug in
+  `core/functions.py`'s `get_bulk_prices()` (invisible only because no real call site had ever
+  passed real FMP/EODHD keys through before this epic): the vendor is auto-detected from ONE
+  ticker only, but a real key can fail for a SUBSET of tickers under that same vendor even after
+  the first one succeeded, confirmed directly: the real FMP key returned `402 Payment Required`
+  for several symbols (a plan-tier limitation) while succeeding for others in the exact same
+  batch. The old per-ticker loop had NO fallback for an individual ticker's failure, silently
+  dropping it from the result entirely; with enough tickers dropped, `daily_prices` no longer
+  covered every configured ticker, crashing with a `KeyError` several frames away, confirmed via
+  a real `daily-runner --force-rebalance` crash against production `config.yaml`. Fixed: each
+  ticker's fetch now cascades through the remaining vendors in priority order before giving up
+  on that specific ticker (only when the vendor was auto-detected, an explicit single-vendor
+  request is unaffected), plus a related column-naming bug (the adjusted-close column name is
+  vendor-specific but was computed once for the whole batch, now resolved per ticker from
+  whichever vendor actually answered for it). Scoped to `fetch_live_prices()` only;
+  `fetch_ohlcv_for_tickers()` (technical indicators, liquidity filter, technical-confirmation
+  volume) is untouched, still `yfinance`-only from every `daily_runner.py` call site, a
+  documented, deliberate scope boundary, not an oversight. See `CLAUDE.md`'s `daily_runner.py`
+  bullet.
 
 ### Who should allocate capital here
 

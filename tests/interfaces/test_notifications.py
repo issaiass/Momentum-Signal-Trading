@@ -480,6 +480,31 @@ class TestBuildSignalUniverseHtml:
         assert "$90.00 (estimated)" in html  # BUY stop-loss price is always an estimate
         assert "Top 1 (Selected)" in html
 
+    def test_stale_close_price_shows_as_of_date(self):
+        # Epic 5, "Stale-Price Reporting + Live Price-Vendor Priority" plan: a ticker whose
+        # close_price is a fallback to an earlier known-good close (close_price_as_of set) must
+        # show that date inline, not render the price as if it were fresh.
+        import pandas as pd
+        universe = {
+            "A": {"rank": 1, "signal_score": 0.15, "close_price": 100.0,
+                  "close_price_as_of": None, "selection_status": "Top 1 (Selected)"},
+            "B": {"rank": 2, "signal_score": 0.05, "close_price": 539.69,
+                  "close_price_as_of": pd.Timestamp("2026-07-23"), "selection_status": "Watchlist / Reserve"},
+        }
+        html = build_signal_universe_html(universe, self._orders(), top_n=1, strategy_type="momentum")
+        assert "$539.69 (as of 2026-07-23)" in html
+        assert "$100.00 (as of" not in html  # fresh price, no "as of" annotation at all
+
+    def test_missing_close_price_still_renders_blank_not_nan(self):
+        # No non-NaN history at all (close_price stays None even after the fallback attempt):
+        # must render as an empty cell, never a literal "nan".
+        universe = {
+            "A": {"rank": 1, "signal_score": 0.15, "close_price": None,
+                  "close_price_as_of": None, "selection_status": "Watchlist / Reserve"},
+        }
+        html = build_signal_universe_html(universe, {}, top_n=1, strategy_type="momentum")
+        assert "nan" not in html.lower()
+
     def test_lookback_return_header_unqualified_for_base_score_strategy(self):
         html = build_signal_universe_html(self._universe(), self._orders(), top_n=1, strategy_type="momentum")
         assert "Lookback Return (%)" in html

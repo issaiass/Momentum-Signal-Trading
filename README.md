@@ -568,6 +568,21 @@ answer whether the strategy actually works.
   the two sibling functions in the same file that aggregate every row via a cumulative product
   instead, doing so there would have silently discarded real return data (caught by an existing
   test before it shipped). See `CLAUDE.md`'s `daily_runner.py` bullet for the full detail.
+- **A real, confirmed, ongoing Yahoo Finance data-quality gap, found while investigating a
+  `$nan` "Current Close Price" in a real portfolio's Full Signal Universe report, now given a
+  reporting-only fallback**: confirmed directly (not guessed), `yf.download()` currently returns
+  `NaN` OHLC for the most recent trading day across multiple/most tickers at once (AMD, ASML,
+  SPY, and MSFT all affected simultaneously when checked), an external vendor issue, not a bug in
+  this codebase and not a regression from any prior epic. Momentum SCORES stay valid despite this
+  (the monthly-resample step's `.last()` already skips the trailing `NaN` day and uses the last
+  real value), but the raw `close_price` DISPLAY did not, rendering a bare `"$nan"` with no
+  indication anything was wrong. `execution/live_signal.py`'s `full_signal_universe` now falls
+  back to the last known-good close for DISPLAY purposes only, with a `close_price_as_of` date so
+  the staleness is explicit, not silently hidden; the real trading-decision path
+  (`latest_prices`, `generate_orders()`, the daily stop-loss check) is completely unaffected by
+  this fallback, still sees the genuine `NaN` and still correctly holds/skips exactly as before.
+  See `docs/SIGNAL_RANKINGS_LOG.md`'s `close_price_as_of` documentation and `CLAUDE.md`'s
+  `execution/live_signal.py` bullet.
 
 ### Who should allocate capital here
 

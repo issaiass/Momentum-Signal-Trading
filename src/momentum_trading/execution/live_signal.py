@@ -1066,7 +1066,7 @@ def log_orders(orders: dict, latest_prices: dict, dry_run: bool, path: str = TRA
 SIGNAL_RANKINGS_LOG_HEADER = [
     "timestamp", "ticker", "action", "momentum_rank", "signal_score", "close_price",
     "selection_status", "money_invested", "pct_money_invested", "shares", "stop_loss_price",
-    "reason", "dry_run", "config_hash", "transaction_amount", "row_hash",
+    "reason", "dry_run", "config_hash", "transaction_amount", "close_price_as_of", "row_hash",
 ]
 
 
@@ -1096,6 +1096,13 @@ def log_signal_rankings(full_signal_universe: dict, orders: dict, dry_run: bool,
     No fill-status/"what actually happened" column, matching log_orders()'s own precedent: that's
     a live, post-hoc IBKR polling result, not known at order-generation time, and stays
     EMAIL-only (see build_signal_universe_html()).
+
+    close_price_as_of (Epic 5, "Stale-Price Reporting + Live Price-Vendor Priority" plan):
+    appended at the end, before row_hash, same schema-evolution precedent every prior column
+    addition here has followed (archive old signal_rankings_log_*.csv files first if reading one
+    with an older header). Blank when close_price is the current rebalance's own fresh close;
+    an ISO date when it's a fallback to the last known-good close (see run()'s full_signal_
+    universe construction for the real, confirmed yfinance NaN-close incident this backs).
     """
     config_hash = _config_hash(cfg) if cfg is not None else ""
     ts = datetime.now().isoformat()
@@ -1121,12 +1128,14 @@ def log_signal_rankings(full_signal_universe: dict, orders: dict, dry_run: bool,
             action, reason, shares = ("EXCLUDED" if is_excluded else "WATCHLIST"), "", 0
             money_invested, pct_money_invested, stop_loss_price = 0.0, 0.0, None
             transaction_amount = 0.0
+        close_price_as_of = info.get("close_price_as_of")
         row_fields = [
             ts, ticker, action, info.get("rank", ""), info.get("signal_score", ""),
             info.get("close_price", ""), info.get("selection_status", ""),
             money_invested, pct_money_invested, shares,
             stop_loss_price if stop_loss_price is not None else "",
             reason, dry_run, config_hash, transaction_amount,
+            close_price_as_of.strftime("%Y-%m-%d") if close_price_as_of is not None else "",
         ]
         append_hash_chained_row(path, SIGNAL_RANKINGS_LOG_HEADER, row_fields)
     logger.info("Logged %d signal-universe rankings to %s (config_hash=%s)",
@@ -2695,10 +2704,27 @@ def run(
                     status = "Excluded (Negative Momentum)"
                 else:
                     status = "Watchlist / Reserve"
+            # Stale-price fallback (Epic 5, "Stale-Price Reporting + Live Price-Vendor Priority"
+            # plan): REPORTING-ONLY, does not touch latest_prices itself (generate_orders(),
+            # stop-loss checks, snapshot writing all still see the real NaN and correctly fall
+            # back to "no live price available" / a skipped check wherever they already do). A
+            # real, confirmed incident motivated this: yfinance can return NaN OHLC for the most
+            # recent trading day across many tickers at once (a vendor data-quality gap, not a
+            # bug here), which used to render as a bare "$nan" in this report with no indication
+            # anything was wrong. close_price_as_of stays None when the displayed price IS the
+            # current rebalance's own fresh close (no fallback needed).
+            close_price = latest_prices.get(t)
+            close_price_as_of = None
+            if close_price is None or pd.isna(close_price):
+                non_nan = daily_prices[t].dropna() if t in daily_prices.columns else None
+                if non_nan is not None and not non_nan.empty:
+                    close_price = float(non_nan.iloc[-1])
+                    close_price_as_of = non_nan.index[-1]
             full_signal_universe[t] = {
                 "rank": rank,
                 "signal_score": score,
-                "close_price": latest_prices.get(t),
+                "close_price": close_price,
+                "close_price_as_of": close_price_as_of,
                 "selection_status": status,
             }
 

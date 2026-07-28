@@ -1131,6 +1131,83 @@ class TestRunTechnicalConfirmation:
         assert "Excluded (Technical)" not in statuses.values()
 
 
+class TestRunStalePriceFallback:
+    """
+    Full Signal Universe stale-price fallback (Epic 5, "Stale-Price Reporting + Live
+    Price-Vendor Priority" plan): a real, confirmed incident motivated this, yfinance can return
+    NaN OHLC for the most recent trading day across many tickers at once, previously rendered as
+    a bare "$nan" in this report with no indication anything was wrong. REPORTING-ONLY: the
+    critical safety boundary is that latest_prices/generate_orders()'s own real trading decision
+    still sees the genuine NaN and still correctly HOLDs "no live price available", the fallback
+    only affects what full_signal_universe (the report/log) displays.
+    """
+
+    def _prices_with_stale_ticker(self, seed=5, stale_ticker="B"):
+        dates = pd.bdate_range("2024-01-01", "2024-05-15")
+        rng = np.random.default_rng(seed)
+        n = len(dates)
+        a = 50 * np.cumprod(1 + rng.normal(0.0005, 0.01, n))
+        b = 50 * np.cumprod(1 + rng.normal(0.0003, 0.01, n))
+        prices = pd.DataFrame({"A": a, "B": b}, index=dates)
+        prices.loc[prices.index[-1], stale_ticker] = np.nan  # latest close missing, real vendor gap
+        return prices
+
+    def _run_kwargs(self, tmp_path):
+        return dict(
+            log_path=str(tmp_path / "trade_log.csv"),
+            signal_rankings_log_path=str(tmp_path / "signal_rankings_log.csv"),
+            alerts_log_path=str(tmp_path / "alerts_log.csv"),
+        )
+
+    def test_stale_ticker_falls_back_to_last_known_good_close(self, monkeypatch, tmp_path):
+        prices = self._prices_with_stale_ticker()
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False, top_n=2)
+        orders = live_signal.run(
+            tickers=["A", "B"], current_holdings={}, total_value=1000.0, cfg=cfg,
+            top_n=2, lookback_period=1.0, dry_run=True, **self._run_kwargs(tmp_path),
+        )
+
+        universe = orders.full_signal_universe
+        expected = prices["B"].dropna()
+        assert universe["B"]["close_price"] == pytest.approx(float(expected.iloc[-1]))
+        assert universe["B"]["close_price_as_of"] == expected.index[-1]
+
+    def test_fresh_ticker_has_no_as_of_date(self, monkeypatch, tmp_path):
+        prices = self._prices_with_stale_ticker()
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False, top_n=2)
+        orders = live_signal.run(
+            tickers=["A", "B"], current_holdings={}, total_value=1000.0, cfg=cfg,
+            top_n=2, lookback_period=1.0, dry_run=True, **self._run_kwargs(tmp_path),
+        )
+
+        universe = orders.full_signal_universe
+        assert universe["A"]["close_price_as_of"] is None
+        assert universe["A"]["close_price"] == pytest.approx(float(prices["A"].iloc[-1]))
+
+    def test_trading_decision_unaffected_by_reporting_fallback(self, monkeypatch, tmp_path):
+        # The critical safety boundary: generate_orders()'s real decision for B must still see
+        # the genuine NaN price and HOLD, never silently trade against the fallback close shown
+        # in the report.
+        prices = self._prices_with_stale_ticker()
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False, top_n=2)
+        orders = live_signal.run(
+            tickers=["A", "B"], current_holdings={}, total_value=1000.0, cfg=cfg,
+            top_n=2, lookback_period=1.0, dry_run=True, **self._run_kwargs(tmp_path),
+        )
+
+        assert orders["B"]["action"] == "HOLD"
+        assert orders["B"]["reason"] == "no live price available"
+
+
 class TestRunVolumeConfirmation:
     """
     cfg.use_volume_confirmation end-to-end through run() (Epic 4, "Institutional Momentum
@@ -1836,6 +1913,24 @@ class TestLogSignalRankings:
         result = live_signal.verify_log_integrity(path)
         assert result["valid"] is True
         assert result["rows_checked"] == 2
+
+    def test_close_price_as_of_column_populated_when_stale(self, tmp_path):
+        # Epic 5, "Stale-Price Reporting + Live Price-Vendor Priority" plan.
+        import pandas as pd
+        universe = {
+            "A": {"rank": 1, "signal_score": 0.15, "close_price": 100.0,
+                  "close_price_as_of": None, "selection_status": "Top 1 (Selected)"},
+            "B": {"rank": 2, "signal_score": 0.05, "close_price": 539.69,
+                  "close_price_as_of": pd.Timestamp("2026-07-23"), "selection_status": "Watchlist / Reserve"},
+        }
+        orders = {"A": {"action": "BUY", "shares": 5, "reason": "drift $500.00", "money_invested": 500.0,
+                         "pct_money_invested": 1.0, "stop_loss_price": 90.0}}
+        path = str(tmp_path / "signal_rankings_log.csv")
+        log_signal_rankings(universe, orders, dry_run=True, path=path)
+        df = pd.read_csv(path)
+        assert df[df["ticker"] == "A"].iloc[0]["close_price_as_of"] is pd.NA or pd.isna(
+            df[df["ticker"] == "A"].iloc[0]["close_price_as_of"])
+        assert df[df["ticker"] == "B"].iloc[0]["close_price_as_of"] == "2026-07-23"
 
     def test_excluded_ticker_gets_excluded_action_not_watchlist(self, tmp_path):
         universe = {

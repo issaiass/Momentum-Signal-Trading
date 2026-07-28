@@ -36,7 +36,7 @@ ever opened or intended for it.
 ```
 timestamp, ticker, action, momentum_rank, signal_score, close_price, selection_status,
 money_invested, pct_money_invested, shares, stop_loss_price, reason, dry_run, config_hash,
-transaction_amount, row_hash
+transaction_amount, close_price_as_of, row_hash
 ```
 
 **Row order**: sorted by `momentum_rank` ascending (1 = strongest first), same order in the CSV
@@ -59,7 +59,14 @@ every ranked ticker, ordered by `signal_score` descending among themselves.
   (`multi_timeframe_composite`, `residual_momentum`, `path_dependent_momentum`,
   `hybrid_multi_factor`) it's that strategy's own composite/residual/blended score, not a
   literal price return, see `docs/MOMENTUM_STRATEGIES.md`.
-- **close_price**, the price this ticker was ranked/sized against this rebalance.
+- **close_price**, the price this ticker was ranked/sized against this rebalance. When the
+  current rebalance's own close came back `NaN` (a real, confirmed yfinance data-quality gap,
+  not a bug here, see `close_price_as_of` below), this is a REPORTING-ONLY fallback to the last
+  known-good close, `latest_prices` (used by `generate_orders()`, stop-loss checks, etc.) is
+  never affected by this fallback, only what's displayed here and in the matching email table.
+- **close_price_as_of** [New]: blank when `close_price` is the current rebalance's own fresh
+  close. An ISO date (e.g. `2026-07-23`) when it's a fallback to an earlier known-good close,
+  telling you exactly how stale the displayed price actually is.
 - **selection_status**, one of five values: `"Top N (Selected)"` (N = that portfolio's `top_n`);
   `"Selected (Absolute Momentum)"` (the `absolute_momentum` `strategy_type` has no `top_n`
   cutoff, every ticker with a positive OWN trailing score is held instead); `"Watchlist /
@@ -107,6 +114,11 @@ plan), same "grow at the end, before `row_hash`" precedent as the trade log's ow
 (`docs/RUNNING.md`'s trade-log schema-evolution note). If you have an existing
 `signal_rankings_log_<portfolio>.csv` from before this change, archive/rename it before your
 first run after upgrading, appending new-schema rows to an old-schema file misaligns columns.
+
+**Note on `close_price_as_of`'s own schema evolution** (Epic 5, "Stale-Price Reporting + Live
+Price-Vendor Priority" plan): same "grow at the end, before `row_hash`" precedent, appended
+after `transaction_amount`. Archive/rename an existing `signal_rankings_log_<portfolio>.csv`
+before your first run after upgrading, same reasoning as above.
 
 ## Reading it
 

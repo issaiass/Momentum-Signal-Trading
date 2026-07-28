@@ -258,8 +258,12 @@ def build_signal_universe_html(full_signal_universe: dict, orders: dict, top_n: 
     momentum, simply outranked) and "Excluded (Negative Momentum)"/"Excluded (Illiquid)" (won't
     help the strategy, distinct reasons), not lumped together.
 
-    full_signal_universe : {ticker: {'rank', 'signal_score', 'close_price', 'selection_status'}},
-    execution/live_signal.py's run()'s new OrdersResult.full_signal_universe attribute.
+    full_signal_universe : {ticker: {'rank', 'signal_score', 'close_price', 'close_price_as_of',
+    'selection_status'}}, execution/live_signal.py's run()'s OrdersResult.full_signal_universe
+    attribute. close_price_as_of (Epic 5, "Stale-Price Reporting + Live Price-Vendor Priority"
+    plan) is None for a fresh close, or the date of a fallback last-known-good close when the
+    current rebalance's own close was NaN (see run()'s own comment for the real incident that
+    motivated this), rendered inline as "(as of YYYY-MM-DD)" so staleness is visible in the email.
     orders : the SAME dict Table 1 was built from; a ticker present here (selected, whether
     traded or held) gets its real action/shares/money-invested/stop-loss-price/fill-outcome
     columns from its order; a ticker absent here (Action column shows "WATCHLIST" or "EXCLUDED",
@@ -294,6 +298,7 @@ def build_signal_universe_html(full_signal_universe: dict, orders: dict, top_n: 
         rank = info.get("rank")
         score = info.get("signal_score")
         close_price = info.get("close_price")
+        close_price_as_of = info.get("close_price_as_of")
         status = info.get("selection_status", "")
         order = orders.get(ticker)
 
@@ -322,7 +327,21 @@ def build_signal_universe_html(full_signal_universe: dict, orders: dict, top_n: 
             stop_loss_text = "N/A"
 
         score_text = f"{score:.2%}" if score is not None else ""
-        close_price_text = f"${close_price:,.2f}" if close_price else ""
+        if close_price is not None and not pd.isna(close_price):
+            close_price_text = f"${close_price:,.2f}"
+            if close_price_as_of is not None:
+                # Stale-price fallback (Epic 5, "Stale-Price Reporting + Live Price-Vendor
+                # Priority" plan): execution/live_signal.py's run() only sets this when the
+                # CURRENT rebalance's own close was NaN (a real, confirmed yfinance data gap) and
+                # fell back to the last known-good close instead, make that staleness visually
+                # obvious right in the table rather than silently showing an old price as if fresh.
+                as_of_text = (
+                    close_price_as_of.strftime("%Y-%m-%d")
+                    if hasattr(close_price_as_of, "strftime") else str(close_price_as_of)
+                )
+                close_price_text += f" (as of {as_of_text})"
+        else:
+            close_price_text = ""
         rows += (
             f"<tr><td style='padding:4px 8px;'>{ticker}</td>"
             f"<td style='padding:4px 8px; color:{action_color}; font-weight:bold;'>{action}</td>"

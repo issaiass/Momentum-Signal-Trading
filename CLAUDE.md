@@ -891,6 +891,28 @@ that tests enforce, don't casually violate these when editing:
   `log_signal_rankings()`'s/`notifications.py`'s existing `startswith("Excluded")` derivation
   needed no change, confirmed generic. See `docs/RISK_CONSTRAINTS.md`'s "Volume-Confirmed Signal
   Quality".
+  `full_signal_universe`'s `close_price` gained a stale-price fallback (Epic 5, "Stale-Price
+  Reporting + Live Price-Vendor Priority" plan), motivated by a real, confirmed incident: right
+  now `yf.download()` (`core/functions.py`'s `_fetch_yf()`, zero caching, a fresh call every
+  time) is returning `NaN` OHLC for the most recent trading day across many tickers at once (a
+  genuine, external Yahoo Finance data-quality gap, confirmed directly against AMD/ASML/SPY/MSFT
+  simultaneously, not ticker-specific), which used to render as a bare `"$nan"` in the Full
+  Signal Universe report with no indication anything was wrong. When `latest_prices.get(t)` is
+  `None`/`NaN`, the `full_signal_universe` entry now falls back to `daily_prices[t]`'s last
+  non-NaN value, and a new `close_price_as_of: pd.Timestamp | None` key records which date that
+  fallback price is actually from (`None` when the displayed price IS the current rebalance's
+  own fresh close). **A critical, deliberate safety boundary**: this fallback is scoped ENTIRELY
+  to the `full_signal_universe` reporting dict; `latest_prices` itself (used by
+  `generate_orders()`, the daily stop-loss check, portfolio snapshot writing, and everywhere else
+  a real trading/risk decision is made) is completely untouched, still sees the genuine `NaN` and
+  still correctly resolves to `"no live price available"` / a skipped check wherever it already
+  does today, a stale price must never silently become the reference price for a real decision,
+  only for what's DISPLAYED in this one report. `interfaces/notifications.py`'s
+  `build_signal_universe_html()` renders the new field inline (`"$539.69 (as of 2026-07-23)"`)
+  when set, unchanged when not. `log_signal_rankings()`'s `SIGNAL_RANKINGS_LOG_HEADER` gained a
+  matching `close_price_as_of` column (appended before `row_hash`, same schema-evolution
+  precedent as every prior column addition here, archive old `signal_rankings_log_*.csv` files
+  first). See `docs/SIGNAL_RANKINGS_LOG.md`.
   `compute_target_weights()`'s regime filter block now also blends in `cfg.regime_vol_threshold`
   (see `BacktestConfig`'s own bullet above for the shared formula and backtest-parity
   implementation): when set, the regime benchmark's trailing realized volatility

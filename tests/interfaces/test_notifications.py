@@ -540,6 +540,41 @@ class TestBuildSignalUniverseHtml:
         # WATCHLIST is untouched for the still-positive, merely-outranked ticker.
         assert ">WATCHLIST<" in html
 
+    def test_rank_delta_renders_up_down_flat_and_na(self):
+        # Epic 7, "Rank Delta (Momentum Rank Trend) Column" plan.
+        universe = {
+            "A": {"rank": 1, "signal_score": 0.15, "close_price": 100.0,
+                  "selection_status": "Top 1 (Selected)", "rank_delta": 2},
+            "B": {"rank": 2, "signal_score": 0.05, "close_price": 50.0,
+                  "selection_status": "Watchlist / Reserve", "rank_delta": -2},
+            "C": {"rank": 3, "signal_score": 0.01, "close_price": 10.0,
+                  "selection_status": "Watchlist / Reserve", "rank_delta": 0},
+            "D": {"rank": 4, "signal_score": 0.00, "close_price": 5.0,
+                  "selection_status": "Watchlist / Reserve", "rank_delta": None},
+        }
+        html = build_signal_universe_html(universe, self._orders(), top_n=1, strategy_type="momentum")
+        assert "▲ +2" in html
+        assert "#27ae60" in html  # green, reused BUY color
+        assert "▼ -2" in html
+        assert "#c0392b" in html  # red, reused SELL color
+        assert ">-</td>" in html  # flat, no arrow
+        assert ">N/A</td>" in html  # insufficient history / flag off
+
+    def test_rank_delta_column_does_not_change_sort_order(self):
+        # Explicit user constraint: Rank Delta is an additional column only, never a sort key.
+        universe = {
+            "A": {"rank": 2, "signal_score": 0.05, "close_price": 50.0,
+                  "selection_status": "Watchlist / Reserve", "rank_delta": -5},
+            "B": {"rank": None, "signal_score": 0.20, "close_price": 30.0,
+                  "selection_status": "Watchlist / Reserve", "rank_delta": 5},
+            "C": {"rank": 1, "signal_score": 0.15, "close_price": 100.0,
+                  "selection_status": "Top 1 (Selected)", "rank_delta": None},
+        }
+        html = build_signal_universe_html(universe, {}, top_n=1, strategy_type="momentum")
+        import re
+        tickers_in_order = re.findall(r"<tr><td style='padding:4px 8px;'>(\w+)</td>", html)
+        assert tickers_in_order == ["C", "A", "B"]  # unchanged: rank ascending, unranked last
+
     def test_rows_render_in_momentum_rank_order(self):
         # Deliberately out-of-order dict insertion (C rank=1 last, A rank=2 first, B unranked),
         # rows must render sorted by rank ascending, unranked trailing by score desc.

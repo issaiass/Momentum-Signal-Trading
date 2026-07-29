@@ -921,6 +921,38 @@ that tests enforce, don't casually violate these when editing:
   matching `close_price_as_of` column (appended before `row_hash`, same schema-evolution
   precedent as every prior column addition here, archive old `signal_rankings_log_*.csv` files
   first). See `docs/SIGNAL_RANKINGS_LOG.md`.
+  `full_signal_universe` also gained a `rank_delta` key (Epic 7, "Rank Delta (Momentum Rank
+  Trend) Column" plan, opt-in per portfolio via `cfg.use_rank_delta`, `False` default,
+  byte-identical when off): each ticker's momentum rank exactly `lookback_period` ago minus its
+  rank today (positive = moved up N positions). A real, confirmed constraint drove the design,
+  not assumed: computing a genuine (non-NaN) historical comparison point needs the `ranks`
+  history to span roughly 2x `lookback_period`, since that older row itself needs its own full
+  lookback window of history behind IT too (traced through `calculate_period_returns()`'s
+  `pct_change(periods=N)` math), not just `lookback_period` + `compute_required_lookback_days()`'s
+  existing `buffer_days=60` margin. `compute_required_lookback_days()` now adds a `2 *
+  momentum_days` candidate when `cfg.use_rank_delta` is `True` (no effect when off), and a new
+  `resolve_lookback_period_row_count(lookback_period, holding_period)` pure helper (deliberately
+  duplicating, not refactoring, `resolve_momentum_scores()`'s own regime formula, same precedent
+  `compute_required_lookback_days()` already set for this identical formula) gives `run()` the
+  exact row-count to look back into the FINAL, post-all-filters `ranks` DataFrame (the same basis
+  `latest_ranks_row` itself uses, so a filtered-out ticker's `rank_delta` is consistently `None`
+  the same way its `rank` is already `None`). `None` when the flag is off, the ticker isn't
+  currently ranked, or there wasn't enough history for a real historical value (gracefully, not
+  a crash). Confirmed with the project owner before implementing: an opt-in flag (not always-on)
+  was the deliberate choice specifically because of this real fetch-size cost, matching every
+  other feature here with the same trade-off (`use_liquidity_filter`,
+  `use_technical_confirmation`, `use_volume_confirmation`). `log_signal_rankings()`'s
+  `SIGNAL_RANKINGS_LOG_HEADER` gained a matching `rank_delta` column (appended before `row_hash`,
+  after `close_price_as_of`, same schema-evolution precedent, archive old
+  `signal_rankings_log_*.csv` files first), the raw signed integer, machine-readable, distinct
+  from `interfaces/notifications.py`'s `build_signal_universe_html()`, which renders the SAME
+  value as colored rich text instead (`▲ +N` green / `▼ -N` red / `-` flat / `N/A`, reusing this
+  table's own existing BUY-green/SELL-red hex codes, no new color convention), positioned right
+  after the Momentum Rank column. Confirmed explicitly with the project owner: this column does
+  NOT change the table's existing sort order (still Momentum Rank ascending, `signal_score`
+  descending tiebreak), Rank Delta is additive only, never a sort key. See
+  `docs/SIGNAL_RANKINGS_LOG.md`'s "Rank Delta" column and `docs/EMAIL_REPORTING.md`'s updated
+  Full Signal Universe table description.
   `compute_target_weights()`'s regime filter block now also blends in `cfg.regime_vol_threshold`
   (see `BacktestConfig`'s own bullet above for the shared formula and backtest-parity
   implementation): when set, the regime benchmark's trailing realized volatility

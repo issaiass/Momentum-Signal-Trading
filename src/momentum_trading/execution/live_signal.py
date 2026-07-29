@@ -350,7 +350,33 @@ def compute_required_lookback_days(cfg: BacktestConfig, buffer_days: int = 60) -
         candidates.append(cfg.correlation_lookback_days)
     if cfg.use_correlation_spike_regime:
         candidates.append(cfg.correlation_spike_baseline_window)
+    # Rank Delta (opt-in, cfg.use_rank_delta, Epic 7 "Rank Delta (Momentum Rank Trend) Column"
+    # plan): comparing today's rank to the rank lookback_period ago needs that OLDER row to
+    # itself have a valid (non-NaN) score, which needs its OWN full lookback_period of history
+    # behind it too, i.e. the fetched history must span roughly 2x momentum_days, not just
+    # momentum_days + buffer_days. Byte-identical to before this field existed when off (the
+    # default), only widens the fetch for a portfolio that opted in.
+    if cfg.use_rank_delta:
+        candidates.append(2 * momentum_days)
     return max(candidates) + buffer_days
+
+
+def resolve_lookback_period_row_count(lookback_period: float, holding_period: float) -> int:
+    """
+    Number of resampled-cadence rows (in resolve_momentum_scores()'s own ranks/scores output)
+    that lookback_period spans, given holding_period's regime. Deliberately duplicates (does not
+    refactor) the exact same formula resolve_momentum_scores() uses internally, matching this
+    file's existing compute_required_lookback_days() precedent of duplicating this same formula
+    rather than sharing code, so this can be called standalone (e.g. to look N rows back into an
+    already-computed ranks DataFrame) without needing daily_prices in scope. Used by Rank Delta
+    (Epic 7, "Rank Delta (Momentum Rank Trend) Column" plan) to look back exactly lookback_period
+    into the ranks history; must never drift from resolve_momentum_scores()'s own row-count-
+    forward formula, or the two "lookback_period" comparison points would silently disagree with
+    the score itself.
+    """
+    if holding_period < 1:
+        return max(1, round(lookback_period * 4))
+    return max(1, round(lookback_period))
 
 
 def resolve_momentum_scores(
@@ -1066,7 +1092,8 @@ def log_orders(orders: dict, latest_prices: dict, dry_run: bool, path: str = TRA
 SIGNAL_RANKINGS_LOG_HEADER = [
     "timestamp", "ticker", "action", "momentum_rank", "signal_score", "close_price",
     "selection_status", "money_invested", "pct_money_invested", "shares", "stop_loss_price",
-    "reason", "dry_run", "config_hash", "transaction_amount", "close_price_as_of", "row_hash",
+    "reason", "dry_run", "config_hash", "transaction_amount", "close_price_as_of", "rank_delta",
+    "row_hash",
 ]
 
 
@@ -1103,6 +1130,13 @@ def log_signal_rankings(full_signal_universe: dict, orders: dict, dry_run: bool,
     with an older header). Blank when close_price is the current rebalance's own fresh close;
     an ISO date when it's a fallback to the last known-good close (see run()'s full_signal_
     universe construction for the real, confirmed yfinance NaN-close incident this backs).
+
+    rank_delta (Epic 7, "Rank Delta (Momentum Rank Trend) Column" plan): appended after
+    close_price_as_of, before row_hash, same schema-evolution precedent. The raw signed integer
+    (rank lookback_period ago minus today's rank, positive = moved up), blank when
+    cfg.use_rank_delta is off or there wasn't enough history for a real historical comparison
+    point. This is the machine-readable form; the rich-text arrow/color rendering is
+    presentation-only, see interfaces/notifications.py's build_signal_universe_html().
     """
     config_hash = _config_hash(cfg) if cfg is not None else ""
     ts = datetime.now().isoformat()
@@ -1129,6 +1163,7 @@ def log_signal_rankings(full_signal_universe: dict, orders: dict, dry_run: bool,
             money_invested, pct_money_invested, stop_loss_price = 0.0, 0.0, None
             transaction_amount = 0.0
         close_price_as_of = info.get("close_price_as_of")
+        rank_delta = info.get("rank_delta")
         row_fields = [
             ts, ticker, action, info.get("rank", ""), info.get("signal_score", ""),
             info.get("close_price", ""), info.get("selection_status", ""),
@@ -1136,6 +1171,7 @@ def log_signal_rankings(full_signal_universe: dict, orders: dict, dry_run: bool,
             stop_loss_price if stop_loss_price is not None else "",
             reason, dry_run, config_hash, transaction_amount,
             close_price_as_of.strftime("%Y-%m-%d") if close_price_as_of is not None else "",
+            rank_delta if rank_delta is not None else "",
         ]
         append_hash_chained_row(path, SIGNAL_RANKINGS_LOG_HEADER, row_fields)
     logger.info("Logged %d signal-universe rankings to %s (config_hash=%s)",
@@ -2561,6 +2597,20 @@ def run(
 
     latest_scores = scores.iloc[-1] if not scores.empty else None
     latest_ranks_row = ranks.iloc[-1] if not ranks.empty else None
+
+    # --- Rank Delta (Epic 7, "Rank Delta (Momentum Rank Trend) Column" plan), opt-in
+    #     (cfg.use_rank_delta), reporting-only: the ranks-history row exactly lookback_period
+    #     back from today, on the SAME (final, post-all-filters) `ranks` basis latest_ranks_row
+    #     itself uses, so a ticker filtered out today has a consistently None rank_delta the same
+    #     way its `rank` is already None. None when the flag is off, or ranks doesn't have
+    #     enough rows (compute_required_lookback_days() only widens the fetch when the flag is
+    #     on, so this stays None gracefully rather than crashing for an older/narrower fetch). ---
+    historical_ranks_row = None
+    if cfg.use_rank_delta and not ranks.empty:
+        n_back = resolve_lookback_period_row_count(lookback_period, cfg.holding_period)
+        if len(ranks) > n_back:
+            historical_ranks_row = ranks.iloc[-1 - n_back]
+
     # resolve_strategy_picks() (core/strategy_signals.py) dispatches on cfg.strategy_type:
     # "absolute_momentum" bypasses the cross-sectional top_n cutoff entirely (every ticker with
     # a positive own trailing score is held, defensive_ticker alone otherwise), every other
@@ -2723,12 +2773,23 @@ def run(
                 if non_nan is not None and not non_nan.empty:
                     close_price = float(non_nan.iloc[-1])
                     close_price_as_of = non_nan.index[-1]
+            # Rank Delta (Epic 7, "Rank Delta (Momentum Rank Trend) Column" plan): rank exactly
+            # lookback_period ago minus today's rank, so a ticker that WAS ranked 5 and is now
+            # ranked 4 (moved up) gets +1, one that WAS ranked 3 and is now 5 (moved down) gets
+            # -2, matching the report's own "up N" / "down N" wording directly. None when
+            # cfg.use_rank_delta is off, this ticker has no current rank, or it had no valid
+            # (non-NaN) rank at the historical comparison point either.
+            rank_delta = None
+            if rank is not None and historical_ranks_row is not None:
+                if t in historical_ranks_row.index and pd.notna(historical_ranks_row[t]):
+                    rank_delta = int(historical_ranks_row[t]) - rank
             full_signal_universe[t] = {
                 "rank": rank,
                 "signal_score": score,
                 "close_price": close_price,
                 "close_price_as_of": close_price_as_of,
                 "selection_status": status,
+                "rank_delta": rank_delta,
             }
 
     # --- Aggregate-drift skip, bypass the ENTIRE rebalance if

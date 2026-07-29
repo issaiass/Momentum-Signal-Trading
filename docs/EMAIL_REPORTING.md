@@ -139,12 +139,18 @@ the SAME rebalance email whenever there's at least one order, built by
 `build_signal_universe_html()` from `execution/live_signal.py`'s `run()`'s new
 `OrdersResult.full_signal_universe` attribute. Covers every configured ticker with a valid
 momentum score this rebalance, not just the ones the first table shows (which stays scoped to
-real BUY/SELL/HOLD decisions only): Ticker / Action / **Momentum Rank** / **Lookback Return (%)**
-/ **Current Close Price** / **Selection Status** / Money Invest / % Money Invest / Shares /
-**Stop-Loss Price** / Reason / What Actually Happened. Rows are sorted by Momentum Rank ascending
-(1 = best), a ticker with no rank sorts after every ranked ticker, ordered by Lookback Return
-descending among themselves. Action is `"BUY"`/`"SELL"`/`"HOLD"` for a ticker with a real order
-this rebalance, `"WATCHLIST"` (still-positive momentum, simply outranked) or `"EXCLUDED"`
+real BUY/SELL/HOLD decisions only): Ticker / Action / **Momentum Rank** / **Rank Delta** /
+**Lookback Return (%)** / **Current Close Price** / **Selection Status** / Money Invest /
+% Money Invest / Shares / **Stop-Loss Price** / Reason / What Actually Happened. **Rank Delta**
+(Epic 7, "Rank Delta (Momentum Rank Trend) Column" plan, opt-in per portfolio via
+`use_rank_delta`, `false` default) shows this ticker's rank exactly `lookback_period` ago vs.
+today as colored rich text (`▲ +N` green = moved up N positions, `▼ -N` red = moved down N
+positions, `-` = no change, `N/A` = the flag is off or there wasn't enough price history for a
+real comparison yet), purely additive, does not affect this table's sort order. Rows are sorted
+by Momentum Rank ascending (1 = best), a ticker with no rank sorts after every ranked ticker,
+ordered by Lookback Return descending among themselves. Action is `"BUY"`/`"SELL"`/`"HOLD"` for a
+ticker with a real order this rebalance, `"WATCHLIST"` (still-positive momentum, simply
+outranked) or `"EXCLUDED"`
 (negative momentum, or filtered by the liquidity filter) otherwise, matching one of Selection
 Status's five values: `"Top N (Selected)"`, `"Selected (Absolute Momentum)"`, `"Watchlist /
 Reserve"`, `"Excluded (Negative Momentum)"`, or `"Excluded (Illiquid)"`. A non-order row (

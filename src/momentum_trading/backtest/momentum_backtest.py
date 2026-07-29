@@ -479,6 +479,15 @@ class BacktestConfig:
                                              # volume required to remain eligible; 1.0 = at least
                                              # flat-or-rising participation
 
+    # --- Rank Delta (Epic 7, "Rank Delta (Momentum Rank Trend) Column" plan), LIVE-ONLY,
+    #     opt-in, reporting-only. When on, execution/live_signal.py's compute_required_
+    #     lookback_days() widens this portfolio's price fetch (~2x the momentum-window portion)
+    #     so the Full Signal Universe report/log can show each ticker's rank exactly
+    #     lookback_period ago alongside its current rank. False (default) is byte-identical to
+    #     before this field existed: no wider fetch, rank_delta always None/blank. See
+    #     docs/SIGNAL_RANKINGS_LOG.md's "Rank Delta" column. ---
+    use_rank_delta: bool = False
+
     # --- Additional execution safety checks ---
     max_dollar_drawdown: float | None = None       # e.g. 500.0, halt if equity drops this many $ from peak, independent of the % breaker
     max_slippage_tolerance_pct: float | None = None  # e.g. 0.02, alert (not un-fill) if actual fill deviates from expected price by more than this

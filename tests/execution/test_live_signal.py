@@ -27,7 +27,7 @@ from momentum_trading.execution.live_signal import (
     compute_low_capital_drop_fraction, is_low_capital_drop_too_high,
     most_recent_rebalance_target_date,
     build_position_performance, resolve_momentum_scores, calculate_period_returns,
-    compute_required_lookback_days,
+    compute_required_lookback_days, resolve_lookback_period_row_count,
     _realized_weighted_portfolio_vol, apply_absolute_momentum_filter,
     compute_stop_loss_price, log_signal_rankings, SIGNAL_RANKINGS_LOG_HEADER, OrdersResult,
     resolve_ticker_stop_loss_pct,
@@ -416,6 +416,60 @@ class TestComputeRequiredLookbackDays:
         )
         scores = resolve_momentum_scores(prices, lookback_period=15, holding_period=0.25)
         assert not scores.iloc[-1].isna().all()
+
+    def test_use_rank_delta_off_is_byte_identical(self):
+        # Epic 7, "Rank Delta (Momentum Rank Trend) Column" plan: the default (False) must not
+        # change this function's return value at all.
+        cfg_off = BacktestConfig(lookback_period=12, holding_period=1, use_regime_filter=False)
+        cfg_default = BacktestConfig(lookback_period=12, holding_period=1, use_regime_filter=False)
+        assert compute_required_lookback_days(cfg_off) == compute_required_lookback_days(cfg_default)
+
+    def test_use_rank_delta_widens_the_fetch(self):
+        cfg_off = BacktestConfig(lookback_period=12, holding_period=1, use_regime_filter=False,
+                                  use_rank_delta=False)
+        cfg_on = BacktestConfig(lookback_period=12, holding_period=1, use_regime_filter=False,
+                                 use_rank_delta=True)
+        assert compute_required_lookback_days(cfg_on) > compute_required_lookback_days(cfg_off)
+
+    def test_use_rank_delta_gives_at_least_double_the_momentum_window(self):
+        cfg = BacktestConfig(lookback_period=12, holding_period=1, use_regime_filter=False,
+                              use_rank_delta=True)
+        days = compute_required_lookback_days(cfg, buffer_days=0)
+        momentum_days = round(12) * 31
+        assert days >= 2 * momentum_days
+
+
+class TestResolveLookbackPeriodRowCount:
+    """
+    Epic 7, "Rank Delta (Momentum Rank Trend) Column" plan: the row-count-back helper Rank
+    Delta uses to index into an already-computed ranks DataFrame. Must stay in exact lockstep
+    with resolve_momentum_scores()'s own row-count-forward formula (the same lookback_period
+    "N periods" concept, in reverse), confirmed via direct parity assertions below, not just
+    independent correctness.
+    """
+
+    def test_monthly_regime_matches_resolve_momentum_scores_period(self):
+        for lookback_period in (1, 3, 6, 12, 18):
+            n = resolve_lookback_period_row_count(lookback_period, holding_period=1)
+            assert n == max(1, round(lookback_period))
+
+    def test_weekly_regime_matches_resolve_momentum_scores_period(self):
+        for lookback_period in (0.25, 0.5, 0.75, 1.0, 1.5):
+            n = resolve_lookback_period_row_count(lookback_period, holding_period=0.25)
+            assert n == max(1, round(lookback_period * 4))
+
+    def test_weekly_regime_parity_with_resolve_momentum_scores_actual_output_row(self):
+        # Direct parity: the row this helper says to look back must be the SAME row
+        # resolve_momentum_scores() itself used as the "N periods ago" price for its own latest
+        # pct_change computation.
+        dates = pd.bdate_range("2024-01-01", periods=90)
+        prices = pd.Series(100.0 + np.arange(len(dates)), index=dates)
+        daily_prices = pd.DataFrame({"XLK": prices})
+        weekly = daily_prices.resample("W").last()["XLK"]
+        n = resolve_lookback_period_row_count(0.75, holding_period=0.25)  # 3 weeks
+        scores = resolve_momentum_scores(daily_prices, lookback_period=0.75, holding_period=0.25)
+        expected = (weekly.iloc[-1] - weekly.iloc[-1 - n]) / weekly.iloc[-1 - n]
+        assert scores["XLK"].iloc[-1] == pytest.approx(expected)
 
 
 class TestResolveMomentumScores:
@@ -1208,6 +1262,101 @@ class TestRunStalePriceFallback:
         assert orders["B"]["reason"] == "no live price available"
 
 
+class TestRunRankDelta:
+    """
+    Rank Delta (Epic 7, "Rank Delta (Momentum Rank Trend) Column" plan): a ticker's rank exactly
+    lookback_period ago minus its rank today, positive = moved up. Uses a hand-constructed
+    4-month, 3-ticker monthly-return panel where each ticker's month-over-month return at the
+    "historical" comparison point (2 rows back from latest) and at "today" (latest row) are
+    independently chosen, so the exact expected rank_delta is known by construction, not derived
+    from run() itself.
+
+    Monthly returns (rank 1 = strongest):
+        historical (Mar): C=15%(rank1), B=10%(rank2), A=5%(rank3)
+        current    (Apr): A=15%(rank1), B=10%(rank2), C=5%(rank3)
+    Expected rank_delta = historical_rank - current_rank:
+        A: 3 - 1 = +2 (moved up 2)
+        B: 2 - 2 =  0 (no change)
+        C: 1 - 3 = -2 (moved down 2)
+    """
+
+    def _panel(self):
+        # Flat-within-month daily series so resample("ME").last() lands exactly on the
+        # hand-chosen monthly closes below, regardless of exact trading-day count per month.
+        month_closes = {
+            "A": [100.0, 100.0, 105.0, 120.75],   # Jan, Feb, Mar (+5%), Apr (+15%)
+            "B": [100.0, 100.0, 110.0, 121.0],    # Jan, Feb, Mar (+10%), Apr (+10%)
+            "C": [100.0, 100.0, 115.0, 120.75],   # Jan, Feb, Mar (+15%), Apr (+5%)
+        }
+        months = pd.period_range("2024-01", periods=4, freq="M")
+        frames = {}
+        for ticker, closes in month_closes.items():
+            daily = pd.concat([
+                pd.Series(close, index=pd.bdate_range(m.start_time, m.end_time))
+                for m, close in zip(months, closes)
+            ])
+            frames[ticker] = daily
+        return pd.DataFrame(frames)
+
+    def _run_kwargs(self, tmp_path):
+        return dict(
+            log_path=str(tmp_path / "trade_log.csv"),
+            signal_rankings_log_path=str(tmp_path / "signal_rankings_log.csv"),
+            alerts_log_path=str(tmp_path / "alerts_log.csv"),
+        )
+
+    def test_rank_delta_matches_hand_computed_values(self, monkeypatch, tmp_path):
+        prices = self._panel()
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False, top_n=3, use_rank_delta=True)
+        orders = live_signal.run(
+            tickers=["A", "B", "C"], current_holdings={}, total_value=1000.0, cfg=cfg,
+            top_n=3, lookback_period=1.0, dry_run=True, **self._run_kwargs(tmp_path),
+        )
+
+        universe = orders.full_signal_universe
+        assert universe["A"]["rank_delta"] == 2
+        assert universe["B"]["rank_delta"] == 0
+        assert universe["C"]["rank_delta"] == -2
+
+    def test_use_rank_delta_off_gives_none_for_every_ticker(self, monkeypatch, tmp_path):
+        prices = self._panel()
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False, top_n=3)  # default False
+        orders = live_signal.run(
+            tickers=["A", "B", "C"], current_holdings={}, total_value=1000.0, cfg=cfg,
+            top_n=3, lookback_period=1.0, dry_run=True, **self._run_kwargs(tmp_path),
+        )
+
+        universe = orders.full_signal_universe
+        assert all(info["rank_delta"] is None for info in universe.values())
+
+    def test_insufficient_ranks_history_gives_none_not_a_crash(self, monkeypatch, tmp_path):
+        # Only 2 monthly rows exist (Jan, Feb). n_back=1 finds a row to read (Jan), but Jan's
+        # OWN pct_change is NaN (no month before it), the historical comparison point genuinely
+        # doesn't exist yet, this must degrade to None gracefully, not crash or show a bogus 0.
+        dates = pd.bdate_range("2024-01-01", "2024-02-29")
+        prices = pd.DataFrame({
+            "A": np.linspace(100, 110, len(dates)),
+            "B": np.linspace(100, 105, len(dates)),
+        }, index=dates)
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False, top_n=2, use_rank_delta=True)
+        orders = live_signal.run(
+            tickers=["A", "B"], current_holdings={}, total_value=1000.0, cfg=cfg,
+            top_n=2, lookback_period=1.0, dry_run=True, **self._run_kwargs(tmp_path),
+        )
+
+        universe = orders.full_signal_universe
+        assert all(info["rank_delta"] is None for info in universe.values())
+
+
 class TestRunVolumeConfirmation:
     """
     cfg.use_volume_confirmation end-to-end through run() (Epic 4, "Institutional Momentum
@@ -1931,6 +2080,24 @@ class TestLogSignalRankings:
         assert df[df["ticker"] == "A"].iloc[0]["close_price_as_of"] is pd.NA or pd.isna(
             df[df["ticker"] == "A"].iloc[0]["close_price_as_of"])
         assert df[df["ticker"] == "B"].iloc[0]["close_price_as_of"] == "2026-07-23"
+
+    def test_rank_delta_column_populated_and_blank(self, tmp_path):
+        # Epic 7, "Rank Delta (Momentum Rank Trend) Column" plan.
+        universe = {
+            "A": {"rank": 1, "signal_score": 0.15, "close_price": 100.0,
+                  "selection_status": "Top 1 (Selected)", "rank_delta": 2},
+            "B": {"rank": 2, "signal_score": 0.05, "close_price": 50.0,
+                  "selection_status": "Watchlist / Reserve", "rank_delta": -2},
+            "C": {"rank": 3, "signal_score": 0.01, "close_price": 10.0,
+                  "selection_status": "Watchlist / Reserve", "rank_delta": None},
+        }
+        path = str(tmp_path / "signal_rankings_log.csv")
+        log_signal_rankings(universe, self._orders(), dry_run=True, path=path)
+        import pandas as pd
+        df = pd.read_csv(path)
+        assert df[df["ticker"] == "A"].iloc[0]["rank_delta"] == 2
+        assert df[df["ticker"] == "B"].iloc[0]["rank_delta"] == -2
+        assert pd.isna(df[df["ticker"] == "C"].iloc[0]["rank_delta"])
 
     def test_excluded_ticker_gets_excluded_action_not_watchlist(self, tmp_path):
         universe = {

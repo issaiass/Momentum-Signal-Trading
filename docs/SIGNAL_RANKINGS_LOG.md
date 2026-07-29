@@ -36,7 +36,7 @@ ever opened or intended for it.
 ```
 timestamp, ticker, action, momentum_rank, signal_score, close_price, selection_status,
 money_invested, pct_money_invested, shares, stop_loss_price, reason, dry_run, config_hash,
-transaction_amount, close_price_as_of, row_hash
+transaction_amount, close_price_as_of, rank_delta, row_hash
 ```
 
 **Row order**: sorted by `momentum_rank` ascending (1 = strongest first), same order in the CSV
@@ -99,6 +99,18 @@ every ranked ticker, ordered by `signal_score` descending among themselves.
 - **reason**, the order's reason string (blank for watchlist).
 - **dry_run**, whether this run had `--live` set.
 - **config_hash**, same per-run `BacktestConfig` fingerprint the trade log already writes.
+- **rank_delta** [New]: this ticker's momentum rank exactly `lookback_period` ago minus its rank
+  today (positive = moved up N positions, negative = moved down N positions). Blank when
+  `use_rank_delta` (opt-in, `BacktestConfig`, default `false`) is off for this portfolio, the
+  ticker has no current rank, or there wasn't enough `ranks` history for a real (non-NaN)
+  comparison point that far back (widening the price fetch enough for a real comparison is what
+  turning `use_rank_delta` on actually does, see `config.example.yaml`). This is the raw
+  machine-readable signed integer; the matching "Full Signal Universe" email table renders it as
+  rich text instead (`▲ +N` green / `▼ -N` red / `-` flat / `N/A`), see
+  `interfaces/notifications.py`'s `build_signal_universe_html()`. Comparison is scoped to each
+  portfolio's own resolved `lookback_period`/`holding_period` (after `risk_overrides`), a weekly
+  portfolio and a monthly portfolio in the same `config.yaml` each get their own correctly-scaled
+  comparison window, never a shared/global one.
 - **row_hash**, tamper-evident hash chain, same convention as the trade log and alert log (each
   row's hash covers the previous row's hash plus this row's other fields, seeded with
   `"GENESIS"`). Written via `core/audit_log.py`'s shared `append_hash_chained_row()` (the same
@@ -119,6 +131,11 @@ first run after upgrading, appending new-schema rows to an old-schema file misal
 Price-Vendor Priority" plan): same "grow at the end, before `row_hash`" precedent, appended
 after `transaction_amount`. Archive/rename an existing `signal_rankings_log_<portfolio>.csv`
 before your first run after upgrading, same reasoning as above.
+
+**Note on `rank_delta`'s own schema evolution** (Epic 7, "Rank Delta (Momentum Rank Trend)
+Column" plan): same "grow at the end, before `row_hash`" precedent, appended after
+`close_price_as_of`. Archive/rename an existing `signal_rankings_log_<portfolio>.csv` before
+your first run after upgrading, same reasoning as above.
 
 ## Reading it
 

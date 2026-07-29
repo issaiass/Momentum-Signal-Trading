@@ -563,6 +563,18 @@ default_risk:
                                        # flat-or-rising participation, a higher value requires an
                                        # accelerating volume trend
 
+  # Rank Delta, LIVE-ONLY, opt-in, reporting-only. Adds a "Rank Delta" column to the Full
+  # Signal Universe report/email/log: each ticker's rank exactly lookback_period ago vs. today
+  # (rich text, e.g. "up 2 positions"/"down 2 positions"/no change). When true, widens THIS
+  # portfolio's price fetch (~2x the momentum-window portion) so the historical comparison
+  # point is real, not NaN, a real, deliberate fetch-size cost, opt in only if you want the
+  # column. False (default) is byte-identical to before this field existed: no wider fetch,
+  # rank_delta always blank/N/A. Respects this portfolio's own resolved lookback_period/
+  # holding_period (after risk_overrides), a weekly portfolio and a monthly portfolio each get
+  # their own correctly-scaled comparison window. See docs/SIGNAL_RANKINGS_LOG.md's
+  # "Rank Delta" column.
+  use_rank_delta: false
+
   # Backtest-only (research/notebook use, no effect on daily-runner). run_risk_managed_backtest()
   # is the ONLY consumer of every field in this block, none of them are read anywhere in the
   # --live or dry-run execution path, setting these in a portfolio's risk_overrides has zero

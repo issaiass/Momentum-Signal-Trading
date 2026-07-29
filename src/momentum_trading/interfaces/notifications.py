@@ -259,11 +259,18 @@ def build_signal_universe_html(full_signal_universe: dict, orders: dict, top_n: 
     help the strategy, distinct reasons), not lumped together.
 
     full_signal_universe : {ticker: {'rank', 'signal_score', 'close_price', 'close_price_as_of',
-    'selection_status'}}, execution/live_signal.py's run()'s OrdersResult.full_signal_universe
-    attribute. close_price_as_of (Epic 5, "Stale-Price Reporting + Live Price-Vendor Priority"
-    plan) is None for a fresh close, or the date of a fallback last-known-good close when the
-    current rebalance's own close was NaN (see run()'s own comment for the real incident that
-    motivated this), rendered inline as "(as of YYYY-MM-DD)" so staleness is visible in the email.
+    'selection_status', 'rank_delta'}}, execution/live_signal.py's run()'s
+    OrdersResult.full_signal_universe attribute. close_price_as_of (Epic 5, "Stale-Price
+    Reporting + Live Price-Vendor Priority" plan) is None for a fresh close, or the date of a
+    fallback last-known-good close when the current rebalance's own close was NaN (see run()'s
+    own comment for the real incident that motivated this), rendered inline as
+    "(as of YYYY-MM-DD)" so staleness is visible in the email. rank_delta (Epic 7, "Rank Delta
+    (Momentum Rank Trend) Column" plan) is the rank exactly lookback_period ago minus today's
+    rank (positive = moved up), None when cfg.use_rank_delta is off or there wasn't enough
+    history for a real comparison point, rendered as a colored "▲ +N"/"▼ -N"/"-"/"N/A" cell
+    right after Momentum Rank, reusing this table's own BUY-green/SELL-red convention. Does NOT
+    affect this table's sort order (still Momentum Rank ascending, signal_score descending
+    tiebreak, unchanged).
     orders : the SAME dict Table 1 was built from; a ticker present here (selected, whether
     traded or held) gets its real action/shares/money-invested/stop-loss-price/fill-outcome
     columns from its order; a ticker absent here (Action column shows "WATCHLIST" or "EXCLUDED",
@@ -299,6 +306,7 @@ def build_signal_universe_html(full_signal_universe: dict, orders: dict, top_n: 
         score = info.get("signal_score")
         close_price = info.get("close_price")
         close_price_as_of = info.get("close_price_as_of")
+        rank_delta = info.get("rank_delta")
         status = info.get("selection_status", "")
         order = orders.get(ticker)
 
@@ -342,10 +350,27 @@ def build_signal_universe_html(full_signal_universe: dict, orders: dict, top_n: 
                 close_price_text += f" (as of {as_of_text})"
         else:
             close_price_text = ""
+
+        # Rank Delta (Epic 7, "Rank Delta (Momentum Rank Trend) Column" plan): rank_delta is
+        # None when cfg.use_rank_delta is off, the ticker has no current rank, or there wasn't
+        # enough ranks history for a real lookback_period-ago comparison point, all rendered as
+        # a plain "N/A". Reuses this table's own existing BUY-green/SELL-red hex codes, no new
+        # color convention. Presentation-only: the raw signed integer lives in the CSV log
+        # (execution/live_signal.py's log_signal_rankings()), independently.
+        if rank_delta is None:
+            rank_delta_text, rank_delta_color = "N/A", "#7f8c8d"
+        elif rank_delta > 0:
+            rank_delta_text, rank_delta_color = f"▲ +{rank_delta}", "#27ae60"
+        elif rank_delta < 0:
+            rank_delta_text, rank_delta_color = f"▼ {rank_delta}", "#c0392b"
+        else:
+            rank_delta_text, rank_delta_color = "-", "#333"
+
         rows += (
             f"<tr><td style='padding:4px 8px;'>{ticker}</td>"
             f"<td style='padding:4px 8px; color:{action_color}; font-weight:bold;'>{action}</td>"
             f"<td style='padding:4px 8px;'>{rank if rank is not None else ''}</td>"
+            f"<td style='padding:4px 8px; color:{rank_delta_color};'>{rank_delta_text}</td>"
             f"<td style='padding:4px 8px;'>{score_text}</td>"
             f"<td style='padding:4px 8px;'>{close_price_text}</td>"
             f"<td style='padding:4px 8px;'>{status}</td>"
@@ -368,6 +393,7 @@ def build_signal_universe_html(full_signal_universe: dict, orders: dict, top_n: 
       <tr style="background:#f4f4f4;"><th style='padding:4px 8px; text-align:left;'>Ticker</th>
           <th style='padding:4px 8px; text-align:left;'>Action</th>
           <th style='padding:4px 8px; text-align:left;'>Momentum Rank</th>
+          <th style='padding:4px 8px; text-align:left;'>Rank Delta</th>
           <th style='padding:4px 8px; text-align:left;'>{score_header}</th>
           <th style='padding:4px 8px; text-align:left;'>Current Close Price</th>
           <th style='padding:4px 8px; text-align:left;'>Selection Status</th>

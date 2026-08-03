@@ -158,14 +158,18 @@ WATCHLIST/EXCLUDED) shows `$0.00`/`0.00%` money and `"N/A"` for its stop-loss pr
 position was ever opened for it. "Lookback Return (%)" is footnoted "(composite score)" for the
 4 `strategy_type`s whose score isn't a literal price return
 (`multi_timeframe_composite`/`residual_momentum`/`path_dependent_momentum`/
-`hybrid_multi_factor`), see `docs/SIGNAL_RANKINGS_LOG.md`. Despite the column name, "Stop-Loss
-Price" reports a DOLLAR AMOUNT AT RISK, not a per-share price: `Money Invest * stop_loss_pct` for
-a `BUY` or `HOLD` (populated the same way regardless of live vs. dry-run), and `"N/A"` for
-`SELL`/watchlist/excluded. A deliberate, explicit reporting choice, entirely independent of the
+`hybrid_multi_factor`), see `docs/SIGNAL_RANKINGS_LOG.md`. "Stop-Loss Price" (Epic 8, "Stop-Loss
+Price Reporting Fix" plan) is a real per-share price: `close_price * (1 - stop_loss_pct)` for a
+`BUY` (no entry exists yet), or `avg_entry_price * (1 - stop_loss_pct)` for a `HOLD` when the
+real entry price is known, falling back to close price when it isn't (shown with an
+"(estimated)" qualifier in that case, and always for a BUY); `"N/A"` for
+`SELL`/watchlist/excluded, or when the resolved `stop_loss_pct` is disabled for that ticker.
+This reverses an earlier design (a dollar-amount-at-risk figure, `Money Invest * stop_loss_pct`),
+reversed on an explicit, informed instruction. Still reporting-only, entirely independent of the
 two REAL stop-loss enforcement mechanisms (the daily percentage-drawdown check and the
-broker-side bracket order), both of which still compute their own real per-share threshold from
-`avg_entry_price`, unaffected by this column. See `docs/SIGNAL_RANKINGS_LOG.md`'s `stop_loss_price`
-entry for the full detail. The same data is also persisted every rebalance to
+broker-side bracket order), both of which independently compute their own real per-share
+threshold from `avg_entry_price`, unaffected by this column. See `docs/SIGNAL_RANKINGS_LOG.md`'s
+`stop_loss_price` entry for the full detail. The same data is also persisted every rebalance to
 `logs/signal_rankings_log_<portfolio>.csv`, a sibling to the trade log kept deliberately separate,
 see that doc for the full schema.
 

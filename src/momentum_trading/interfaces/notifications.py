@@ -321,7 +321,12 @@ def build_signal_universe_html(full_signal_universe: dict, orders: dict, top_n: 
             stop_loss_price = order.get("stop_loss_price")
             if stop_loss_price is None:
                 stop_loss_text = "N/A"
-            elif action == "BUY":
+            elif order.get("stop_loss_price_is_estimated", action == "BUY"):
+                # "(estimated)" means the reference price is NOT a real known entry price (every
+                # BUY, since no entry exists yet; or a HOLD that fell back to close_price because
+                # no avg_entry_price was available, e.g. dry-run without persist_dry_run_state).
+                # The .get() default preserves the old BUY-only heuristic for any order dict that
+                # predates stop_loss_price_is_estimated (Epic 8).
                 stop_loss_text = f"${stop_loss_price:,.2f} (estimated)"
             else:
                 stop_loss_text = f"${stop_loss_price:,.2f}"

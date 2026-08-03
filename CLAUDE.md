@@ -674,8 +674,51 @@ that tests enforce, don't casually violate these when editing:
   paths, not trailing, confirmed by reading both, it never ratchets as a position gains; see
   `docs/RISK_CONSTRAINTS.md`'s "Stop-Loss Width" section for recommended per-regime values
   (`0.10` short-term, `0.15`-`0.20` long-term) and why the wider long-term value only reproduces
-  half of the cited "trailing stop" research (room to breathe, not gain-locking, no
-  `TRAIL`-order-type or any trailing mechanism exists in this codebase).
+  half of the cited "trailing stop" research (room to breathe, not gain-locking on its own,
+  a broker-native `TRAIL` mechanism for the gain-locking half now exists, see below).
+  `place_orders_ibkr()`'s `attach_broker_trailing_stop`/`trailing_stop_pct` params (Epic 9,
+  "Broker-Native Trailing Stop" plan, from `BacktestConfig`, belt-and-suspenders alongside
+  `use_trailing_stop`'s Python-side daily ratchet, `daily_runner.py`'s
+  `check_and_handle_trailing_stops()`, see `docs/RISK_CONSTRAINTS.md`'s "Broker-Native Trailing
+  Stop") attach a real IBKR `TRAIL` order at BUY time, same shape as the `attach_broker_stop_loss`
+  bracket above: parent BUY (`transmit=False`) + child `TRAIL` SELL (`parentId` linked,
+  `orderType="TRAIL"`, `trailingPercent = trailing_stop_pct * 100`, a percent number not a dollar
+  amount, `trailStopPrice = expected_prices[ticker] * (1 - trailing_stop_pct)` computed and
+  logged explicitly at submission time rather than left to IBKR's own auto-calculation, same
+  transparency precedent as the STP bracket's own `auxPrice`, `tif="GTC"`). No reference price ->
+  falls back to a plain, unprotected BUY, same fallback shape as the fixed bracket.
+  `trailing_stop_order_ids[ticker]` / `results[ticker]["trailing_stop_order_id"]` ->
+  `orders[ticker]["broker_trailing_stop_order_id"]` mirror `stop_order_ids`/`stop_order_id`/
+  `broker_stop_order_id`'s identical in-memory-only, audit-only scope exactly (confirmed by
+  reading the code: neither the STP nor the TRAIL order id is a trade-log CSV column, nor read
+  anywhere in `interfaces/notifications.py`).
+  **OCA pairing, confirmed with the project owner**: when a portfolio enables BOTH
+  `attach_broker_stop_loss` and `attach_broker_trailing_stop` for the same BUY, both children
+  attach as an IBKR One-Cancels-All group (`ocaGroup = f"OCA_{ticker}_{parent_oid}"`,
+  `ocaType=1` on both), so whichever triggers first cancels the other at the broker, matching
+  `trailing_stop_pct`'s own documented "whichever triggers first wins" semantics extended to the
+  broker level rather than diverging from it. Sequencing: the STP child (if both attach) carries
+  `transmit=False` and the TRAIL child (always placed last) carries `transmit=True`, transmitting
+  the whole 3-order bracket atomically; when only one bracket type is enabled, no OCA fields are
+  set at all, unchanged single-child behavior. The existing cancel-before-sell mechanism
+  (`reqAllOpenOrders()`/`cancelOrder()`, described above) is widened to also match a resting
+  `(symbol, SELL, TRAIL)` order, not just `STP`, and its outer gate widened to
+  `attach_broker_stop_loss or attach_broker_trailing_stop`, firing whenever EITHER bracket type
+  could be resting. **A real, confirmed pre-existing gap found and fixed while wiring this in,
+  unrelated to the TRAIL order type itself**: `daily_runner.py`'s three auto-exit call sites
+  (`check_and_handle_stop_losses()`, `check_and_handle_time_stops()`,
+  `check_and_handle_trailing_stops()`) were never passing `attach_broker_stop_loss`/
+  `stop_loss_pct` to `place_orders_ibkr()` at all, confirmed by reading all three, meaning a
+  resting broker STP was never cancelled before one of these three checks' own auto-exit SELL,
+  only the rebalance path (`run()`) had this protection before now. Fixed: all three now pass the
+  same four kwargs (`attach_broker_stop_loss`/`stop_loss_pct`/`attach_broker_trailing_stop`/
+  `trailing_stop_pct`) the rebalance path already did.
+  `BacktestConfig.attach_broker_trailing_stop: bool = False` (opt-in, byte-identical when off)
+  reuses `trailing_stop_pct` for the trail width, same reuse precedent
+  `attach_broker_stop_loss` sets for `stop_loss_pct`, deliberately independent of
+  `use_trailing_stop`. `__post_init__`'s existing `use_trailing_stop`/`trailing_stop_pct`
+  validation is generalized to also require a configured width when
+  `attach_broker_trailing_stop` is set, independent of `use_trailing_stop`'s own value.
   `is_outside_all_trading_windows(exchange, allow_extended_hours, now)` (pure, `now` injectable
   for testing, defaults to real `pd.Timestamp.now(tz="America/New_York")`) backs a proactive
   `WARNING` logged at the very top of `place_orders_ibkr()`, before ever connecting, when the
@@ -752,22 +795,46 @@ that tests enforce, don't casually violate these when editing:
   cause visible instead of looking identical to a routine no-action rebalance. Read by
   `daily_runner.py`'s no-action email branch (see `interfaces/notifications.py`'s
   `build_no_action_summary_html()` bullet).
-  `compute_stop_loss_price(action, cfg, money_invested, ticker=None)` reports a DOLLAR AMOUNT AT
-  RISK on a position (`money_invested * stop_loss_pct`), NOT a per-share price despite the
-  "Stop-Loss Price" column header it feeds, a deliberate, explicit product decision (confirmed
-  directly with the project owner, not a bug): `money_invested` for a `BUY` or `HOLD` when it's
-  `> 0` and `stop_loss_pct` (via `resolve_ticker_stop_loss_pct()`) isn't `None`, else `None`
-  (`SELL`, or a `$0`/no-position row). This function is purely REPORTING-only; it is not, and
-  must not be, wired into either REAL stop-loss enforcement mechanism, both of which correctly
-  need a real per-share reference price and compute it independently: `check_and_handle_stop_
-  losses()`'s daily percentage-drawdown check and `place_orders_ibkr()`'s broker-side bracket
-  order (`attach_broker_stop_loss`'s `auxPrice`), both derived directly from `avg_entry_price`,
-  never through this function. Superseded an earlier per-share formula (`latest_price * (1 -
-  stop_loss_pct)` for `BUY`, `avg_entry_price * (1 - stop_loss_pct)` for `HOLD`, live-only) that
-  needed a now-removed `current_avg_entry_prices` param threaded through `generate_orders()`/
-  `run()`/`daily_runner.py`; since `money_invested` is uniformly available regardless of live vs.
-  dry-run (unlike the old `avg_entry_price`), `stop_loss_price` is now populated for HOLD rows in
-  dry-run mode too, a real, intentional behavior change, not a regression.
+  `compute_stop_loss_price(action, cfg, close_price, avg_entry_price=None, ticker=None)` (Epic 8,
+  "Stop-Loss Price Reporting Fix" plan) reports a REAL PER-SHARE stop-loss trigger price,
+  matching what the two real enforcement mechanisms actually compute for the same position, NOT
+  a dollar-amount-at-risk figure. This is a REVERSAL of an earlier design
+  (`money_invested * stop_loss_pct`, at the time "a deliberate, explicit product decision,
+  confirmed directly with the project owner") on a new, explicit, informed instruction: the
+  dollar figure was uniformly available live and dry-run, but didn't match the real per-share
+  threshold this app actually enforces, confusing to compare against a live quote. Reference
+  price selection: `BUY` uses `close_price` (no entry exists yet, estimates where the stop would
+  land once filled near today's close); `HOLD` uses `avg_entry_price` when it's a real, positive
+  value (a fixed stop is measured FROM ENTRY, not from today's price, per `stop_loss_pct`'s own
+  "FIXED from entry, not trailing" contract, so this matches the threshold actually in force),
+  falling back to `close_price` when the entry price genuinely isn't known (dry-run without
+  `persist_dry_run_state`); `SELL` or no usable reference price: `None`. `stop_loss_pct` is
+  resolved exactly as before, via `resolve_ticker_stop_loss_pct()` when `ticker` is given, `None`
+  short-circuits to `None` regardless of action. This function remains purely REPORTING-only; it
+  is not, and must not be, wired into either REAL stop-loss enforcement mechanism, both of which
+  correctly need a real per-share reference price and compute it independently:
+  `check_and_handle_stop_losses()`'s daily percentage-drawdown check and
+  `place_orders_ibkr()`'s broker-side bracket order (`attach_broker_stop_loss`'s `auxPrice`),
+  both derived directly from `avg_entry_price`, never through this function. `generate_orders()`
+  gained a new optional `current_positions: dict | None = None` param (`{ticker: {'shares',
+  'avg_entry_price'}}`, same shape `check_and_handle_stop_losses()`/`get_ibkr_positions()` use),
+  feeding this function's `avg_entry_price` argument via a lookup keyed by ticker; `None`
+  (default) is byte-identical to no entry price being known for any ticker (falls back to
+  `close_price`), so every pre-existing call site/test keeps working unchanged. `run()` gained
+  the identical optional `current_positions` param, threaded straight through to its
+  `generate_orders()` call; `daily_runner.py`'s own call site to `run()` already builds a
+  `current_positions` dict right before deriving `current_holdings` from it
+  (`current_holdings = {t: p["shares"] for t, p in current_positions.items()}`), so this reuses
+  that exact same dict, no new fetch. Each order also gains a `stop_loss_price_is_estimated: bool`
+  field, `True` whenever the reference price used was NOT a real `avg_entry_price` (every `BUY`,
+  plus any `HOLD` that fell back to `close_price`), read by `interfaces/notifications.py`'s
+  `build_signal_universe_html()` to extend the pre-existing "(estimated)" qualifier (previously
+  keyed off `action == "BUY"` alone) to also cover a HOLD row without a known entry price, with a
+  `.get(..., action == "BUY")` fallback so an order dict predating this field still renders
+  correctly. `log_signal_rankings()`'s `stop_loss_price` CSV column is a VALUE-SEMANTICS change,
+  not a schema change (same column, same position): rows written before Epic 8 hold a
+  dollar-at-risk figure, rows written after hold a real per-share price, see
+  `docs/SIGNAL_RANKINGS_LOG.md`'s schema-evolution note.
   `log_signal_rankings(full_signal_universe, orders, dry_run, path, cfg=None)` writes one
   hash-chained row per full-universe ticker to `logs/signal_rankings_log_<portfolio>.csv` (a new
   `signal_rankings_log_path` param on `run()`, built by `daily_runner.py` next to `trade_log_path`

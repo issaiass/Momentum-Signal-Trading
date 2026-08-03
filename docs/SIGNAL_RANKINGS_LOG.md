@@ -87,15 +87,27 @@ every ranked ticker, ordered by `signal_score` descending among themselves.
   distinct concept from `money_invested` above: for a full-exit `SELL` (the ticker leaves the
   target universe entirely), `money_invested` is `0.00` (correctly reflecting the post-rebalance
   target), `transaction_amount` is what actually got sold.
-- **stop_loss_price**, despite the column name, this is a DOLLAR AMOUNT AT RISK, not a per-share
-  price: `money_invested * stop_loss_pct` for a `BUY` or `HOLD` with a real `money_invested`
-  (populated the same way regardless of live vs. dry-run), blank for `SELL`/`WATCHLIST`/
-  `EXCLUDED` (no open or intended position, `money_invested` is already `0.00` for those). This
-  is a deliberate, explicit reporting choice, not a bug, and is entirely independent of the two
-  REAL stop-loss enforcement mechanisms (`daily_runner.py`'s daily percentage-drawdown check and
-  `place_orders_ibkr()`'s broker-side bracket order), both of which compute their own real
-  per-share threshold directly from `avg_entry_price`, never from this reported figure. See
-  `compute_stop_loss_price()`'s own docstring (`execution/live_signal.py`).
+- **stop_loss_price** [Semantics changed, Epic 8]: a REAL PER-SHARE trigger price, matching what
+  the two real enforcement mechanisms actually compute for the same position, not a dollar
+  figure. For a `BUY`: `close_price * (1 - stop_loss_pct)` (no entry exists yet, this estimates
+  where the stop would land once filled near today's close). For a `HOLD`: the SAME formula but
+  anchored to the position's real `avg_entry_price` when known (a fixed stop is measured from
+  entry, not from today's price, so this matches the threshold actually in force), falling back
+  to `close_price` when the entry price genuinely isn't known yet (e.g. dry-run without
+  `persist_dry_run_state`). Blank for `SELL`/`WATCHLIST`/`EXCLUDED` (no open or intended
+  position) or when the resolved `stop_loss_pct` is `None` (disabled for this ticker via
+  `ticker_risk_overrides`). Still entirely independent of the two REAL stop-loss enforcement
+  mechanisms (`daily_runner.py`'s daily percentage-drawdown check and `place_orders_ibkr()`'s
+  broker-side bracket order), both of which compute their own real per-share threshold directly
+  from `avg_entry_price`, never from this reported figure, this column has always been (and
+  remains) reporting-only. See `compute_stop_loss_price()`'s own docstring
+  (`execution/live_signal.py`).
+  **Schema-evolution note**: this is a VALUE-SEMANTICS change, not a column/schema change (same
+  name, same CSV position). Rows logged before Epic 8 hold a dollar-amount-at-risk figure
+  (`money_invested * stop_loss_pct`, the prior deliberate design); rows logged after hold a real
+  per-share price. Any historical analysis spanning this change must account for the
+  discontinuity, the same transparency this project applies to every prior schema/semantics
+  change (see `docs/LOG_RETENTION.md`).
 - **reason**, the order's reason string (blank for watchlist).
 - **dry_run**, whether this run had `--live` set.
 - **config_hash**, same per-run `BacktestConfig` fingerprint the trade log already writes.

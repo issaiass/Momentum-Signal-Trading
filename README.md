@@ -88,8 +88,14 @@ README says so on purpose.
   opt-in, LIVE + BACKTEST): distinct from the fixed-from-entry `stop_loss_pct` above, exits once
   price has fallen `trailing_stop_pct` from a position's OWN highest price since entry, locking
   in gains as a position runs up rather than only capping losses; a Python-side daily ratchet
-  (works in dry-run, no new IBKR order type), not a broker-native `TRAIL` order, see
-  `docs/RISK_CONSTRAINTS.md`'s "Trailing Stop-Loss" section. Flooring remainder redeployment
+  (works in dry-run), see `docs/RISK_CONSTRAINTS.md`'s "Trailing Stop-Loss" section. Broker-native
+  trailing stop (`attach_broker_trailing_stop`, LIVE-ONLY, opt-in): a REAL IBKR `TRAIL` order
+  attached at BUY time, the broker-native counterpart to the Python-side ratchet above, protecting
+  continuously at the broker even while this app isn't running. When combined with
+  `attach_broker_stop_loss` above, the two children attach as an IBKR One-Cancels-All (OCA) pair,
+  whichever triggers first cancels the other at the broker, matching `trailing_stop_pct`'s own
+  "whichever triggers first wins" semantics extended to the broker level, see
+  `docs/RISK_CONSTRAINTS.md`'s "Broker-Native Trailing Stop" section. Flooring remainder redeployment
   (`redeploy_flooring_remainder`,
   opt-in): since IBKR has no fractional equity order support, every BUY floors to a whole share
   count, leaving a small per-ticker leftover unused, this pools that leftover across the
@@ -612,6 +618,28 @@ answer whether the strategy actually works.
   volume) is untouched, still `yfinance`-only from every `daily_runner.py` call site, a
   documented, deliberate scope boundary, not an oversight. See `CLAUDE.md`'s `daily_runner.py`
   bullet.
+- **"Stop-Loss Price" reporting formula, a deliberate, informed reversal, not a bug fix**: this
+  column (the Full Signal Universe table/log) previously reported a dollar-amount-at-risk figure
+  (`Money Invest * stop_loss_pct`), a documented, deliberate design choice at the time. It now
+  reports a real per-share trigger price instead (`close_price * (1 - stop_loss_pct)` for a
+  `BUY`, `avg_entry_price * (1 - stop_loss_pct)` for a `HOLD` when a real entry price is known,
+  falling back to `close_price` otherwise), on a new, explicit instruction, matching what the
+  two real stop-loss enforcement mechanisms (the daily drawdown check and the broker-side
+  bracket order) already independently compute. Reporting-only, still not wired into either real
+  mechanism. See `docs/SIGNAL_RANKINGS_LOG.md`'s `stop_loss_price` entry and `CLAUDE.md`'s
+  `execution/live_signal.py` bullet.
+- **A real, confirmed IBKR platform constraint found via the broker-native trailing stop's
+  (`attach_broker_trailing_stop`) own real paper-account verification, now fixed**: a `TRAIL`
+  child order attached to a plain `MKT` parent (the same shape the existing `attach_broker_
+  stop_loss` STP bracket already uses successfully) failed with IBKR error 328, "Trailing stop
+  orders can be attached to limit or stop-limit orders only." Unlike the STP child, a `TRAIL`
+  child specifically requires its parent to be `LMT` or `STP LMT`. Fixed: the parent is now
+  forced to `LMT` whenever a TRAIL child will attach, using the same buffer-based limit price
+  computation `allow_extended_hours` already uses elsewhere in this function. Confirmed
+  end-to-end against a real IBKR paper account after the fix: a real BUY + TRAIL bracket
+  attached successfully, and (when combined with `attach_broker_stop_loss`) both children
+  attached as a real IBKR One-Cancels-All (OCA) pair. See `docs/RISK_CONSTRAINTS.md`'s
+  "Broker-Native Trailing Stop" section.
 
 ### Who should allocate capital here
 

@@ -1262,6 +1262,63 @@ class TestRunStalePriceFallback:
         assert orders["B"]["reason"] == "no live price available"
 
 
+class TestRunCurrentPositionsPassthrough:
+    """
+    Epic 8, "Stop-Loss Price Reporting Fix" plan: run()'s new current_positions param must flow
+    straight through to generate_orders(), so a HOLD row's reported stop_loss_price anchors to
+    the position's real avg_entry_price, not an estimate. current_positions=None (the default)
+    must stay byte-identical to before this param existed (exercised by every other TestRun*
+    class in this file, none of which pass it).
+    """
+
+    def _fresh_prices(self, seed=7):
+        dates = pd.bdate_range("2024-01-01", "2024-05-15")
+        rng = np.random.default_rng(seed)
+        n = len(dates)
+        a = 50 * np.cumprod(1 + rng.normal(0.0005, 0.01, n))
+        b = 50 * np.cumprod(1 + rng.normal(0.0003, 0.01, n))
+        return pd.DataFrame({"A": a, "B": b}, index=dates)
+
+    def _run_kwargs(self, tmp_path):
+        return dict(
+            log_path=str(tmp_path / "trade_log.csv"),
+            signal_rankings_log_path=str(tmp_path / "signal_rankings_log.csv"),
+            alerts_log_path=str(tmp_path / "alerts_log.csv"),
+        )
+
+    def test_current_positions_none_default_is_estimated(self, monkeypatch, tmp_path):
+        prices = self._fresh_prices()
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False, top_n=2,
+                              drift_threshold=1.0, stop_loss_pct=0.10)
+        orders = live_signal.run(
+            tickers=["A", "B"], current_holdings={"A": 1.0, "B": 1.0}, total_value=1000.0,
+            cfg=cfg, top_n=2, lookback_period=1.0, dry_run=True, **self._run_kwargs(tmp_path),
+        )
+        assert orders["A"]["action"] == "HOLD"
+        assert orders["A"]["stop_loss_price_is_estimated"] is True
+
+    def test_current_positions_given_anchors_hold_to_real_entry_price(self, monkeypatch, tmp_path):
+        prices = self._fresh_prices()
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        monkeypatch.chdir(tmp_path)
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False, top_n=2,
+                              drift_threshold=1.0, stop_loss_pct=0.10)
+        orders = live_signal.run(
+            tickers=["A", "B"], current_holdings={"A": 1.0, "B": 1.0}, total_value=1000.0,
+            cfg=cfg, top_n=2, lookback_period=1.0, dry_run=True,
+            current_positions={"A": {"shares": 1.0, "avg_entry_price": 42.0},
+                                "B": {"shares": 1.0, "avg_entry_price": 42.0}},
+            **self._run_kwargs(tmp_path),
+        )
+        assert orders["A"]["action"] == "HOLD"
+        assert orders["A"]["stop_loss_price_is_estimated"] is False
+        assert orders["A"]["stop_loss_price"] == pytest.approx(42.0 * 0.90)
+
+
 class TestRunRankDelta:
     """
     Rank Delta (Epic 7, "Rank Delta (Momentum Rank Trend) Column" plan): a ticker's rank exactly
@@ -2273,51 +2330,59 @@ class TestTickerRiskOverridesValidation:
 
 class TestComputeStopLossPrice:
     """
-    Reports the DOLLAR AMOUNT AT RISK on a position (money_invested * stop_loss_pct), a
-    reporting-only figure under the "Stop-Loss Price" column header (a deliberate, explicit
-    product decision, not a per-share price), NOT used by either real stop-loss enforcement
-    mechanism. These tests confirm each real case and the "not meaningful" guards, matching the
-    function's own docstring exactly.
+    Reports a REAL PER-SHARE stop-loss trigger price (Epic 8, "Stop-Loss Price Reporting Fix"
+    plan), matching what the two real enforcement mechanisms actually compute: BUY uses
+    close_price (no entry exists yet), HOLD uses avg_entry_price when known, falling back to
+    close_price when not. Reporting-only, NOT used by either real stop-loss enforcement
+    mechanism. Supersedes the earlier money_invested * stop_loss_pct ("dollar at risk") formula.
     """
-    def test_buy_uses_money_invested(self):
+    def test_buy_uses_close_price(self):
         cfg = BacktestConfig(stop_loss_pct=0.10)
-        assert compute_stop_loss_price("BUY", cfg, 500.0) == pytest.approx(50.0)
+        assert compute_stop_loss_price("BUY", cfg, 500.0) == pytest.approx(450.0)
 
-    def test_hold_uses_money_invested(self):
+    def test_hold_uses_avg_entry_price_when_known(self):
         cfg = BacktestConfig(stop_loss_pct=0.20)
-        assert compute_stop_loss_price("HOLD", cfg, 500.0) == pytest.approx(100.0)
+        # Reference price is the real entry price, NOT close_price, even though close_price
+        # differs (the whole point: a fixed stop doesn't move as price fluctuates).
+        assert compute_stop_loss_price("HOLD", cfg, 500.0, avg_entry_price=400.0) == pytest.approx(320.0)
+
+    def test_hold_falls_back_to_close_price_without_entry_price(self):
+        # dry-run without persist_dry_run_state, or any other case where entry price isn't known.
+        cfg = BacktestConfig(stop_loss_pct=0.10)
+        assert compute_stop_loss_price("HOLD", cfg, 500.0) == pytest.approx(450.0)
+        assert compute_stop_loss_price("HOLD", cfg, 500.0, avg_entry_price=0.0) == pytest.approx(450.0)
+        assert compute_stop_loss_price("HOLD", cfg, 500.0, avg_entry_price=None) == pytest.approx(450.0)
 
     def test_sell_is_none(self):
         cfg = BacktestConfig(stop_loss_pct=0.10)
-        assert compute_stop_loss_price("SELL", cfg, 500.0) is None
+        assert compute_stop_loss_price("SELL", cfg, 500.0, avg_entry_price=400.0) is None
 
-    def test_zero_or_missing_money_invested_is_none(self):
-        # $0 money_invested is the existing "no position exists" convention (WATCHLIST/EXCLUDED
-        # rows), must stay blank rather than compute to a numeric 0.
+    def test_zero_or_missing_close_price_is_none(self):
+        # No usable reference price (WATCHLIST/EXCLUDED rows, or a missing live price) must stay
+        # blank rather than compute to a numeric 0.
         cfg = BacktestConfig(stop_loss_pct=0.10)
         assert compute_stop_loss_price("BUY", cfg, None) is None
         assert compute_stop_loss_price("BUY", cfg, 0.0) is None
 
-    def test_ticker_disabled_override_returns_none_even_with_money_invested(self):
+    def test_ticker_disabled_override_returns_none_even_with_close_price(self):
         cfg = BacktestConfig(stop_loss_pct=0.10, ticker_risk_overrides={"AAPL": {"enabled": False}})
         assert compute_stop_loss_price("BUY", cfg, 500.0, ticker="AAPL") is None
 
     def test_ticker_custom_pct_override_is_used(self):
         cfg = BacktestConfig(stop_loss_pct=0.10,
                               ticker_risk_overrides={"AMD": {"stop_loss_pct": 0.25}})
-        assert compute_stop_loss_price("BUY", cfg, 500.0, ticker="AMD") == pytest.approx(125.0)
+        assert compute_stop_loss_price("BUY", cfg, 500.0, ticker="AMD") == pytest.approx(375.0)
 
     def test_no_ticker_param_falls_back_to_portfolio_default(self):
         # Regression: omitting ticker (every pre-existing call site) must stay byte-identical.
         cfg = BacktestConfig(stop_loss_pct=0.10, ticker_risk_overrides={"AMD": {"stop_loss_pct": 0.25}})
-        assert compute_stop_loss_price("BUY", cfg, 500.0) == pytest.approx(50.0)
+        assert compute_stop_loss_price("BUY", cfg, 500.0) == pytest.approx(450.0)
 
-    def test_dry_run_hold_is_now_populated_unlike_before(self):
-        # Real, documented behavior change: money_invested is uniformly available regardless of
-        # live vs. dry-run, unlike the old avg_entry_price (live-only), so a HOLD's stop-loss
-        # figure is no longer forced to None in dry-run mode.
+    def test_hold_is_populated_in_dry_run_via_close_price_fallback(self):
+        # A HOLD's stop-loss figure is never forced to None in dry-run mode, it's just an
+        # estimate (close_price-based) rather than a real entry-anchored figure.
         cfg = BacktestConfig(stop_loss_pct=0.10)
-        assert compute_stop_loss_price("HOLD", cfg, 500.0) == pytest.approx(50.0)
+        assert compute_stop_loss_price("HOLD", cfg, 500.0) == pytest.approx(450.0)
 
 
 class TestGenerateOrders:
@@ -2448,7 +2513,7 @@ class TestGenerateOrders:
         assert orders["XLRE"]["reason"] == "no live price available"
         assert orders["XLRE"]["shares"] == 0
 
-    def test_buy_order_stop_loss_price_is_money_invested_times_pct(self):
+    def test_buy_order_stop_loss_price_is_close_price_based(self):
         cfg = BacktestConfig(drift_threshold=0.0, min_trade_size=1.0, stop_loss_pct=0.10)
         orders = generate_orders(
             current_holdings={}, target_weights={"XLK": 1.0}, gross_exposure=1.0,
@@ -2456,9 +2521,10 @@ class TestGenerateOrders:
         )
         assert orders["XLK"]["action"] == "BUY"
         assert orders["XLK"]["money_invested"] == pytest.approx(1000.0)
-        assert orders["XLK"]["stop_loss_price"] == pytest.approx(100.0)  # 1000 * 0.10
+        assert orders["XLK"]["stop_loss_price"] == pytest.approx(198.0)  # 220 * (1 - 0.10)
+        assert orders["XLK"]["stop_loss_price_is_estimated"] is True
 
-    def test_hold_on_open_position_stop_loss_price_is_money_invested_times_pct(self):
+    def test_hold_on_open_position_falls_back_to_close_price_without_current_positions(self):
         cfg = BacktestConfig(drift_threshold=0.5, min_trade_size=1.0, stop_loss_pct=0.20)
         orders = generate_orders(
             current_holdings={"SPY": 1.0}, target_weights={"SPY": 1.0}, gross_exposure=1.0,
@@ -2466,7 +2532,22 @@ class TestGenerateOrders:
         )
         assert orders["SPY"]["action"] == "HOLD"
         assert orders["SPY"]["money_invested"] == pytest.approx(500.0)
-        assert orders["SPY"]["stop_loss_price"] == pytest.approx(100.0)  # 500 * 0.20
+        assert orders["SPY"]["stop_loss_price"] == pytest.approx(400.0)  # 500 * (1 - 0.20)
+        assert orders["SPY"]["stop_loss_price_is_estimated"] is True
+
+    def test_hold_on_open_position_uses_real_entry_price_when_current_positions_given(self):
+        # The core Epic 8 behavior: a HOLD's reported stop price is anchored to the position's
+        # REAL entry price (matching what's actually enforced), not today's close, even though
+        # they differ here (SPY has since risen from 400 entry to a 500 close).
+        cfg = BacktestConfig(drift_threshold=0.5, min_trade_size=1.0, stop_loss_pct=0.20)
+        orders = generate_orders(
+            current_holdings={"SPY": 1.0}, target_weights={"SPY": 1.0}, gross_exposure=1.0,
+            total_value=500.0, latest_prices={"SPY": 500.0}, cfg=cfg,
+            current_positions={"SPY": {"shares": 1.0, "avg_entry_price": 400.0}},
+        )
+        assert orders["SPY"]["action"] == "HOLD"
+        assert orders["SPY"]["stop_loss_price"] == pytest.approx(320.0)  # 400 * (1 - 0.20)
+        assert orders["SPY"]["stop_loss_price_is_estimated"] is False
 
     def test_sell_order_has_no_stop_loss_price(self):
         cfg = BacktestConfig(drift_threshold=0.0, min_trade_size=1.0, stop_loss_pct=0.10)
@@ -3806,6 +3887,242 @@ class TestBrokerStopLossBracket:
         assert captured[0]["tif"] == "DAY"
 
 
+class TestBrokerTrailingStopBracket:
+    """
+    attach_broker_trailing_stop (Epic 9, "Broker-Native Trailing Stop" plan), the broker-native
+    counterpart to use_trailing_stop's Python-side daily ratchet, same belt-and-suspenders
+    relationship attach_broker_stop_loss has with auto_execute_stop_loss: each BUY submits a
+    real IBKR bracket, parent BUY (transmit=False) + child TRAIL SELL (parentId linked,
+    transmit=True, trailingPercent = trailing_stop_pct * 100, trailStopPrice = reference_price *
+    (1 - trailing_stop_pct)).
+    """
+
+    def _install_fake_ibkr_capturing_orders(self, monkeypatch, captured, fill_children=False):
+        from ibapi.client import EClient
+
+        def fake_connect(self, host, port, clientId):
+            self.nextValidId(1)
+
+        def fake_run(self):
+            pass
+
+        def fake_place_order(self, orderId, contract, order):
+            captured.append({
+                "orderId": orderId, "symbol": contract.symbol, "action": order.action,
+                "orderType": order.orderType, "transmit": order.transmit,
+                "parentId": order.parentId, "auxPrice": order.auxPrice,
+                "totalQuantity": order.totalQuantity, "outsideRth": order.outsideRth,
+                "tif": order.tif, "trailingPercent": order.trailingPercent,
+                "trailStopPrice": order.trailStopPrice, "ocaGroup": order.ocaGroup,
+                "ocaType": order.ocaType,
+            })
+            if order.parentId and not fill_children:
+                self.orderStatus(orderId, "Submitted", 0, order.totalQuantity, 0.0)
+            else:
+                self.orderStatus(orderId, "Filled", order.totalQuantity, 0, 100.0)
+
+        def fake_disconnect(self):
+            pass
+
+        monkeypatch.setattr(EClient, "connect", fake_connect)
+        monkeypatch.setattr(EClient, "run", fake_run)
+        monkeypatch.setattr(EClient, "placeOrder", fake_place_order)
+        monkeypatch.setattr(EClient, "disconnect", fake_disconnect)
+
+    def test_bracket_parent_not_transmitted_child_is_and_linked_by_parent_id(self, monkeypatch, tmp_path):
+        import momentum_trading.execution.live_signal as ls
+        captured = []
+        self._install_fake_ibkr_capturing_orders(monkeypatch, captured)
+
+        orders = {"BUY1": {"action": "BUY", "shares": 5}}
+        ls.place_orders_ibkr(orders, port=9999, expected_prices={"BUY1": 100.0},
+                              alerts_log_path=str(tmp_path / "alerts_log.csv"),
+                              attach_broker_trailing_stop=True, trailing_stop_pct=0.10)
+
+        assert len(captured) == 2
+        parent, child = captured[0], captured[1]
+        assert parent["action"] == "BUY" and parent["transmit"] is False
+        assert child["action"] == "SELL" and child["orderType"] == "TRAIL"
+        assert child["transmit"] is True
+        assert child["parentId"] == parent["orderId"]
+        assert child["totalQuantity"] == parent["totalQuantity"] == 5
+
+    def test_trail_percent_and_initial_stop_price_computed_from_trailing_stop_pct(self, monkeypatch, tmp_path):
+        import momentum_trading.execution.live_signal as ls
+        captured = []
+        self._install_fake_ibkr_capturing_orders(monkeypatch, captured)
+
+        orders = {"BUY1": {"action": "BUY", "shares": 5}}
+        ls.place_orders_ibkr(orders, port=9999, expected_prices={"BUY1": 100.0},
+                              alerts_log_path=str(tmp_path / "alerts_log.csv"),
+                              attach_broker_trailing_stop=True, trailing_stop_pct=0.10)
+
+        child = captured[1]
+        assert child["trailingPercent"] == pytest.approx(10.0, abs=0.01)  # 0.10 * 100
+        assert child["trailStopPrice"] == pytest.approx(90.0, abs=0.01)  # 100 * (1 - 0.10)
+
+    def test_disabled_by_default_is_a_single_plain_order(self, monkeypatch, tmp_path):
+        import momentum_trading.execution.live_signal as ls
+        captured = []
+        self._install_fake_ibkr_capturing_orders(monkeypatch, captured)
+
+        orders = {"BUY1": {"action": "BUY", "shares": 5}}
+        ls.place_orders_ibkr(orders, port=9999, expected_prices={"BUY1": 100.0},
+                              alerts_log_path=str(tmp_path / "alerts_log.csv"))
+        # attach_broker_trailing_stop not passed, must default to off, byte-identical single order.
+
+        assert len(captured) == 1
+        assert captured[0]["transmit"] is True
+
+    def test_missing_reference_price_falls_back_to_plain_unprotected_buy(self, monkeypatch, tmp_path, caplog):
+        import momentum_trading.execution.live_signal as ls
+        captured = []
+        self._install_fake_ibkr_capturing_orders(monkeypatch, captured)
+
+        orders = {"BUY1": {"action": "BUY", "shares": 5}}
+        with caplog.at_level("WARNING"):
+            ls.place_orders_ibkr(orders, port=9999,  # no expected_prices
+                                  alerts_log_path=str(tmp_path / "alerts_log.csv"),
+                                  attach_broker_trailing_stop=True, trailing_stop_pct=0.10)
+
+        assert len(captured) == 1  # no child, BUY still submitted
+        assert captured[0]["transmit"] is True
+        assert any("no reference price" in r.message for r in caplog.records)
+
+    def test_extended_hours_bracket_sets_outside_rth_on_both_legs(self, monkeypatch, tmp_path):
+        import momentum_trading.execution.live_signal as ls
+        captured = []
+        self._install_fake_ibkr_capturing_orders(monkeypatch, captured)
+
+        orders = {"BUY1": {"action": "BUY", "shares": 5}}
+        ls.place_orders_ibkr(orders, port=9999, expected_prices={"BUY1": 100.0},
+                              alerts_log_path=str(tmp_path / "alerts_log.csv"),
+                              attach_broker_trailing_stop=True, trailing_stop_pct=0.10,
+                              allow_extended_hours=True)
+
+        parent, child = captured[0], captured[1]
+        assert parent["outsideRth"] is True
+        assert child["outsideRth"] is True
+
+    def test_every_order_carries_explicit_tif_day_except_bracket_child_gtc(self, monkeypatch, tmp_path):
+        import momentum_trading.execution.live_signal as ls
+        captured = []
+        self._install_fake_ibkr_capturing_orders(monkeypatch, captured)
+
+        orders = {"BUY1": {"action": "BUY", "shares": 5}, "SELL1": {"action": "SELL", "shares": 3}}
+        ls.place_orders_ibkr(orders, port=9999, expected_prices={"BUY1": 100.0, "SELL1": 50.0},
+                              alerts_log_path=str(tmp_path / "alerts_log.csv"),
+                              attach_broker_trailing_stop=True, trailing_stop_pct=0.10)
+
+        by_action_type = {(o["action"], o["orderType"]): o for o in captured}
+        assert by_action_type[("SELL", "MKT")]["tif"] == "DAY"    # the plain rebalance SELL
+        # The bracket's parent BUY is forced to LMT (not MKT) whenever a TRAIL child attaches
+        # (IBKR error 328, see test_parent_forced_to_lmt_when_trail_attached below), still DAY.
+        assert by_action_type[("BUY", "LMT")]["tif"] == "DAY"
+        assert by_action_type[("SELL", "TRAIL")]["tif"] == "GTC"  # the bracket's protective child
+
+    def test_parent_forced_to_lmt_when_trail_attached(self, monkeypatch, tmp_path):
+        # Real, confirmed IBKR constraint (error 328, "Trailing stop orders can be attached to
+        # limit or stop-limit orders only"), found via a real paper-account submission during
+        # this feature's own live verification: unlike the STP child (fine with a MKT parent), a
+        # TRAIL child requires its parent to be LMT or STP LMT.
+        import momentum_trading.execution.live_signal as ls
+        captured = []
+        self._install_fake_ibkr_capturing_orders(monkeypatch, captured)
+
+        orders = {"BUY1": {"action": "BUY", "shares": 5}}
+        ls.place_orders_ibkr(orders, port=9999, expected_prices={"BUY1": 100.0},
+                              alerts_log_path=str(tmp_path / "alerts_log.csv"),
+                              attach_broker_trailing_stop=True, trailing_stop_pct=0.10)
+
+        parent = captured[0]
+        assert parent["orderType"] == "LMT"
+        assert parent["transmit"] is False
+
+    def test_resting_child_trail_excluded_from_fill_poll_wait_and_result_surfaced(self, monkeypatch, tmp_path):
+        import momentum_trading.execution.live_signal as ls
+        captured = []
+        self._install_fake_ibkr_capturing_orders(monkeypatch, captured)
+
+        orders = {"BUY1": {"action": "BUY", "shares": 5}}
+        result = ls.place_orders_ibkr(orders, port=9999, expected_prices={"BUY1": 100.0},
+                                       alerts_log_path=str(tmp_path / "alerts_log.csv"),
+                                       attach_broker_trailing_stop=True, trailing_stop_pct=0.10,
+                                       fill_poll_timeout=2.0)
+
+        assert result["BUY1"]["status"] == "Filled"
+        assert result["BUY1"]["trailing_stop_order_id"] == captured[1]["orderId"]
+
+
+class TestBrokerStopLossOcaPairing:
+    """
+    When BOTH attach_broker_stop_loss AND attach_broker_trailing_stop are enabled for the same
+    BUY (Epic 9, confirmed with the project owner): the two children attach as an IBKR
+    One-Cancels-All (OCA) group, matching trailing_stop_pct's own documented "whichever triggers
+    first wins" semantics extended to the broker level. Only the LAST child submitted transmits
+    the whole bracket; the parent and the first child stay held (transmit=False) until then.
+    """
+
+    def _install_fake_ibkr_capturing_orders(self, monkeypatch, captured):
+        from ibapi.client import EClient
+
+        def fake_connect(self, host, port, clientId):
+            self.nextValidId(1)
+
+        def fake_run(self):
+            pass
+
+        def fake_place_order(self, orderId, contract, order):
+            captured.append({
+                "orderId": orderId, "action": order.action, "orderType": order.orderType,
+                "transmit": order.transmit, "parentId": order.parentId,
+                "ocaGroup": order.ocaGroup, "ocaType": order.ocaType,
+            })
+            if order.parentId:
+                self.orderStatus(orderId, "Submitted", 0, order.totalQuantity, 0.0)
+            else:
+                self.orderStatus(orderId, "Filled", order.totalQuantity, 0, 100.0)
+
+        def fake_disconnect(self):
+            pass
+
+        monkeypatch.setattr(EClient, "connect", fake_connect)
+        monkeypatch.setattr(EClient, "run", fake_run)
+        monkeypatch.setattr(EClient, "placeOrder", fake_place_order)
+        monkeypatch.setattr(EClient, "disconnect", fake_disconnect)
+
+    def test_both_children_share_an_oca_group_only_last_transmits(self, monkeypatch, tmp_path):
+        import momentum_trading.execution.live_signal as ls
+        captured = []
+        self._install_fake_ibkr_capturing_orders(monkeypatch, captured)
+
+        orders = {"BUY1": {"action": "BUY", "shares": 5}}
+        ls.place_orders_ibkr(orders, port=9999, expected_prices={"BUY1": 100.0},
+                              alerts_log_path=str(tmp_path / "alerts_log.csv"),
+                              attach_broker_stop_loss=True, stop_loss_pct=0.12,
+                              attach_broker_trailing_stop=True, trailing_stop_pct=0.10)
+
+        assert len(captured) == 3  # parent + STP child + TRAIL child
+        parent, stp_child, trail_child = captured
+        assert parent["transmit"] is False
+        assert stp_child["orderType"] == "STP" and stp_child["transmit"] is False
+        assert trail_child["orderType"] == "TRAIL" and trail_child["transmit"] is True
+        assert stp_child["ocaGroup"] and stp_child["ocaGroup"] == trail_child["ocaGroup"]
+        assert stp_child["ocaType"] == 1 and trail_child["ocaType"] == 1
+
+    def test_only_one_enabled_gets_no_oca_group(self, monkeypatch, tmp_path):
+        import momentum_trading.execution.live_signal as ls
+        captured = []
+        self._install_fake_ibkr_capturing_orders(monkeypatch, captured)
+
+        orders = {"BUY1": {"action": "BUY", "shares": 5}}
+        ls.place_orders_ibkr(orders, port=9999, expected_prices={"BUY1": 100.0},
+                              alerts_log_path=str(tmp_path / "alerts_log.csv"),
+                              attach_broker_stop_loss=True, stop_loss_pct=0.12)
+
+        assert len(captured) == 2
+        assert captured[1]["ocaGroup"] == ""
+
 class TestOffHoursSubmissionWarning:
     """
     place_orders_ibkr()'s proactive off-hours log line, gated by
@@ -3941,6 +4258,46 @@ class TestCancelRestingStopBeforeSell:
         # attach_broker_stop_loss not passed, must default to off, zero extra IBKR round trip.
 
         assert calls == []
+
+    def test_resting_trail_order_is_also_cancelled_before_the_sell(self, monkeypatch, tmp_path):
+        # Widened match (Epic 9, "Broker-Native Trailing Stop" plan): a resting TRAIL, not just
+        # a resting STP, must be cancelled the same broker-truth-based way before this run's
+        # own SELL is submitted.
+        import momentum_trading.execution.live_signal as ls
+        cancelled = []
+        self._install_fake_ibkr_with_resting_orders(
+            monkeypatch,
+            [{"orderId": 124, "symbol": "MSFT", "action": "SELL", "orderType": "TRAIL"}],
+            cancelled,
+        )
+
+        orders = {"MSFT": {"action": "SELL", "shares": 3}}
+        ls.place_orders_ibkr(orders, port=9999, alerts_log_path=str(tmp_path / "alerts_log.csv"),
+                              attach_broker_trailing_stop=True, trailing_stop_pct=0.10)
+
+        assert cancelled == [124]
+
+    def test_attach_broker_trailing_stop_alone_also_triggers_the_req_all_open_orders_gate(self, monkeypatch, tmp_path):
+        # The gate condition itself (attach_broker_stop_loss OR attach_broker_trailing_stop) must
+        # fire reqAllOpenOrders() even when only the trailing flag is set, not just the fixed one.
+        import momentum_trading.execution.live_signal as ls
+        from ibapi.client import EClient
+        cancelled = []
+        self._install_fake_ibkr_with_resting_orders(monkeypatch, [], cancelled)
+        calls = []
+        original = EClient.reqAllOpenOrders
+
+        def counting_req_all_open_orders(self):
+            calls.append(1)
+            return original(self)
+
+        monkeypatch.setattr(EClient, "reqAllOpenOrders", counting_req_all_open_orders)
+
+        orders = {"SELL1": {"action": "SELL", "shares": 5}}
+        ls.place_orders_ibkr(orders, port=9999, alerts_log_path=str(tmp_path / "alerts_log.csv"),
+                              attach_broker_trailing_stop=True, trailing_stop_pct=0.10)
+
+        assert calls == [1]
 
 
 class TestInformationalOrderErrorDoesNotCorruptStatus:

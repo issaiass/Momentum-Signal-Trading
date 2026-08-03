@@ -505,6 +505,32 @@ class TestBuildSignalUniverseHtml:
         html = build_signal_universe_html(universe, {}, top_n=1, strategy_type="momentum")
         assert "nan" not in html.lower()
 
+    def test_hold_with_real_entry_price_shows_firm_stop_loss_not_estimated(self):
+        # Epic 8: a HOLD row's stop_loss_price_is_estimated=False (a real avg_entry_price was
+        # used) must NOT get the "(estimated)" qualifier, distinct from a BUY row (always an
+        # estimate, no entry price exists yet).
+        universe = {
+            "A": {"rank": 1, "signal_score": 0.15, "close_price": 100.0, "selection_status": "Top 1 (Selected)"},
+        }
+        orders = {
+            "A": {"action": "HOLD", "shares": 5, "reason": "within drift_threshold", "money_invested": 500.0,
+                  "pct_money_invested": 1.0, "stop_loss_price": 80.0, "stop_loss_price_is_estimated": False},
+        }
+        html = build_signal_universe_html(universe, orders, top_n=1, strategy_type="momentum")
+        assert "$80.00 (estimated)" not in html
+        assert "$80.00" in html
+
+    def test_hold_without_entry_price_shows_estimated(self):
+        universe = {
+            "A": {"rank": 1, "signal_score": 0.15, "close_price": 100.0, "selection_status": "Top 1 (Selected)"},
+        }
+        orders = {
+            "A": {"action": "HOLD", "shares": 5, "reason": "within drift_threshold", "money_invested": 500.0,
+                  "pct_money_invested": 1.0, "stop_loss_price": 90.0, "stop_loss_price_is_estimated": True},
+        }
+        html = build_signal_universe_html(universe, orders, top_n=1, strategy_type="momentum")
+        assert "$90.00 (estimated)" in html
+
     def test_lookback_return_header_unqualified_for_base_score_strategy(self):
         html = build_signal_universe_html(self._universe(), self._orders(), top_n=1, strategy_type="momentum")
         assert "Lookback Return (%)" in html

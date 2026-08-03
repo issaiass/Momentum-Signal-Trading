@@ -404,6 +404,25 @@ class BacktestConfig:
                                               # Python-side check, which only ever runs when
                                               # daily-runner --live is actually invoked. See
                                               # execution/live_signal.py's place_orders_ibkr().
+    attach_broker_trailing_stop: bool = False  # LIVE-ONLY (Epic 9, "Broker-Native Trailing
+                                              # Stop" plan), opt-in, byte-identical when off.
+                                              # Attaches a REAL IBKR TRAIL order at BUY time
+                                              # (reuses trailing_stop_pct below for the trail
+                                              # width), the broker-native counterpart to
+                                              # use_trailing_stop's Python-side daily ratchet,
+                                              # protecting continuously at the broker even when
+                                              # this app isn't running. Deliberately independent
+                                              # of use_trailing_stop, same "can run with or
+                                              # without the Python-side check" independence
+                                              # attach_broker_stop_loss already has from
+                                              # auto_execute_stop_loss. When BOTH this and
+                                              # attach_broker_stop_loss are true, both children
+                                              # attach as an IBKR One-Cancels-All (OCA) group,
+                                              # whichever triggers first cancels the other at the
+                                              # broker, matching trailing_stop_pct's own
+                                              # documented "whichever triggers first wins"
+                                              # semantics. See execution/live_signal.py's
+                                              # place_orders_ibkr().
 
     # --- correlation-aware sizing (item 10) ---
     use_correlation_penalty: bool = False
@@ -555,8 +574,11 @@ class BacktestConfig:
             errors.append(f"ticker_sectors ({self.ticker_sectors!r}) must be a dict")
         if not (0 < self.stop_loss_pct < 1.0):
             errors.append(f"stop_loss_pct ({self.stop_loss_pct}) should be in (0, 1.0)")
-        if self.use_trailing_stop and self.trailing_stop_pct is None:
-            errors.append("use_trailing_stop is True but trailing_stop_pct is None, set a width")
+        if (self.use_trailing_stop or self.attach_broker_trailing_stop) and self.trailing_stop_pct is None:
+            errors.append(
+                "use_trailing_stop or attach_broker_trailing_stop is True but trailing_stop_pct "
+                "is None, set a width"
+            )
         if self.trailing_stop_pct is not None and not (0 < self.trailing_stop_pct < 1.0):
             errors.append(f"trailing_stop_pct ({self.trailing_stop_pct}) should be in (0, 1.0) or None")
         if self.use_technical_confirmation and (

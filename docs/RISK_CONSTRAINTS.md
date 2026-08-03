@@ -325,6 +325,9 @@ zero downside protection on any day the app wasn't scheduled or the machine/cont
   command) without needing to cancel/replace a resting order, and it's a fallback for a position
   opened before `attach_broker_stop_loss` was ever turned on.
 
+See "Broker-Native Trailing Stop" below for the trailing counterpart (`attach_broker_trailing_stop`),
+which can run alongside this one as an IBKR One-Cancels-All (OCA) pair.
+
 Both reuse the SAME `stop_loss_pct` field, no duplicate config. The child `STP` (not `STP LMT`):
 a genuine protective stop must reliably execute during a fast decline, a limit leg can be
 skipped over in a gap, defeating the purpose. `outsideRth=True` on both legs when
@@ -386,9 +389,10 @@ research, a wider fixed stop is genuinely less likely to trigger on routine vola
 from entry offers zero additional protection to an already-profitable position beyond the same
 flat percentage every other position gets; a position up 40% still only exits if it round-trips
 all the way back down 15-20% from its ORIGINAL entry, not from its peak. If you specifically want
-the gain-locking behavior, that's a genuine trailing stop, see "Trailing Stop-Loss" below (a
-Python-side daily ratchet, not a broker-native `TRAIL` order, that half remains a documented gap,
-see `README.md`'s Known Gaps).
+the gain-locking behavior, that's a genuine trailing stop, see "Trailing Stop-Loss" below: a
+Python-side daily ratchet (`use_trailing_stop`), or (Epic 9, "Broker-Native Trailing Stop" plan)
+a real broker-native IBKR `TRAIL` order (`attach_broker_trailing_stop`), see "Broker-Native
+Trailing Stop" below.
 
 ## Trailing Stop-Loss [New, LIVE + BACKTEST, opt-in] [`use_trailing_stop`/`trailing_stop_pct`]
 
@@ -400,14 +404,14 @@ fixed from-entry stop would never trigger on that same pullback at all. Independ
 complementary to `stop_loss_pct` (a portfolio can run both at once, whichever triggers first
 wins; `stop_loss_pct` still bounds the worst case on a position that never rallies).
 
-**Implementation, deliberately a Python-side daily ratchet, not a broker-native IBKR `TRAIL`
-order** (a considered, explicit choice, not an oversight): `TRAIL` would protect intraday and
-even while this app isn't running, but is a new, unexercised IBKR order type on a project with a
-real history of IBKR API surprises (see `README.md`'s Project Maturity section), and can't be
-exercised in dry-run at all. The Python-side check mirrors this project's own established
-`auto_execute_stop_loss` pattern instead: checked once per invocation (not intraday), fully
-testable in dry-run, no new broker order type. A future broker-native `TRAIL` bracket (alongside
-the existing `attach_broker_stop_loss` fixed `STP`) remains a documented, not-yet-built option.
+**Implementation: a Python-side daily ratchet here, PLUS (Epic 9, "Broker-Native Trailing Stop"
+plan) a real broker-native IBKR `TRAIL` order, see "Broker-Native Trailing Stop" below**. The
+Python-side check below mirrors this project's own established `auto_execute_stop_loss` pattern:
+checked once per invocation (not intraday), fully testable in dry-run, no new broker order type.
+It remains useful even now that a broker-native option exists, same "belt-and-suspenders, not a
+replacement" relationship `auto_execute_stop_loss` already has with `attach_broker_stop_loss`
+(the Python-side check is the only mechanism that works in dry-run, and reacts to a
+`trailing_stop_pct` changed mid-position without needing to cancel/replace a resting order).
 
 - LIVE (`daily_runner.py`'s `check_and_handle_trailing_stops()`, in the same "ALWAYS runs"
   per-portfolio block as `check_and_handle_stop_losses()`/`check_and_handle_time_stops()`):
@@ -428,6 +432,78 @@ risk_overrides:
   use_trailing_stop: true         # opt-in, false (default) is byte-identical to before this
                                    # existed
   trailing_stop_pct: 0.10         # exit once price has fallen 10% from its post-entry high
+```
+
+## Broker-Native Trailing Stop [New, LIVE-ONLY, opt-in] [`attach_broker_trailing_stop`]
+
+The broker-native counterpart to `use_trailing_stop` above, closing the gap that section
+previously documented as "a considered, explicit choice, not an oversight" but left open: a REAL
+IBKR `TRAIL` order attached at BUY time (parent BUY + child `TRAIL` SELL), protecting the position
+continuously AT THE BROKER, intraday, even while this app isn't running, the same
+"protection independent of whether this app is running" property `attach_broker_stop_loss`
+already delivers for the fixed stop. Reuses `trailing_stop_pct` for the trail width, no duplicate
+field. Deliberately independent of `use_trailing_stop` (you can run the broker bracket without
+the Python-side daily check, or vice versa, or both), same independence
+`attach_broker_stop_loss` already has from `auto_execute_stop_loss`.
+
+**Mechanics**: `orderType="TRAIL"`, `trailingPercent = trailing_stop_pct * 100` (a percent
+number, e.g. `10.0` for 10%, not a dollar amount), `trailStopPrice` computed and logged
+explicitly at submission time (`reference_price * (1 - trailing_stop_pct)`, the same
+transparency precedent `attach_broker_stop_loss`'s `auxPrice` already sets, rather than left to
+IBKR's own auto-calculation), `tif="GTC"` (same "must survive across days/restarts" rationale as
+the fixed bracket's own `GTC` child). IBKR itself then ratchets the stop price up as the position
+makes new highs, no daily Python check involved.
+
+**A real, confirmed IBKR platform constraint, found via this feature's own real paper-account
+verification, not assumed**: submitting a TRAIL child attached to a plain `MKT` parent (the same
+shape the STP bracket already uses successfully) failed with **IBKR error 328, "Trailing stop
+orders can be attached to limit or stop-limit orders only."** Unlike the STP child, which attaches
+fine to a `MKT` parent, a `TRAIL` child specifically requires its parent to be `LMT` or `STP LMT`.
+Fixed: the parent is now forced to `LMT` whenever a TRAIL child will attach and it isn't already
+(`allow_extended_hours` may have already converted it), using the exact same buffer-based limit
+price computation (`reference_price * 1.005`) `allow_extended_hours`'s own LMT conversion already
+uses, for the identical reason (favor an actual fill over an exact price). This does NOT affect
+the STP-only case (`attach_broker_stop_loss` without `attach_broker_trailing_stop`), which keeps
+its plain `MKT` parent exactly as before.
+
+**Combining with the fixed bracket (One-Cancels-All)**: when a portfolio enables BOTH
+`attach_broker_stop_loss` and `attach_broker_trailing_stop` together, confirmed with the project
+owner, the two children attach as an IBKR **One-Cancels-All (OCA) group** (`ocaGroup` set to the
+same string on both, `ocaType=1`, "cancel all remaining orders in the group on any fill"), so
+whichever one triggers first automatically cancels the other AT THE BROKER. This matches
+`trailing_stop_pct`'s own documented "whichever triggers first wins" semantics (see "Trailing
+Stop-Loss" above) extended correctly to the broker level, instead of leaving a naked resting
+order behind once one side fills. Only ONE bracket type attaching (either flag alone) gets no OCA
+fields at all, unchanged single-child behavior.
+
+**Cancel-before-sell, widened**: the SAME broker-truth-based `reqAllOpenOrders()` mechanism
+described under "Broker-Side Protective Stop" above now also matches a resting `TRAIL` order
+(previously `STP`-only), so this app's own SELL (rebalance rotation, or any of the three
+Python-side auto-exit checks) correctly cancels a resting protective TRAIL first, the same way it
+already did for a resting STP. **A real, confirmed pre-existing gap found and fixed while wiring
+this in, unrelated to the TRAIL order type itself**: `daily_runner.py`'s three auto-exit call
+sites (`check_and_handle_stop_losses()`, `check_and_handle_time_stops()`,
+`check_and_handle_trailing_stops()`) were never passing `attach_broker_stop_loss`/`stop_loss_pct`
+to `place_orders_ibkr()` at all, confirmed by reading all three, meaning a resting broker STP was
+NEVER cancelled before one of these three checks' own auto-exit SELL, only the rebalance path had
+this protection. Fixed: all three now pass the same four kwargs
+(`attach_broker_stop_loss`/`stop_loss_pct`/`attach_broker_trailing_stop`/`trailing_stop_pct`) the
+rebalance path already did, closing this for both bracket types at once.
+
+**Confirmed live, a real IBKR behavior worth knowing**: when both children of an OCA pair are
+resting and this app cancels one (say the TRAIL child), IBKR itself immediately cancels the
+OTHER child (the STP) automatically, before this app's own code ever issues a second
+`cancelOrder()` call for it. The code still attempts to cancel both (it doesn't know in advance
+that IBKR will do this), the second attempt simply gets a harmless "already cancelled" response
+(IBKR error 10148), not a bug or a race condition, confirmed directly against a real paper
+account.
+
+```yaml
+risk_overrides:
+  attach_broker_trailing_stop: true  # opt-in, reuses trailing_stop_pct below
+  trailing_stop_pct: 0.10            # required (0, 1) when this OR use_trailing_stop is true
+  attach_broker_stop_loss: true      # optional: combine for an OCA-paired fixed + trailing stop
+  stop_loss_pct: 0.12                # the fixed bracket's own width, if attach_broker_stop_loss is on
 ```
 
 **A real, confirmed bug found while paper-verifying this feature, unrelated to the trailing-stop
@@ -457,16 +533,22 @@ portfolios:
 Both regimes can layer `auto_execute_stop_loss: true` (Python-side auto-sell on trigger,
 checked every day this app runs) and/or `attach_broker_stop_loss: true` (a real IBKR bracket at
 BUY time, protects the position even when this app isn't running), independent of which width you
-pick, see "Broker-Side Protective Stop" above.
+pick, and/or (Epic 9) `attach_broker_trailing_stop: true` (a real IBKR TRAIL bracket, OCA-paired
+with the fixed bracket above when both are on), see "Broker-Side Protective Stop" and
+"Broker-Native Trailing Stop" above.
 
 **A per-ticker "Stop-Loss Price" figure is also visible**, in the rebalance email's second "Full
-Signal Universe" table and its sibling `logs/signal_rankings_log_<portfolio>.csv`, but despite
-the column name, it does NOT report the per-share price described above: it's `Money Invest *
-stop_loss_pct`, a DOLLAR AMOUNT AT RISK on the position, for a `BUY` or `HOLD`, see
-`docs/SIGNAL_RANKINGS_LOG.md`. This is a deliberate, explicit reporting-layer decision, entirely
-separate from the fixed-from-entry mechanism described above: neither `check_and_handle_stop_
-losses()`'s daily check nor `place_orders_ibkr()`'s broker-side bracket read this reported value,
-both still compute their own real per-share threshold directly from `avg_entry_price`.
+Signal Universe" table and its sibling `logs/signal_rankings_log_<portfolio>.csv`. As of Epic 8
+("Stop-Loss Price Reporting Fix" plan), this IS a real per-share price, matching the mechanism
+described above: `close_price * (1 - stop_loss_pct)` for a `BUY` (no entry exists yet), or
+`avg_entry_price * (1 - stop_loss_pct)` for a `HOLD` when the real entry price is known, falling
+back to `close_price` when it isn't (e.g. dry-run without `persist_dry_run_state`), see
+`docs/SIGNAL_RANKINGS_LOG.md`. This reverses an earlier reporting-layer decision (a dollar-
+amount-at-risk figure, `money_invested * stop_loss_pct`), reversed on an explicit, informed
+instruction because the dollar figure didn't match what's actually enforced. Still
+reporting-only: neither `check_and_handle_stop_losses()`'s daily check nor
+`place_orders_ibkr()`'s broker-side bracket read this reported value, both independently compute
+their own real per-share threshold directly from `avg_entry_price`.
 
 ## Per-Ticker Stop-Loss Override
 
@@ -499,7 +581,8 @@ existed, using the portfolio's own `stop_loss_pct`. This applies uniformly acros
 above), and `place_orders_ibkr()`'s `attach_broker_stop_loss` bracket, resolved once via
 `execution/live_signal.py`'s
 `resolve_ticker_stop_loss_pct(ticker, cfg)`, the single source of truth for "what stop-loss
-width, if any, applies to this ticker right now."
+width, if any, applies to this ticker right now." (the `Stop-Loss Price` column/log figure
+above is a real per-share price as of Epic 8, no longer a dollar-at-risk figure)
 
 ## Flooring Remainder Redeployment
 

@@ -563,6 +563,18 @@ class TestBacktestTrailingStop:
         with pytest.raises(ValueError, match="trailing_stop_pct"):
             BacktestConfig(use_trailing_stop=True)
 
+    def test_attach_broker_trailing_stop_requires_trailing_stop_pct(self):
+        # Epic 9, "Broker-Native Trailing Stop" plan: the generalized validation must also catch
+        # attach_broker_trailing_stop=True without a configured width, independent of
+        # use_trailing_stop (the Python-side check can be off while the broker bracket is on).
+        with pytest.raises(ValueError, match="trailing_stop_pct"):
+            BacktestConfig(attach_broker_trailing_stop=True)
+
+    def test_attach_broker_trailing_stop_with_trailing_stop_pct_constructs_fine(self):
+        cfg = BacktestConfig(attach_broker_trailing_stop=True, trailing_stop_pct=0.10)
+        assert cfg.attach_broker_trailing_stop is True
+        assert cfg.use_trailing_stop is False  # independent toggles, confirmed by construction
+
     def test_reentry_after_trailing_stop_exit_starts_a_fresh_high(self, tmp_path):
         # Regression for the running_high/entry_prices shared-lifecycle design: a position that
         # exits via the trailing stop and is later re-picked must not inherit the old high.

@@ -531,7 +531,11 @@ def check_and_handle_stop_losses(
         logger.warning("AUTO-EXECUTING stop-loss exits via IBKR: %s", flagged)
         fill_results = place_orders_ibkr(exit_orders, port=ibkr_port, portfolio=portfolio,
                                           expected_prices=latest_prices, alerts_log_path=ALERTS_LOG_PATH,
-                                          allow_extended_hours=cfg.allow_extended_hours)
+                                          allow_extended_hours=cfg.allow_extended_hours,
+                                          attach_broker_stop_loss=cfg.attach_broker_stop_loss,
+                                          stop_loss_pct=cfg.stop_loss_pct,
+                                          attach_broker_trailing_stop=cfg.attach_broker_trailing_stop,
+                                          trailing_stop_pct=cfg.trailing_stop_pct)
         send_alert_email("Stop-loss(es) AUTO-EXECUTED",
                           f"Tickers exited: {flagged}\nFill results: {fill_results}")
     return flagged
@@ -600,7 +604,11 @@ def check_and_handle_time_stops(
         logger.warning("AUTO-EXECUTING time-stop exits via IBKR: %s", flagged)
         fill_results = place_orders_ibkr(exit_orders, port=ibkr_port, portfolio=portfolio,
                                           expected_prices=latest_prices, alerts_log_path=ALERTS_LOG_PATH,
-                                          allow_extended_hours=cfg.allow_extended_hours)
+                                          allow_extended_hours=cfg.allow_extended_hours,
+                                          attach_broker_stop_loss=cfg.attach_broker_stop_loss,
+                                          stop_loss_pct=cfg.stop_loss_pct,
+                                          attach_broker_trailing_stop=cfg.attach_broker_trailing_stop,
+                                          trailing_stop_pct=cfg.trailing_stop_pct)
         send_alert_email("Time-stop(s) AUTO-EXECUTED",
                           f"Tickers exited: {flagged}\nFill results: {fill_results}")
     return flagged
@@ -705,7 +713,11 @@ def check_and_handle_trailing_stops(
         logger.warning("AUTO-EXECUTING trailing-stop exits via IBKR: %s", flagged)
         fill_results = place_orders_ibkr(exit_orders, port=ibkr_port, portfolio=portfolio,
                                           expected_prices=latest_prices, alerts_log_path=ALERTS_LOG_PATH,
-                                          allow_extended_hours=cfg.allow_extended_hours)
+                                          allow_extended_hours=cfg.allow_extended_hours,
+                                          attach_broker_stop_loss=cfg.attach_broker_stop_loss,
+                                          stop_loss_pct=cfg.stop_loss_pct,
+                                          attach_broker_trailing_stop=cfg.attach_broker_trailing_stop,
+                                          trailing_stop_pct=cfg.trailing_stop_pct)
         send_alert_email("Trailing stop(s) AUTO-EXECUTED",
                           f"Tickers exited: {flagged}\nFill results: {fill_results}")
     return flagged
@@ -2083,6 +2095,7 @@ def main():
                         signal_rankings_log_path=signal_rankings_log_path,
                         fmp_api_key=os.environ.get("FMP_API_KEY"),
                         eodhd_api_key=os.environ.get("EODHD_API_KEY"),
+                        current_positions=current_positions,
                     )
                 finally:
                     _clear_rebalance_in_progress_marker(name)

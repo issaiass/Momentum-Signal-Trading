@@ -739,20 +739,23 @@ def compute_aggregate_drift(target_dollar: dict, current_value: dict, total_valu
     return raw_trades / total_value
 
 
-def compute_stop_loss_price(action: str, cfg: BacktestConfig, money_invested: float | None,
+def compute_stop_loss_price(action: str, cfg: BacktestConfig, close_price: float | None,
+                             avg_entry_price: float | None = None,
                              ticker: str | None = None) -> float | None:
     """
-    Reports the DOLLAR AMOUNT AT RISK on a position under its stop-loss, NOT a per-share price
-    despite the "Price" column header this feeds (a deliberate, explicit product decision, not a
-    bug, see docs/SIGNAL_RANKINGS_LOG.md): money_invested * stop_loss_pct, the target dollar
-    allocation for this ticker this rebalance times the configured stop-loss width.
+    Reports a REAL PER-SHARE stop-loss trigger price (Epic 8, "Stop-Loss Price Reporting Fix"
+    plan), matching what the two real enforcement mechanisms actually compute for the same
+    position, not a dollar-amount-at-risk figure. Supersedes an earlier design (money_invested *
+    stop_loss_pct, "a deliberate, explicit product decision" at the time) that was reversed on
+    an explicit, informed instruction: the money-at-risk figure was easy to compute uniformly
+    live and dry-run, but didn't match the real per-share threshold this app actually enforces,
+    confusing to compare against a live quote.
 
-    This is a REPORTING-ONLY figure. It is NOT, and must not be, wired into either REAL
-    stop-loss enforcement mechanism, both of which correctly need a real per-share reference
-    price, not a dollar figure: daily_runner.py's check_and_handle_stop_losses() (the daily
-    percentage-drawdown check) and place_orders_ibkr()'s broker-side bracket order
-    (attach_broker_stop_loss's auxPrice), both compute their own real per-share threshold
-    directly from avg_entry_price, independently of this function.
+    This is still a REPORTING-ONLY figure. It is NOT, and must not be, wired into either REAL
+    stop-loss enforcement mechanism, both of which correctly compute their own real per-share
+    threshold directly from avg_entry_price, independently of this function:
+    daily_runner.py's check_and_handle_stop_losses() (the daily percentage-drawdown check) and
+    place_orders_ibkr()'s broker-side bracket order (attach_broker_stop_loss's auxPrice).
 
     ticker : optional, resolves cfg.ticker_risk_overrides via resolve_ticker_stop_loss_pct()
     when given; None (the default, e.g. a caller that predates per-ticker overrides) falls back
@@ -760,21 +763,30 @@ def compute_stop_loss_price(action: str, cfg: BacktestConfig, money_invested: fl
     for this ticker), returns None immediately regardless of action, surfaced as "N/A" wherever
     this is displayed, the same as every other "not meaningful" case below.
 
-    BUY or HOLD with a real money_invested (> 0): money_invested * stop_loss_pct. Unlike the
-    prior per-share formula (which needed avg_entry_price, live-only), money_invested is
-    uniformly available regardless of live vs. dry-run, so this is now populated for HOLD rows
-    in dry-run mode too, previously always None there.
-    SELL, or a $0/no-position row (WATCHLIST/EXCLUDED, which already report money_invested=0
-    per the existing "no position exists" convention): None, not meaningful.
+    Reference price selection, confirmed with the project owner: a stop is fixed FROM ENTRY, not
+    from today's price (see BacktestConfig.stop_loss_pct's own docstring, "FIXED from entry, not
+    trailing"), so the reference price a HOLD row uses should be the real entry price whenever
+    one is known, matching the threshold actually in force for that open position:
+    - BUY: close_price (no entry exists yet, this estimates where the stop would land once
+      filled near today's close).
+    - HOLD: avg_entry_price when it's a real, positive value; falls back to close_price when not
+      (dry-run without persist_dry_run_state, or any other case where entry price genuinely
+      isn't known yet). The caller is responsible for treating this fallback case as an estimate
+      the same way a BUY row already is, see build_signal_universe_html()'s "(estimated)" label.
+    - SELL, or a row with no usable reference price: None, not meaningful.
     """
     stop_loss_pct = resolve_ticker_stop_loss_pct(ticker, cfg) if ticker is not None else cfg.stop_loss_pct
     if stop_loss_pct is None:
         return None
-    if money_invested is None or money_invested <= 0:
+    if action == "BUY":
+        ref_price = close_price
+    elif action == "HOLD":
+        ref_price = avg_entry_price if avg_entry_price and avg_entry_price > 0 else close_price
+    else:
         return None
-    if action in ("BUY", "HOLD"):
-        return money_invested * stop_loss_pct
-    return None
+    if ref_price is None or ref_price <= 0:
+        return None
+    return ref_price * (1 - stop_loss_pct)
 
 
 def generate_orders(
@@ -785,6 +797,10 @@ def generate_orders(
     latest_prices: dict,         # {ticker: price}
     cfg: BacktestConfig,
     signal_context: dict | None = None,  # optional {ticker: {'rank': int, 'signal_score': float}}
+    current_positions: dict | None = None,  # optional {ticker: {'shares', 'avg_entry_price'}},
+        # same shape check_and_handle_stop_losses()/get_ibkr_positions() use. Feeds
+        # compute_stop_loss_price()'s HOLD-row reference price (Epic 8), None (default) is
+        # byte-identical to no entry price being known for any ticker (falls back to close_price).
 ) -> dict:
     """
     Returns {ticker: {'action': 'BUY'|'SELL'|'HOLD', 'shares': int, 'reason': str,
@@ -821,11 +837,17 @@ def generate_orders(
     post-rebalance target), but transaction_amount reflects the real dollar amount transacted.
     0.0 for every HOLD, including "no live price available".
 
-    stop_loss_price (see compute_stop_loss_price()) is set the same uniform way, derived from
-    tgt_dollar (money_invested) and cfg.stop_loss_pct, a reporting-only dollar-at-risk figure,
-    None when money_invested is 0 or the stop-loss is disabled for this ticker.
+    stop_loss_price (see compute_stop_loss_price()) is a real per-share reporting figure: for a
+    BUY, close_price * (1 - resolved stop_loss_pct); for a HOLD, the SAME formula but anchored
+    to the position's real avg_entry_price (current_positions above) when known, falling back to
+    close_price when not (current_positions=None, or this ticker missing an entry price).
+    stop_loss_price_is_estimated (new) is True whenever the reference price used was NOT a real
+    avg_entry_price (every BUY, plus any HOLD that fell back to close_price), so callers can
+    label an estimate as such (see interfaces/notifications.py's build_signal_universe_html()).
+    None when there's no usable reference price or the stop-loss is disabled for this ticker.
     """
     signal_context = signal_context or {}
+    current_positions = current_positions or {}
     current_value = {t: s * latest_prices.get(t, 0.0) for t, s in current_holdings.items()}
     target_dollar = {t: total_value * gross_exposure * w for t, w in target_weights.items()}
     capital_this_rebalance = total_value * gross_exposure
@@ -838,8 +860,12 @@ def generate_orders(
         order["money_invested"] = tgt_dollar
         order["pct_money_invested"] = (tgt_dollar / capital_this_rebalance) if capital_this_rebalance > 0 else 0.0
         order["stop_loss_pct"] = resolve_ticker_stop_loss_pct(ticker, cfg)
+        avg_entry_price = current_positions.get(ticker, {}).get("avg_entry_price")
         order["stop_loss_price"] = compute_stop_loss_price(
-            order["action"], cfg, tgt_dollar, ticker=ticker,
+            order["action"], cfg, price, avg_entry_price=avg_entry_price, ticker=ticker,
+        )
+        order["stop_loss_price_is_estimated"] = not (
+            order["action"] == "HOLD" and avg_entry_price and avg_entry_price > 0
         )
         # The actual dollar amount bought/sold THIS transaction (shares * price), distinct from
         # money_invested above (the post-rebalance TARGET allocation, $0 for a full exit SELL).
@@ -1872,7 +1898,9 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
                        allow_extended_hours: bool = False,
                        max_bid_ask_spread_pct: float | None = None,
                        attach_broker_stop_loss: bool = False,
-                       stop_loss_pct: float | None = None) -> dict:
+                       stop_loss_pct: float | None = None,
+                       attach_broker_trailing_stop: bool = False,
+                       trailing_stop_pct: float | None = None) -> dict:
     """
     Requires `ibapi` (pip install ibapi --break-system-packages) and a running
     TWS or IB Gateway instance listening on `port`. Only called when --live
@@ -1937,6 +1965,36 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
     stop_loss_pct : float, optional
         BacktestConfig.stop_loss_pct, reused as-is for the bracket's stop offset, no duplicate
         field. Required (non-None) for attach_broker_stop_loss to do anything.
+    attach_broker_trailing_stop : bool
+        BacktestConfig.attach_broker_trailing_stop (Epic 9, "Broker-Native Trailing Stop" plan),
+        LIVE-ONLY, the broker-native counterpart to use_trailing_stop's Python-side daily
+        high-water-mark ratchet, same "belt-and-suspenders, not a replacement" relationship
+        attach_broker_stop_loss has with auto_execute_stop_loss. When True, each BUY with a
+        usable reference price submits a real IBKR TRAIL child: orderType="TRAIL",
+        trailingPercent = trailing_stop_pct * 100 (a percent, not a dollar amount),
+        trailStopPrice = reference_price * (1 - trailing_stop_pct) (the initial trigger,
+        computed and logged explicitly rather than left to IBKR's own auto-calculation, same
+        transparency precedent as the STP bracket's own auxPrice), tif="GTC" (must survive
+        across days/restarts, the whole point of a broker-native mechanism). A ticker with no
+        reference price falls back to a plain, unprotected BUY, never blocks the BUY entirely.
+        Its orderId is surfaced via results[ticker]["trailing_stop_order_id"] (audit-only,
+        in-memory on the returned dict, mirrors stop_order_id's own scope, neither is a trade-log
+        CSV column or read anywhere in interfaces/notifications.py). When BOTH this and
+        attach_broker_stop_loss are True for the same BUY, the two children attach as an IBKR
+        One-Cancels-All (OCA) group (ocaGroup/ocaType=1 set on both), so whichever triggers
+        first cancels the other at the broker, matching trailing_stop_pct's own documented
+        "whichever triggers first wins" semantics; only the LAST child submitted carries
+        transmit=True, the parent and any earlier child stay transmit=False until then.
+        A real, confirmed IBKR platform constraint (error 328, "Trailing stop orders can be
+        attached to limit or stop-limit orders only"), found via a real paper-account submission
+        during this feature's own live verification, not assumed: unlike the STP child (which
+        attaches fine to a plain MKT parent), a TRAIL child requires its parent to be LMT or STP
+        LMT. The parent is forced to LMT whenever attach_trail is True and it isn't already
+        (allow_extended_hours may have already done this), same buffer-based limit price
+        computation used there, for the same reason (favor an actual fill over an exact price).
+    trailing_stop_pct : float, optional
+        BacktestConfig.trailing_stop_pct, reused as-is for the TRAIL bracket's trail width, no
+        duplicate field. Required (non-None) for attach_broker_trailing_stop to do anything.
     """
     # --- Proactive off-hours notice, before ever connecting. IBKR itself will still queue
     #     the order for the next session rather than reject it (correct broker behavior), this
@@ -2050,6 +2108,9 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
     # _collect_results() below, audit-only, NOT the cancel-before-sell source of truth (that's
     # broker-truth-based via reqAllOpenOrders(), see the SELLs-first block further down).
     stop_order_ids: dict = {}
+    # {ticker: child TRAIL orderId}, same audit-only scope as stop_order_ids above
+    # (attach_broker_trailing_stop, Epic 9).
+    trailing_stop_order_ids: dict = {}
 
     def _submit_and_wait(order_subset: dict, start_order_id: int) -> tuple[dict, int]:
         """Submits every order in order_subset, polls until each reaches a terminal
@@ -2183,8 +2244,47 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
                     "%s: attach_broker_stop_loss is set but no reference price is available, "
                     "submitting a plain, unprotected BUY instead.", ticker)
                 attach_stop = False
-            if attach_stop:
-                ib_order.transmit = False  # holds the parent until the child below transmits
+
+            # Broker-side protective TRAIL (BacktestConfig.attach_broker_trailing_stop, Epic 9,
+            # "Broker-Native Trailing Stop" plan), same shape as the fixed STP bracket above,
+            # trailing_stop_pct is portfolio-wide only (no per-ticker override, matching
+            # check_and_handle_trailing_stops()'s own documented scope), so no order.get(...)
+            # lookup here unlike effective_stop_loss_pct above.
+            attach_trail = (
+                attach_broker_trailing_stop and order["action"] == "BUY"
+                and trailing_stop_pct is not None
+            )
+            if attach_trail and not (stop_ref_price and stop_ref_price > 0):
+                logger.warning(
+                    "%s: attach_broker_trailing_stop is set but no reference price is available, "
+                    "submitting a plain, unprotected BUY instead.", ticker)
+                attach_trail = False
+
+            # A real, confirmed IBKR platform constraint (error 328, "Trailing stop orders can
+            # be attached to limit or stop-limit orders only"), found via a real paper-account
+            # submission during this feature's own live verification, not assumed: a TRAIL child
+            # requires its PARENT to be LMT or STP LMT, unlike the STP child above (which works
+            # fine with a plain MKT parent). Force the parent to LMT here when it isn't already
+            # (allow_extended_hours may have already done this above), same buffer-based price
+            # computation for the same reason (favor an actual fill over an exact price).
+            # attach_trail is only ever True for a BUY (its own gating condition above), so the
+            # buffer direction is always "+".
+            if attach_trail and ib_order.orderType != "LMT":
+                buffer = 0.005
+                ib_order.orderType = "LMT"
+                ib_order.lmtPrice = round(stop_ref_price * (1 + buffer), 2)
+                extended_hours_note += f" [LMT @ {ib_order.lmtPrice}, required for TRAIL bracket]"
+
+            # When BOTH brackets attach to the same BUY, they form an IBKR One-Cancels-All (OCA)
+            # group, whichever triggers first cancels the other at the broker, matching
+            # trailing_stop_pct's own documented "whichever triggers first wins" semantics
+            # (confirmed with the project owner, not assumed). A single oca_group string shared
+            # by both children; None when only one (or neither) bracket is attached, no OCA
+            # fields set at all in that case, unchanged single-child behavior.
+            oca_group = f"OCA_{ticker}_{oid}" if (attach_stop and attach_trail) else None
+
+            if attach_stop or attach_trail:
+                ib_order.transmit = False  # holds the parent until whichever child transmits last
 
             logger.info("Placing %s %s shares of %s (orderId=%d)%s",
                         order["action"], shares, ticker, oid, extended_hours_note)
@@ -2213,7 +2313,10 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
                 stop_order.auxPrice = round(stop_ref_price * (1 - effective_stop_loss_pct), 2)
                 stop_order.totalQuantity = shares
                 stop_order.parentId = parent_oid
-                stop_order.transmit = True  # transmits the whole bracket atomically
+                # Transmits the whole bracket atomically, UNLESS a TRAIL child also follows
+                # (attach_trail), in which case that TRAIL child is placed last and transmits
+                # instead, this STP stays held (transmit=False) until then.
+                stop_order.transmit = not attach_trail
                 # GTC, deliberately NOT "DAY": a DAY stop would be cancelled by IBKR at end of
                 # day and leave the position completely unprotected on every subsequent day
                 # this app doesn't run, defeating the entire purpose of this feature (broker-
@@ -2225,12 +2328,58 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
                     # gap for a move in the same extended session the entry itself was allowed
                     # in.
                     stop_order.outsideRth = True
+                if oca_group:
+                    stop_order.ocaGroup = oca_group
+                    stop_order.ocaType = 1  # cancel all remaining orders in the group on any fill
 
                 logger.info(
                     "Attaching broker-side protective STP SELL for %s: %d shares @ stop %.2f "
                     "(orderId=%d, parentId=%d)", ticker, shares, stop_order.auxPrice, oid, parent_oid)
                 app.placeOrder(oid, stop_contract, stop_order)
                 stop_order_ids[ticker] = oid
+                oid += 1
+                time.sleep(0.3)
+
+            if attach_trail:
+                trail_contract = Contract()
+                trail_contract.symbol = ticker
+                trail_contract.secType = "STK"
+                trail_contract.exchange = "SMART"
+                trail_contract.currency = "USD"
+
+                trail_order = Order()
+                trail_order.eTradeOnly = False
+                trail_order.firmQuoteOnly = False
+                trail_order.action = "SELL"
+                trail_order.orderType = "TRAIL"
+                # Percent-based trail (not auxPrice-as-dollar-amount): trailingPercent is a
+                # percent number (e.g. 10.0 for 10%), IBKR ratchets the stop up as price rises,
+                # continuously, at the broker itself, the whole point of this feature over the
+                # Python-side daily ratchet (check_and_handle_trailing_stops()).
+                trail_order.trailingPercent = trailing_stop_pct * 100
+                # trailStopPrice is the INITIAL trigger price, computed and logged explicitly
+                # here rather than left to IBKR's own auto-calculation, same transparency
+                # precedent as the STP bracket's own auxPrice above.
+                trail_order.trailStopPrice = round(stop_ref_price * (1 - trailing_stop_pct), 2)
+                trail_order.totalQuantity = shares
+                trail_order.parentId = parent_oid
+                trail_order.transmit = True  # always placed last, transmits the whole bracket
+                # GTC, same "must survive across days/restarts" rationale as the STP bracket's
+                # own GTC above, a DAY trail would be cancelled at end of day, defeating the
+                # entire purpose of a broker-native mechanism.
+                trail_order.tif = "GTC"
+                if allow_extended_hours:
+                    trail_order.outsideRth = True
+                if oca_group:
+                    trail_order.ocaGroup = oca_group
+                    trail_order.ocaType = 1
+
+                logger.info(
+                    "Attaching broker-side protective TRAIL SELL for %s: %d shares @ %.1f%% "
+                    "trail (initial stop %.2f, orderId=%d, parentId=%d)", ticker, shares,
+                    trailing_stop_pct * 100, trail_order.trailStopPrice, oid, parent_oid)
+                app.placeOrder(oid, trail_contract, trail_order)
+                trailing_stop_order_ids[ticker] = oid
                 oid += 1
                 time.sleep(0.3)
 
@@ -2255,6 +2404,8 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
             }
             if ticker in stop_order_ids:
                 results[ticker]["stop_order_id"] = stop_order_ids[ticker]
+            if ticker in trailing_stop_order_ids:
+                results[ticker]["trailing_stop_order_id"] = trailing_stop_order_ids[ticker]
             if status not in ("Filled",):
                 logger.warning("Order for %s did not confirm as Filled (status=%s).", ticker, status)
             else:
@@ -2287,17 +2438,17 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
     sell_orders = {t: o for t, o in orders.items() if o["action"] == "SELL" and o["shares"] > 0}
     buy_orders = {t: o for t, o in orders.items() if o["action"] == "BUY" and o["shares"] > 0}
 
-    # Cancel any resting broker-side protective STP (attach_broker_stop_loss) for a ticker THIS
-    # run is about to SELL, BEFORE submitting that SELL, otherwise the broker's own triggered
-    # stop and this app's rebalance-driven sell could both try to sell the same shares.
-    # Deliberately broker-truth-based (reqAllOpenOrders(), NOT reqOpenOrders(), which only
-    # returns THIS clientId's own orders, and not a locally-cached order ID either): the run
-    # that PLACED the bracket and the run that later decides to EXIT are almost always
+    # Cancel any resting broker-side protective STP or TRAIL (attach_broker_stop_loss /
+    # attach_broker_trailing_stop, the latter added by Epic 9, "Broker-Native Trailing Stop"
+    # plan) for a ticker THIS run is about to SELL, BEFORE submitting that SELL, otherwise the
+    # broker's own triggered stop and this app's rebalance-driven sell could both try to sell
+    # the same shares. Deliberately broker-truth-based (reqAllOpenOrders(), NOT reqOpenOrders(),
+    # which only returns THIS clientId's own orders, and not a locally-cached order ID either):
+    # the run that PLACED the bracket and the run that later decides to EXIT are almost always
     # different process invocations/client connections, self-healing even if the placing run
-    # crashed before logging anything, or TWS restarted. Only performed when
-    # attach_broker_stop_loss is truthy, so accounts that never opt in pay no extra IBKR round
-    # trip.
-    if attach_broker_stop_loss and sell_orders:
+    # crashed before logging anything, or TWS restarted. Only performed when either flag is
+    # truthy, so an account that opts into neither pays no extra IBKR round trip.
+    if (attach_broker_stop_loss or attach_broker_trailing_stop) and sell_orders:
         app.reqAllOpenOrders()
         waited = 0.0
         while not app.open_orders_done and waited < 10.0:
@@ -2305,10 +2456,10 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
             waited += 0.2
         for resting in app.open_orders:
             if (resting["symbol"] in sell_orders and resting["action"] == "SELL"
-                    and resting["orderType"] == "STP"):
+                    and resting["orderType"] in ("STP", "TRAIL")):
                 logger.info(
-                    "Cancelling resting protective STP orderId=%d for %s before submitting "
-                    "this run's SELL.", resting["orderId"], resting["symbol"])
+                    "Cancelling resting protective %s orderId=%d for %s before submitting "
+                    "this run's SELL.", resting["orderType"], resting["orderId"], resting["symbol"])
                 app.cancelOrder(resting["orderId"])
                 time.sleep(0.3)
 
@@ -2419,8 +2570,17 @@ def run(
     extra_price_tickers: list[str] | None = None,
     daily_prices: pd.DataFrame | None = None,
     signal_rankings_log_path: str = SIGNAL_RANKINGS_LOG_PATH,
+    current_positions: dict | None = None,
 ) -> OrdersResult:
     """
+    current_positions : optional {ticker: {'shares', 'avg_entry_price'}}, same shape
+    get_ibkr_positions()/reconstruct_dry_run_positions() return. Passed straight through to
+    generate_orders() (Epic 8, "Stop-Loss Price Reporting Fix" plan) so a HOLD row's reported
+    stop_loss_price can be anchored to the position's real entry price instead of an estimate.
+    None (default) is byte-identical to before this param existed. daily_runner.py's own call
+    site already builds this exact dict right before deriving current_holdings from it, no new
+    fetch needed.
+
     signal_rankings_log_path : where log_signal_rankings() writes the full ranked-universe log
     (selected + watchlist tickers), a sibling to log_path's trade log, kept as a SEPARATE file so
     the trade log stays a clean "decisions actually made" audit trail, see
@@ -2813,7 +2973,7 @@ def run(
             return skip_result
 
     orders = generate_orders(current_holdings, weights, gross_exposure, total_value, latest_prices, cfg,
-                              signal_context=signal_context)
+                              signal_context=signal_context, current_positions=current_positions)
 
     for ticker, order in orders.items():
         logger.info("%-6s %-4s shares=%-8.4f (%s)", ticker, order["action"], order["shares"], order["reason"])
@@ -2857,13 +3017,17 @@ def run(
                                           allow_extended_hours=cfg.allow_extended_hours,
                                           max_bid_ask_spread_pct=cfg.max_bid_ask_spread_pct,
                                           attach_broker_stop_loss=cfg.attach_broker_stop_loss,
-                                          stop_loss_pct=cfg.stop_loss_pct)
+                                          stop_loss_pct=cfg.stop_loss_pct,
+                                          attach_broker_trailing_stop=cfg.attach_broker_trailing_stop,
+                                          trailing_stop_pct=cfg.trailing_stop_pct)
         for ticker, fill in fill_results.items():
             if ticker in orders:
                 orders[ticker]["fill_status"] = fill["status"]
                 orders[ticker]["fill_price"] = fill["avg_fill_price"]
                 if "stop_order_id" in fill:
                     orders[ticker]["broker_stop_order_id"] = fill["stop_order_id"]
+                if "trailing_stop_order_id" in fill:
+                    orders[ticker]["broker_trailing_stop_order_id"] = fill["trailing_stop_order_id"]
                 orders[ticker]["fill_shares"] = fill["filled"]
     else:
         logger.info("DRY RUN: no orders sent to broker. Use --live to actually trade.")

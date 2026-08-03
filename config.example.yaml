@@ -330,6 +330,15 @@ default_risk:
                                    # with this on (it's the only mechanism for max_holding_days,
                                    # and reacts to a stop_loss_pct changed mid-position). See
                                    # docs/RISK_CONSTRAINTS.md's "Broker-Side Protective Stop".
+  attach_broker_trailing_stop: false  # LIVE-ONLY. The broker-native counterpart to
+                                   # use_trailing_stop above (belt-and-suspenders alongside it,
+                                   # NOT a replacement): true attaches a REAL IBKR TRAIL order at
+                                   # BUY time (reusing trailing_stop_pct below for the trail
+                                   # width), protecting continuously at the broker even when this
+                                   # app isn't running. When combined with attach_broker_stop_loss
+                                   # above, both children attach as an IBKR One-Cancels-All (OCA)
+                                   # pair, whichever triggers first cancels the other. See
+                                   # docs/RISK_CONSTRAINTS.md's "Broker-Native Trailing Stop".
   ticker_risk_overrides: {}       # per-ticker override of stop_loss_pct above, {} (default) =
                                    # every ticker uses the portfolio-wide stop_loss_pct, no
                                    # per-ticker behavior change. Keyed by ticker, each entry may

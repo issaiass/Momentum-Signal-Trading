@@ -199,7 +199,7 @@ README says so on purpose.
   effective config changes between runs, see `docs/DEPLOYMENT.md`'s "What needs what" section
   for the complete restart-vs-nothing matrix (`config.yaml`/`.env`/Dockerfile changes each need a
   different action, or none at all)
-- 915-test pytest suite covering code mechanics, order sizing, config validation, audit-log
+- 919-test pytest suite covering code mechanics, order sizing, config validation, audit-log
   integrity, multi-portfolio capital math, entirely on synthetic/mocked data, no live broker
   required to run it
 
@@ -268,8 +268,11 @@ momentum-trading/
 │   │   │                           grid, walk-forward validation
 │   │   ├── DHI0016_notebook2_strategy_coding_IMPROVED.ipynb     signal construction,
 │   │   │                           liquidity filter
-│   │   └── DHI0016_notebook3_full_backtest_IMPROVED.ipynb       full backtest, factor
-│   │                               decomposition, regime breakdown, dual momentum overlay
+│   │   ├── DHI0016_notebook3_full_backtest_IMPROVED.ipynb       full backtest, factor
+│   │   │                           decomposition, regime breakdown, dual momentum overlay
+│   │   └── crash_period_stress_test.ipynb   real 2008/2020/2022 crash replay on a
+│   │                               long-history ETF proxy universe, risk-managed vs. naive
+│   │                               baseline (Epic 13, see README's Known Gaps)
 │   └── operational/               interactive validation & run walkthroughs (safe, dry-run only)
 │       ├── live_signal_walkthrough.ipynb
 │       ├── daily_runner_walkthrough.ipynb
@@ -346,7 +349,7 @@ momentum-trading/
 │       └── email_diagnostics.py     backs `daily-runner --test-email`, live SMTP+IMAP
 │                                     check independent of config.yaml
 │
-└── tests/                         pytest suite (915 tests), mirrors src/ layout where a
+└── tests/                         pytest suite (919 tests), mirrors src/ layout where a
     ├── conftest.py                  test's primary subject is a single sub-package;
     ├── test_architecture.py         cross-cutting/integration tests stay at tests/ root
     ├── test_daily_runner.py
@@ -389,7 +392,7 @@ not been answered at all yet**:
 |---|---|
 | Does the code have circuit breakers, idempotency, alerting, audit logging? | ✅ Yes, tested |
 | Has the strategy shown a positive out-of-sample (holdout) return on real data? | ❌ Never run on real data |
-| Has it been validated against real 2008/2020/2022 history? | ❌ Never, only synthetic crash-shaped test data |
+| Has it been validated against real 2008/2020/2022 history? | ⚠️ The risk-control *mechanism* has, using a long-history ETF proxy universe (see Known Gaps below), not the exact currently-configured portfolios (most of their tickers didn't exist in 2008). Real result: the risk-managed variant beat a naive-momentum baseline on max drawdown in all 6 head-to-head runs (both a monthly and weekly cadence, across 2008/2020/2022), most dramatically in 2008 (weekly regime: -5.5% vs. -26.0% max drawdown), at a real cost to upside capture during 2020's fast V-shaped recovery. |
 | Has it connected to a real broker even once? | ✅ Yes, paper (port 7497) connection, account summary, position fetch, and **confirmed real BUY and SELL order fills** (verified directly in TWS's own execution log across two portfolios, real prices, matching quantities). Getting here surfaced and fixed three real bugs (every order silently rejected while the run logged success; a misleadingly-short fill-confirmation poll window; an informational per-order notice mistaken for a rejection, causing an already-filled order to be logged as failed) and one hard IBKR platform limitation worked around (no fractional equity orders via API, ever, floored to whole shares). The live/real-money port (7496) is still unexercised |
 | Has real live-vs-backtest divergence been measured? | ⚠️ Attempted for real (2026-08-03) against all three real portfolios' actual `dry_run=False` trade history; the notebook's methodology bugs are fixed and verified (real config load, `dry_run=False` filtering, `strategy_type`-aware signal reproduction, `custom_weights` sizing parity), and real Live P&L was computed successfully for all three. The head-to-head Backtest number itself is still blocked, not by a code defect but by real trading history simply being too young: `_build_report()`'s monthly-return diffing needs at least two completed calendar-month buckets to produce a non-NaN return, and the real history (~1-2 weeks old as of this writing, entirely inside one still-open month) can't supply that yet. See the Known Gaps entry below and `notebooks/operational/live_vs_backtest_reconciliation.ipynb`; rerun once real trading has spanned at least one full month-end. |
 
@@ -685,6 +688,49 @@ answer whether the strategy actually works.
   sizing parity for `portfolio1`), and real Live P&L was computed successfully for all three
   portfolios from their actual trade logs; only the Backtest side of the comparison is waiting
   on real calendar time to pass.
+- **Real historical crash-period stress test (2008 GFC / 2020 COVID / 2022 Bear), Epic 13**: the
+  currently-configured tickers can't be used for this directly, confirmed by checking IPO dates,
+  not assumed: `portfolio1` includes `ARM` (IPO 2023) and `PLTR` (IPO 2020), `portfolio3`
+  includes `ASTS`/`CPA`/`SWMR` (all recent), none of which existed in 2008 and several didn't
+  exist in 2020. Instead, `notebooks/research/crash_period_stress_test.ipynb` uses a long-history,
+  liquid ETF proxy universe (17 tickers, confirmed via a real `yfinance` check to have data back
+  to 2005: `SPY, QQQ, DIA, XLK, XLF, XLE, XLI, XLP, XLU, XLV, XLY, GLD, TLT, IEF, SHY, LQD, IWM`)
+  with this project's two REAL risk regimes (`portfolio1`'s actual monthly `default_risk`,
+  `portfolio2`'s actual weekly `risk_overrides`, both loaded from `config.yaml` via
+  `daily_runner.load_config()`, not hand-typed), each run twice per crash period: once "as
+  configured" (regime filter, volatility targeting, and stop-loss all on, plus a representative
+  `max_portfolio_drawdown_pct: 0.20` circuit breaker, since the real `config.yaml` ships that
+  disabled by default) and once as a naive-momentum "baseline" with every defensive mechanism
+  neutralized. This validates the risk-control *mechanism*, not a claim about what the exact
+  current portfolios would have returned in 2008.
+
+  **Real results** (12 backtests: 2 regimes x 2 variants x 3 crash periods, run 2026-08-04): the
+  risk-managed ("full") variant beat the baseline on max drawdown in **all 6** regime/period
+  combinations:
+
+  | Period | Regime | Full max DD | Baseline max DD | Full return | Baseline return | SPY buy-hold |
+  |---|---|---|---|---|---|---|
+  | 2008 GFC | monthly | -1.7% | -10.0% | +0.4% | -3.5% | -37.9% |
+  | 2008 GFC | weekly | -5.5% | **-26.0%** | -3.5% | -14.8% | -37.9% |
+  | 2020 COVID | monthly | -5.3% | -6.4% | +12.9% | +18.3% | +17.2% |
+  | 2020 COVID | weekly | -9.2% | -9.5% | +7.1% | +14.8% | +17.2% |
+  | 2022 Bear | monthly | -3.7% | -12.0% | -3.4% | -3.1% | -18.7% |
+  | 2022 Bear | weekly | -6.0% | -10.7% | -4.1% | -4.1% | -18.7% |
+
+  Honest reading, not oversold: in the 2008 GFC and 2022 Bear (both a slower, grinding decline),
+  the risk-managed variant cut max drawdown by roughly half to nearly 5x, at comparable or
+  *better* total return, a genuinely clean win. In 2020 COVID (a fast, V-shaped crash-then-
+  recovery), the risk-managed variant's max drawdown was only marginally better (or about the
+  same), while its total return was materially *lower* than the baseline's, a real, honest cost:
+  the same defensive de-risking that helps in a slow bear market reduces exposure reactively and
+  misses part of a sharp V-shaped rebound. The circuit breaker (`max_portfolio_drawdown_pct:
+  0.20`) never tripped in any of the 12 runs, not a bug, the regime filter + volatility targeting
+  combination alone kept every real-crash drawdown well inside that threshold, so the circuit
+  breaker functioned correctly as an untriggered last-resort backstop rather than the primary
+  defense. Recovery-time comparison (`core/functions_quant_extensions.py`'s new
+  `compute_drawdown_episodes()`, added for this epic) was mostly inconclusive within these short
+  (9-21 month) windows, most episodes hadn't fully recovered to a new high before the window
+  ended, not enough data points to draw a real recovery-time conclusion yet.
 
 ### Who should allocate capital here
 

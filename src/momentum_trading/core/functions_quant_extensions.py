@@ -1161,3 +1161,73 @@ def blend_momentum_scores(
         blended = component if blended is None else blended.add(component, fill_value=0)
 
     return blended
+
+
+# --------------------------------------------------------------------------- #
+# 17. DRAWDOWN EPISODE / RECOVERY-TIME ANALYSIS
+# --------------------------------------------------------------------------- #
+def compute_drawdown_episodes(cumulative_returns: pd.Series) -> pd.DataFrame:
+    """
+    One row per drawdown episode (a decline from a running peak back to a new all-time high),
+    the recovery-time counterpart to backtest/momentum_backtest.py's _build_report(), which only
+    returns a single scalar max drawdown (report.attrs["tearsheet"]["MaxDrawdown"]). Built for
+    Epic 13 ("Real Historical Crash-Period Stress Test" plan): "max drawdown was X%" alone
+    doesn't say whether a risk control also SHORTENED the time spent underwater, this does.
+
+    `cumulative_returns` is a cumulative growth-of-$1 index (e.g. (1 + returns).cumprod()), the
+    same convention _build_report()'s own "Portfolio Cumulative Return" column already uses, not
+    raw prices or period returns.
+
+    An episode starts the first date the series dips below its running peak-to-date, and ends
+    (recovers) the first later date it reaches a NEW all-time high above that peak. A trailing
+    episode still below its peak at the END of the series has recovery_date = pd.NaT / NaN
+    recovery_days (not yet recovered, distinct from a genuinely completed recovery).
+
+    Returns
+    -------
+    pd.DataFrame, one row per episode, columns: peak_date, trough_date, trough_pct (negative,
+    e.g. -0.35 for a 35% decline), recovery_date (pd.NaT if not yet recovered), recovery_days
+    (float, NaN if not yet recovered). Empty (same columns, 0 rows) if the series never dips
+    below its own running peak.
+    """
+    columns = ["peak_date", "trough_date", "trough_pct", "recovery_date", "recovery_days"]
+    s = cumulative_returns.dropna()
+    if s.empty:
+        return pd.DataFrame(columns=columns)
+
+    episodes = []
+    running_peak_date = s.index[0]
+    running_peak_value = s.iloc[0]
+    in_episode = False
+    episode_peak_date = episode_peak_value = trough_date = trough_value = None
+
+    for date, value in s.items():
+        if value >= running_peak_value:
+            if in_episode:
+                episodes.append({
+                    "peak_date": episode_peak_date,
+                    "trough_date": trough_date,
+                    "trough_pct": trough_value / episode_peak_value - 1.0,
+                    "recovery_date": date,
+                    "recovery_days": float((date - trough_date).days),
+                })
+                in_episode = False
+            running_peak_date, running_peak_value = date, value
+        else:
+            if not in_episode:
+                in_episode = True
+                episode_peak_date, episode_peak_value = running_peak_date, running_peak_value
+                trough_date, trough_value = date, value
+            elif value < trough_value:
+                trough_date, trough_value = date, value
+
+    if in_episode:
+        episodes.append({
+            "peak_date": episode_peak_date,
+            "trough_date": trough_date,
+            "trough_pct": trough_value / episode_peak_value - 1.0,
+            "recovery_date": pd.NaT,
+            "recovery_days": np.nan,
+        })
+
+    return pd.DataFrame(episodes, columns=columns)

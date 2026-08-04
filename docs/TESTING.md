@@ -42,11 +42,11 @@ That's a deliberate scope boundary; see "What this suite does NOT tell you" belo
 | `core/test_audit_log.py` | The shared hash-chain helper (`append_hash_chained_row()`) every new alert-log write goes through, `log_alert()`'s schema, and `read_recent_alerts()`'s filtering/limit/ordering behavior backing the `ALERTS_REPORT` email command |
 | `core/test_functions.py` | `get_bulk_prices()`'s per-ticker FMP -> EODHD -> yfinance vendor-fallback cascade (a ticker failing under the batch-detected vendor falls back per-ticker rather than being dropped), `fetch_with_retry()`'s retry-with-backoff classification (Epic 10: retries HTTP 429/5xx/`URLError`/`OSError`, does NOT retry other 4xx or a genuine "no data" `ValueError`), that each of `get_stock_prices()`'s three vendor closures actually routes through it, `request_pacing_seconds`'s inter-ticker pacing (including that `0` is a no-op, keeping this file's own suite fast), and (Epic 12) that `_fetch_yf()` requests `end_date + 1 day` from `yf.download()` since yfinance's own `end` param is exclusive, unlike FMP's/EODHD's `to` REST params |
 | `core/test_technical_indicators.py` | Hand-rolled SMA/EMA/RSI/MACD/ATR/Bollinger/ADX/VWAP/OBV: hand-verifiable known-value cases (constant/monotonic price series), RSI/ADX boundary checks ([0, 100]), and `compute_latest_indicators()`'s graceful empty-dict behavior on insufficient history |
-| `core/test_functions_quant_extensions.py` | The new live-performance-report wiring: `since_inception_performance()`'s graceful Sharpe/Sortino degradation on short history, `daily_window_comparison()`/`monthly_window_comparison()`'s window-omission behavior, and a regression guard confirming `monthly_window_comparison()` never raises against short live histories (the bug that ruled out reusing `trailing_returns()` directly, see `CLAUDE.md`) |
+| `core/test_functions_quant_extensions.py` | The new live-performance-report wiring: `since_inception_performance()`'s graceful Sharpe/Sortino degradation on short history, `daily_window_comparison()`/`monthly_window_comparison()`'s window-omission behavior, a regression guard confirming `monthly_window_comparison()` never raises against short live histories (the bug that ruled out reusing `trailing_returns()` directly, see `CLAUDE.md`), and (Epic 13) `compute_drawdown_episodes()`'s peak/trough/recovery-date detection across a monotonic series (zero episodes), a two-episode recovering series, and a still-in-drawdown-at-end series (no recovery date) |
 | `core/test_fundamentals.py` | FMP-first/EODHD-fallback fetch of P/E, PEG, ROE, Debt-to-Equity, Current Ratio: vendor fallback behavior (FMP fails -> EODHD tried; both fail -> `{}`, never an exception), no-API-key short-circuit, and the file cache's hit/miss/expiry/corrupt-file/per-ticker-independence behavior |
 | `core/test_macro_data.py` | FRED-sourced Fed Funds Rate/CPI: `FRED_API_KEY` unset short-circuits before any network attempt, one series failing doesn't block the other, FRED's "." missing-value marker is handled without raising, and the same file-cache hit/miss/expiry/corrupt-file behavior as fundamentals |
 
-Current count: **915 tests**, all passing. Every test file and class has a docstring explaining
+Current count: **919 tests**, all passing. Every test file and class has a docstring explaining
 *why* that group of tests exists, not just what it checks, read those docstrings first if a
 test's purpose isn't obvious from its name.
 
@@ -102,7 +102,7 @@ unintentionally (fix the code).
 
 ## What this suite does NOT tell you
 
-Worth repeating because it's easy to forget once a suite is green: **915 passing tests confirm
+Worth repeating because it's easy to forget once a suite is green: **919 passing tests confirm
 the code does what it's supposed to do, mechanically. They do not confirm the momentum
 strategy itself is profitable or safe in a real crash**, that's a separate question from
 execution mechanics, which have now been confirmed against a real (paper) broker connection.

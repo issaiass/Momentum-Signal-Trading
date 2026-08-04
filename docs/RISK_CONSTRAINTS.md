@@ -1014,6 +1014,16 @@ capital-preservation kill-switch property, not a bug. Delete
 fresh account-wide peak baseline despite an unrecovered loss, only as a deliberate, reviewed
 decision.
 
+**Real-crash validation (Epic 13, `notebooks/research/crash_period_stress_test.ipynb`)**: run
+against a real 2008 GFC / 2020 COVID / 2022 Bear replay (long-history ETF proxy universe, since
+most currently-configured tickers didn't exist in 2008), `max_portfolio_drawdown_pct: 0.20` never
+tripped in any of 12 real backtest runs. Not a bug: the regime filter + volatility targeting
+combination alone kept every real-crash drawdown well inside that threshold (worst case -26.0%
+only in the naive baseline with the breaker deliberately disabled; the risk-managed variant's
+worst real drawdown was -9.2%), so in every scenario tested here the circuit breaker functioned
+correctly as an untriggered last-resort backstop, not the primary defense. See `README.md`'s
+Known Gaps entry for the full 6-scenario results table.
+
 ## Correlation Monitor [Recommended tier]
 
 Already fully implemented and live-wired before this plan, this section just gives it the

@@ -147,6 +147,20 @@ that tests enforce, don't casually violate these when editing:
   making the yfinance call effectively inclusive, matching FMP/EODHD. See
   `tests/core/test_functions.py`'s `TestFetchYfEndDateInclusive` and `README.md`'s Known Gaps
   entry for the reconciliation context that surfaced this.
+  `core/functions_quant_extensions.py`'s `compute_drawdown_episodes(cumulative_returns)` (Epic
+  13, "Real Historical Crash-Period Stress Test" plan) is a pure function, one row per
+  peak-to-new-high drawdown episode (`peak_date`/`trough_date`/`trough_pct`/`recovery_date`/
+  `recovery_days`, `recovery_date` is `pd.NaT` for an episode still open at the end of the
+  series), the recovery-time counterpart to `backtest/momentum_backtest.py`'s `_build_report()`,
+  which only ever returned a single scalar max drawdown
+  (`report.attrs["tearsheet"]["MaxDrawdown"]"`), no episode/recovery detail. Built specifically
+  so `notebooks/research/crash_period_stress_test.ipynb` could show not just "max drawdown was
+  X%" but "and it took N days to recover," a real gap found while designing that epic, not
+  previously present anywhere in this codebase. Takes a cumulative growth-of-$1 index (e.g.
+  `(1 + returns).cumprod()`, the same convention `_build_report()`'s own "Portfolio Cumulative
+  Return" column already uses), single forward pass, O(n), no post-hoc lookup ambiguity. See
+  `tests/core/test_functions_quant_extensions.py`'s `TestComputeDrawdownEpisodes` and `README.md`'s
+  Known Gaps entry for the real crash-period results this was built to produce.
   `core/audit_log.py`'s `log_alert()` gained an optional `sender` param (default `None`, resolves
   internally to `os.environ.get("SMTP_USER", "")`), recording which outbound email account this
   alert would/did notify from, self-configuring so none of its ~27 existing call sites needed to

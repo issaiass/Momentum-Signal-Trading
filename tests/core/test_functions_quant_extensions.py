@@ -15,6 +15,7 @@ import pytest
 
 from momentum_trading.core.functions_quant_extensions import (
     since_inception_performance, daily_window_comparison, monthly_window_comparison,
+    compute_drawdown_episodes,
 )
 
 
@@ -157,3 +158,63 @@ class TestMonthlyWindowComparison:
         result = monthly_window_comparison("p1", snapshot_dir=snapshot_dir)
         assert "error" not in result
         assert "1 Month" in result
+
+
+class TestComputeDrawdownEpisodes:
+    """
+    compute_drawdown_episodes() (Epic 13, "Real Historical Crash-Period Stress Test" plan): the
+    recovery-time counterpart to _build_report()'s single-scalar max drawdown, one row per
+    peak-to-new-high episode.
+    """
+
+    def test_monotonically_increasing_series_has_zero_episodes(self):
+        s = pd.Series([1.0, 1.05, 1.1, 1.2, 1.3], index=pd.date_range("2026-01-01", periods=5))
+        result = compute_drawdown_episodes(s)
+        assert result.empty
+        assert list(result.columns) == [
+            "peak_date", "trough_date", "trough_pct", "recovery_date", "recovery_days",
+        ]
+
+    def test_two_episodes_both_recover(self):
+        dates = pd.date_range("2026-01-01", periods=9)
+        # peak 1.1 (day1) -> trough 0.9 (day3) -> recovers day6 (1.15, a new high)
+        # peak 1.15 (day6) -> trough 1.1 (day7) -> recovers day8 (1.2, a new high)
+        values = [1.0, 1.1, 1.05, 0.9, 0.95, 1.0, 1.15, 1.1, 1.2]
+        s = pd.Series(values, index=dates)
+        result = compute_drawdown_episodes(s)
+
+        assert len(result) == 2
+
+        first = result.iloc[0]
+        assert first["peak_date"] == dates[1]
+        assert first["trough_date"] == dates[3]
+        assert first["trough_pct"] == pytest.approx(0.9 / 1.1 - 1.0)
+        assert first["recovery_date"] == dates[6]
+        assert first["recovery_days"] == (dates[6] - dates[3]).days
+
+        second = result.iloc[1]
+        assert second["peak_date"] == dates[6]
+        assert second["trough_date"] == dates[7]
+        assert second["trough_pct"] == pytest.approx(1.1 / 1.15 - 1.0)
+        assert second["recovery_date"] == dates[8]
+        assert second["recovery_days"] == (dates[8] - dates[7]).days
+
+    def test_still_in_drawdown_at_series_end_has_no_recovery_date(self):
+        dates = pd.date_range("2026-01-01", periods=5)
+        # peak 1.1 (day1), trough 0.8 (day4), never makes a new high before the series ends
+        values = [1.0, 1.1, 1.0, 0.9, 0.8]
+        s = pd.Series(values, index=dates)
+        result = compute_drawdown_episodes(s)
+
+        assert len(result) == 1
+        episode = result.iloc[0]
+        assert episode["peak_date"] == dates[1]
+        assert episode["trough_date"] == dates[4]
+        assert episode["trough_pct"] == pytest.approx(0.8 / 1.1 - 1.0)
+        assert pd.isna(episode["recovery_date"])
+        assert pd.isna(episode["recovery_days"])
+
+    def test_empty_series_returns_empty_dataframe(self):
+        s = pd.Series([], dtype=float)
+        result = compute_drawdown_episodes(s)
+        assert result.empty

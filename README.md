@@ -199,7 +199,7 @@ README says so on purpose.
   effective config changes between runs, see `docs/DEPLOYMENT.md`'s "What needs what" section
   for the complete restart-vs-nothing matrix (`config.yaml`/`.env`/Dockerfile changes each need a
   different action, or none at all)
-- 914-test pytest suite covering code mechanics, order sizing, config validation, audit-log
+- 915-test pytest suite covering code mechanics, order sizing, config validation, audit-log
   integrity, multi-portfolio capital math, entirely on synthetic/mocked data, no live broker
   required to run it
 
@@ -346,7 +346,7 @@ momentum-trading/
 │       └── email_diagnostics.py     backs `daily-runner --test-email`, live SMTP+IMAP
 │                                     check independent of config.yaml
 │
-└── tests/                         pytest suite (914 tests), mirrors src/ layout where a
+└── tests/                         pytest suite (915 tests), mirrors src/ layout where a
     ├── conftest.py                  test's primary subject is a single sub-package;
     ├── test_architecture.py         cross-cutting/integration tests stay at tests/ root
     ├── test_daily_runner.py
@@ -391,7 +391,7 @@ not been answered at all yet**:
 | Has the strategy shown a positive out-of-sample (holdout) return on real data? | ❌ Never run on real data |
 | Has it been validated against real 2008/2020/2022 history? | ❌ Never, only synthetic crash-shaped test data |
 | Has it connected to a real broker even once? | ✅ Yes, paper (port 7497) connection, account summary, position fetch, and **confirmed real BUY and SELL order fills** (verified directly in TWS's own execution log across two portfolios, real prices, matching quantities). Getting here surfaced and fixed three real bugs (every order silently rejected while the run logged success; a misleadingly-short fill-confirmation poll window; an informational per-order notice mistaken for a rejection, causing an already-filled order to be logged as failed) and one hard IBKR platform limitation worked around (no fractional equity orders via API, ever, floored to whole shares). The live/real-money port (7496) is still unexercised |
-| Has real live-vs-backtest divergence been measured? | ❌ Real trades now exist (paper), but no divergence analysis has been run yet, see `notebooks/operational/live_vs_backtest_reconciliation.ipynb` |
+| Has real live-vs-backtest divergence been measured? | ⚠️ Attempted for real (2026-08-03) against all three real portfolios' actual `dry_run=False` trade history; the notebook's methodology bugs are fixed and verified (real config load, `dry_run=False` filtering, `strategy_type`-aware signal reproduction, `custom_weights` sizing parity), and real Live P&L was computed successfully for all three. The head-to-head Backtest number itself is still blocked, not by a code defect but by real trading history simply being too young: `_build_report()`'s monthly-return diffing needs at least two completed calendar-month buckets to produce a non-NaN return, and the real history (~1-2 weeks old as of this writing, entirely inside one still-open month) can't supply that yet. See the Known Gaps entry below and `notebooks/operational/live_vs_backtest_reconciliation.ipynb`; rerun once real trading has spanned at least one full month-end. |
 
 **Do not treat a well-tested codebase as a validated strategy.** See `docs/RUNNING.md`'s staged
 rollout plan (Historical Validation → Paper → Small Live → Full Live) before allocating real
@@ -653,6 +653,38 @@ answer whether the strategy actually works.
   attached successfully, and (when combined with `attach_broker_stop_loss`) both children
   attached as a real IBKR One-Cancels-All (OCA) pair. See `docs/RISK_CONSTRAINTS.md`'s
   "Broker-Native Trailing Stop" section.
+- **A real, confirmed data bug found via the live-vs-backtest reconciliation notebook's own
+  real-data run (2026-08-03), now fixed**: `core/functions.py`'s `_fetch_yf()` passed `end_date`
+  (computed as literally "today" by every real caller, e.g. `fetch_live_prices()`) straight into
+  `yf.download(end=...)`. Confirmed directly against a real yfinance call that yfinance's own
+  `end` parameter is EXCLUSIVE (`end="2026-08-03"` never returns `2026-08-03`'s own row), unlike
+  FMP's/EODHD's `to` REST params in the same function, both confirmed inclusive. This meant the
+  yfinance vendor path silently NEVER included today's own close, even fetched well after market
+  close, for as long as this project has existed, affecting every real caller that falls back to
+  (or exclusively uses) yfinance: `daily_runner.py`'s live rebalance signal, stop-loss checks,
+  and portfolio snapshots. Fixed: `_fetch_yf()` now requests `end_date + 1 day`, making the
+  yfinance call effectively inclusive, matching FMP/EODHD. See `tests/core/test_functions.py`'s
+  `TestFetchYfEndDateInclusive`.
+- **The reconciliation notebook's methodology bugs are fixed, but a real head-to-head number is
+  still blocked, by data recency, not a code defect**: fixing the yfinance bug above resolved
+  the reconciliation's initial "no trading days found" failure for `portfolio1`/`portfolio2`
+  (their most recent real signal date's price data now exists), but `run_custom_backtest()`'s
+  own `_build_report()` still returned an empty DataFrame for all three portfolios, traced
+  directly (not assumed) to `report["Portfolio Monthly Return"] = report["Month End Portfolio
+  Value"].pct_change()` immediately followed by `report.dropna(subset=["Portfolio Monthly
+  Return"])`: a `pct_change()` on a single month-end bucket is always `NaN` (nothing to diff
+  against), so with only one calendar month of simulated history (all real trading here started
+  within the last ~2 weeks, entirely inside the still-open month at the time), the sole row gets
+  dropped, leaving nothing to report. This is a deliberate, load-bearing convention (every
+  CAGR/vol/Sharpe/Sortino/Calmar figure in this report needs month-over-month returns), not
+  something Epic 12 changed or should change, it just makes this specific reconciliation
+  technique premature until real trading has survived at least one full month-end transition.
+  The notebook itself is fixed and ready (config loaded from the real `config.yaml`, `dry_run`
+  correctly filtered, signal reproduced via the same `strategy_type`-aware
+  `generate_strategy_monthly_picks()` both live and backtest already share, `custom_weights`
+  sizing parity for `portfolio1`), and real Live P&L was computed successfully for all three
+  portfolios from their actual trade logs; only the Backtest side of the comparison is waiting
+  on real calendar time to pass.
 
 ### Who should allocate capital here
 

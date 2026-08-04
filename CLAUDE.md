@@ -135,6 +135,18 @@ that tests enforce, don't casually violate these when editing:
   none of the three vendors this project uses paginate results for the date ranges actually
   requested here (daily history over months to ~1-2 years, each vendor returns the full range in
   one call), not implemented since there's nothing to paginate.
+  `_fetch_yf()`'s `yf.download(..., end=end_date)` call (Epic 12, "Live-vs-Backtest Divergence
+  Reconciliation" plan) had a real, confirmed bug found via real-data verification, not
+  synthetic: yfinance's own `end` param is EXCLUSIVE (confirmed directly against a real call,
+  `end="2026-08-03"` never returns that day's own row), unlike FMP's/EODHD's `to` REST params in
+  this same file, both confirmed inclusive. Every real caller computes `end_date` as literally
+  "today" (`execution/live_signal.py`'s `fetch_live_prices()`), so this silently meant the
+  yfinance vendor path never included today's own close, even fetched well after market close.
+  Fixed: `_fetch_yf()` now requests `end_date + 1 day` internally (`yf_end`, a local variable,
+  the outer `end_date` closure var used everywhere else in `get_stock_prices()` is untouched),
+  making the yfinance call effectively inclusive, matching FMP/EODHD. See
+  `tests/core/test_functions.py`'s `TestFetchYfEndDateInclusive` and `README.md`'s Known Gaps
+  entry for the reconciliation context that surfaced this.
   `core/audit_log.py`'s `log_alert()` gained an optional `sender` param (default `None`, resolves
   internally to `os.environ.get("SMTP_USER", "")`), recording which outbound email account this
   alert would/did notify from, self-configuring so none of its ~27 existing call sites needed to

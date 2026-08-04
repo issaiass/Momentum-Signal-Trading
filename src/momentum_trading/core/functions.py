@@ -222,10 +222,19 @@ def get_stock_prices(
     # -------------------------------------------------------------------------
     def _fetch_yf() -> pd.DataFrame:
         """Fetch data from Yahoo Finance."""
+        # yf.download()'s own `end` is EXCLUSIVE (confirmed directly: yf.download(end=X) never
+        # returns day X's own row), unlike FMP's/EODHD's `to` REST params above, both confirmed
+        # inclusive. Every real caller here (fetch_live_prices()) computes end_date as literally
+        # "today", so left unfixed this silently NEVER includes today's own close via the
+        # yfinance path, even when fetched well after market close, a real, confirmed gap found
+        # via Epic 12's ("Live-vs-Backtest Divergence Reconciliation" plan) real-data
+        # verification. +1 day makes the request effectively inclusive of end_date, matching
+        # FMP/EODHD's own semantics.
+        yf_end = (pd.Timestamp(end_date) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
         df = fetch_with_retry(lambda: yf.download(
             symbol,
             start=start_date,
-            end=end_date,
+            end=yf_end,
             progress=False,
             auto_adjust=False
         ))

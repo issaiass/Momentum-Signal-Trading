@@ -286,6 +286,33 @@ class TestVendorClosuresUseRetry:
         assert len(calls) == 2
 
 
+class TestFetchYfEndDateInclusive:
+    """
+    Epic 12 ("Live-vs-Backtest Divergence Reconciliation" plan): a real, confirmed bug found
+    via real-data reconciliation, not synthetic. yf.download()'s own `end` param is EXCLUSIVE
+    (confirmed directly against a real yfinance call: requesting end="2026-08-03" never returns
+    2026-08-03's own row), unlike FMP's/EODHD's `to` REST params, both confirmed inclusive.
+    execution/live_signal.py's fetch_live_prices() always computes end_date as literally
+    "today", so left unfixed, the yfinance vendor path silently NEVER includes today's own
+    close, even fetched well after market close. _fetch_yf() now requests end_date + 1 day to
+    make the yfinance call effectively inclusive of the requested end_date, matching FMP/EODHD.
+    """
+
+    def test_yf_download_called_with_end_date_plus_one_day(self, monkeypatch):
+        captured = {}
+
+        def fake_download(symbol, start, end, progress=False, auto_adjust=False):
+            captured["start"] = start
+            captured["end"] = end
+            return pd.DataFrame({"Close": [100.0]}, index=pd.bdate_range("2024-01-02", periods=1))
+
+        monkeypatch.setattr(fn.yf, "download", fake_download)
+        fn.get_stock_prices("AAPL", "2024-01-01", "2024-01-10", source="yf")
+
+        assert captured["start"] == "2024-01-01"
+        assert captured["end"] == "2024-01-11"  # requested end_date + 1 day, not the raw end_date
+
+
 class TestGetBulkPricesPacing:
     """
     request_pacing_seconds (Epic 10): a small delay between successive per-ticker fetches in

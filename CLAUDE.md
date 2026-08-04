@@ -96,6 +96,45 @@ that tests enforce, don't casually violate these when editing:
   fetch is never cached, so a transient outage or a since-added API key doesn't block retrying.
   `core/macro_data.py` needs its own `FRED_API_KEY` (free, `fred.stlouisfed.org`), unset means
   the whole macro section is silently omitted, not an error.
+  `core/functions.py`'s `fetch_with_retry(fetch_fn, max_attempts=3, backoff_seconds=1.0)` (Epic
+  10, "API Resilience for Price-Vendor Fetches" plan) is a bounded retry-with-backoff wrapper
+  for a zero-arg vendor-fetch callable, confirmed by direct code reading (not assumed) to be a
+  real, previously-missing gap: every vendor call in this file was a single, unretried attempt
+  that fell straight through to the next vendor in `get_stock_prices()`'s FMP -> EODHD -> yf
+  cascade on ANY exception, and `get_bulk_prices()`'s per-ticker loop fired requests back-to-back
+  with zero pacing, a real risk against a free-tier vendor's rate limit given a real portfolio in
+  this project's own `config.yaml` has 58 tickers (`portfolio2`). Mirrors
+  `execution/live_signal.py`'s `with_retry()` and `core/smtp_auth.py`'s `send_with_retry()`
+  pattern exactly, but kept LOCAL to `core/functions.py` (not imported from `execution/`), the
+  same "avoid a new cross-domain dependency" precedent `send_with_retry()`'s own docstring
+  already established for the identical reason (`core/` must not depend on `execution/`,
+  `tests/test_architecture.py`'s AST-based import check enforces this). Only retries genuinely
+  transient failures: `HTTPError` with code `429` (rate limit) or `>= 500` (server-side);
+  `URLError` (network-level failure via `urllib`, e.g. a DNS failure, timeout, or connection
+  reset); and bare `OSError` (the same class of failure from a non-`urllib` HTTP client,
+  `_fetch_yf()`'s `yf.download()` uses `requests`/`curl_cffi` underneath, not `urllib`, so its
+  connection/timeout failures surface as `ConnectionError`/`TimeoutError`, both `OSError`
+  subclasses in Python 3, not `URLError`). Every other exception (a `4xx` other than `429`, e.g.
+  a bad API key or "no access"; the existing "no data returned" `ValueError`; a JSON parse error)
+  is NOT retried, raised immediately exactly as before, since retrying those wastes time on a
+  failure a retry can't fix and delays falling through to the next vendor in the existing
+  fallback cascade, which this change does not otherwise alter. Wired into each of
+  `get_stock_prices()`'s three vendor closures (`_fetch_fmp()`, `_fetch_eodhd()`, `_fetch_yf()`),
+  wrapping only the primary network call (FMP's best-effort secondary dividend-adjusted-close
+  call keeps its own existing silent-`except Exception: pass`, unchanged, retrying a call that's
+  already tolerant of failure isn't needed), so this benefits both real callers automatically
+  without duplicated logic: `execution/live_signal.py`'s `fetch_ohlcv_for_tickers()` (direct
+  single-ticker calls) and `fetch_live_prices()` (via `get_bulk_prices()`'s own internal
+  per-ticker `get_stock_prices()` calls). `get_bulk_prices()` also gained a
+  `request_pacing_seconds: float = 0.25` param, a small `time.sleep()` between successive
+  tickers in its per-ticker loop (not before the first request or during the earlier
+  vendor-auto-detection probe), default nonzero as a real robustness fix, not purely opt-in;
+  `execution/live_signal.py`'s `fetch_live_prices()` gained a matching pass-through param
+  (default unchanged), deliberately NOT exposed in `config.yaml`, a fixed internal constant
+  rather than a per-portfolio tuning knob. Pagination was investigated and found not applicable:
+  none of the three vendors this project uses paginate results for the date ranges actually
+  requested here (daily history over months to ~1-2 years, each vendor returns the full range in
+  one call), not implemented since there's nothing to paginate.
   `core/audit_log.py`'s `log_alert()` gained an optional `sender` param (default `None`, resolves
   internally to `os.environ.get("SMTP_USER", "")`), recording which outbound email account this
   alert would/did notify from, self-configuring so none of its ~27 existing call sites needed to

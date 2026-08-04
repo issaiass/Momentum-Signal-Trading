@@ -473,10 +473,16 @@ def apply_absolute_momentum_filter(
 def fetch_live_prices(
     tickers: list[str], lookback_days: int = 400,
     fmp_api_key: str | None = None, eodhd_api_key: str | None = None,
+    request_pacing_seconds: float = 0.25,
 ) -> pd.DataFrame:
     """
     Pull enough daily history (default ~400 days covers a 12-month lookback
     plus buffer) up through today via the SAME fetch path as the backtest.
+
+    request_pacing_seconds : pass-through to core/functions.py's get_bulk_prices() (Epic 10,
+    "API Resilience for Price-Vendor Fetches" plan), see that function's own docstring. Default
+    unchanged from get_bulk_prices()'s own default, not exposed in config.yaml, a fixed internal
+    constant rather than a per-portfolio tuning knob.
     """
     end_date = datetime.today().strftime("%Y-%m-%d")
     start_date = (datetime.today() - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
@@ -484,6 +490,7 @@ def fetch_live_prices(
     return fn.get_bulk_prices(
         tickers, start_date, end_date, frequency="D",
         fmp_api_key=fmp_api_key, eodhd_api_key=eodhd_api_key,
+        request_pacing_seconds=request_pacing_seconds,
     )
 
 

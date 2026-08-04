@@ -621,17 +621,21 @@ To review and clean these up:
 1. In TWS, open **Account -> Trades** (or the **Orders** panel), which lists every working
    order, filled or not, across the account.
 2. A resting order shows a fill count like `0/1` (nothing filled yet) and a green (BUY) or red
-   (SELL) status dot; a bracket's protective stop (if `attach_broker_stop_loss` was used, see
-   `docs/RISK_CONSTRAINTS.md`'s "Broker-Side Protective Stop") appears as a child row indented
-   under its parent, labeled e.g. `StopLoss`.
+   (SELL) status dot; a bracket's protective stop (if `attach_broker_stop_loss` and/or
+   `attach_broker_trailing_stop` was used, see `docs/RISK_CONSTRAINTS.md`'s "Broker-Side
+   Protective Stop" and "Broker-Native Trailing Stop") appears as a child row indented under its
+   parent, labeled e.g. `StopLoss` or `TRAIL`. When both are enabled together, the two children
+   attach as a real IBKR One-Cancels-All (OCA) pair, confirmed directly: cancelling one from TWS
+   causes IBKR itself to immediately cancel the other too, not a separate manual step.
 3. Right-click any order you don't want and choose **Cancel**, or select multiple and cancel
-   them together. Cancelling a bracket's parent BUY also cancels its linked child stop
+   them together. Cancelling a bracket's parent BUY also cancels its linked child stop(s)
    automatically (confirmed: IBKR reports the child as `Cannot be cancelled, state: Cancelled`,
    i.e. it's already gone, not a separate step you need to take).
-4. This app's own cancel-before-sell mechanism (`attach_broker_stop_loss` only, see
-   `execution/live_signal.py`'s `place_orders_ibkr()`) only ever cancels a resting protective
-   STP for a ticker THIS run is about to sell, it does not clean up unrelated stale orders from
-   old manual tests, that's a manual TWS review, same as any other real trading account.
+4. This app's own cancel-before-sell mechanism (`attach_broker_stop_loss` and/or
+   `attach_broker_trailing_stop`, see `execution/live_signal.py`'s `place_orders_ibkr()`) only
+   ever cancels a resting protective STP or TRAIL for a ticker THIS run is about to sell, it does
+   not clean up unrelated stale orders from old manual tests, that's a manual TWS review, same as
+   any other real trading account.
 
 ## 5. Quick reference
 

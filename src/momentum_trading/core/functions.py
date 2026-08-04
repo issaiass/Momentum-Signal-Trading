@@ -19,7 +19,9 @@ import pandas_datareader as pdr
 import os
 import json
 import ssl
+import time
 from urllib.request import urlopen
+from urllib.error import HTTPError, URLError
 import pandas_market_calendars as mcal
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
@@ -35,6 +37,48 @@ import seaborn as sns
 ssl_context = ssl.create_default_context()
 ssl_context.check_hostname = False
 ssl_context.verify_mode = ssl.CERT_NONE
+
+
+def fetch_with_retry(fetch_fn, max_attempts: int = 3, backoff_seconds: float = 1.0):
+    """
+    Bounded retry-with-backoff for a zero-arg vendor-fetch callable (Epic 10, "API Resilience
+    for Price-Vendor Fetches" plan). Mirrors execution/live_signal.py's with_retry() and
+    core/smtp_auth.py's send_with_retry() pattern exactly, kept LOCAL here (not imported from
+    execution/) for the identical reason send_with_retry()'s own docstring documents: core/ must
+    not depend on execution/, this project's established one-directional architecture rule
+    (tests/test_architecture.py enforces this via an AST-based import check).
+
+    Only retries genuinely transient failures: HTTPError with code 429 (rate limit) or >= 500
+    (server-side); URLError (network-level failure via urllib, e.g. a DNS failure, timeout, or
+    connection reset); and OSError (the same class of network-level failure, but from a
+    non-urllib HTTP client, `_fetch_yf()`'s `yf.download()` uses `requests`/`curl_cffi`
+    underneath, not urllib, so its connection/timeout failures surface as `ConnectionError`/
+    `TimeoutError`, both `OSError` subclasses in Python 3, not `URLError`). Every other
+    exception (a 4xx other than 429, e.g. a bad API key or "no access"; the vendor closures' own
+    "no data returned" `ValueError`; a JSON parse error) is NOT retryable, retrying those wastes
+    time on a failure a retry can't fix and delays falling through to the next vendor in
+    get_stock_prices()'s/get_bulk_prices()'s own existing fallback cascade, which is unchanged
+    by this function.
+    """
+    last_exc = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return fetch_fn()
+        except (HTTPError, URLError, OSError) as e:
+            # HTTPError is itself a URLError subclass, so check it first: only a 429/5xx status
+            # is treated as transient, any other HTTP status (401/402/403/404/etc.) means
+            # retrying won't help. A non-HTTP URLError, or a bare OSError (covers
+            # ConnectionError/TimeoutError from requests/curl_cffi), is always treated as
+            # transient.
+            retryable = (e.code == 429 or e.code >= 500) if isinstance(e, HTTPError) else True
+            if not retryable:
+                raise
+            last_exc = e
+            print(f"Transient fetch error (attempt {attempt}/{max_attempts}): {e}")
+            if attempt < max_attempts:
+                time.sleep(backoff_seconds * attempt)
+    raise last_exc
+
 
 def get_stock_prices(
     symbol: str,
@@ -117,7 +161,7 @@ def get_stock_prices(
             f"https://financialmodelingprep.com/stable/historical-price-eod/full"
             f"?symbol={symbol}&from={start_date}&to={end_date}&apikey={fmp_api_key}"
         )
-        response = urlopen(ohlcv_url, context=ssl_context)
+        response = fetch_with_retry(lambda: urlopen(ohlcv_url, context=ssl_context))
         prices = json.loads(response.read().decode("utf-8"))
 
         # Check for valid response
@@ -159,8 +203,8 @@ def get_stock_prices(
             f"?from={start_date}&to={end_date}"
             f"&period=d&api_token={eodhd_api_key}&fmt=json"
         )
-        
-        response = urlopen(url, context=ssl_context)
+
+        response = fetch_with_retry(lambda: urlopen(url, context=ssl_context))
         data = response.read().decode("utf-8")
         prices = json.loads(data)
         
@@ -178,14 +222,14 @@ def get_stock_prices(
     # -------------------------------------------------------------------------
     def _fetch_yf() -> pd.DataFrame:
         """Fetch data from Yahoo Finance."""
-        df = yf.download(
-            symbol, 
-            start=start_date, 
-            end=end_date, 
+        df = fetch_with_retry(lambda: yf.download(
+            symbol,
+            start=start_date,
+            end=end_date,
             progress=False,
             auto_adjust=False
-        )
-        
+        ))
+
         # Check for valid response
         if df.empty:
             raise ValueError(f"No data returned from Yahoo Finance for {symbol}")
@@ -265,11 +309,12 @@ def get_bulk_prices(
     frequency: str = 'D',
     source: str | None = None,
     fmp_api_key: str | None = None,
-    eodhd_api_key: str | None = None
+    eodhd_api_key: str | None = None,
+    request_pacing_seconds: float = 0.25
 ) -> pd.DataFrame:
     """
     Fetch adjusted close prices for a list of tickers between specified dates.
-    
+
     When no source is specified, the function uses the first ticker to determine
     the best available data source (FMP → EODHD → yf), then uses that source
     for all remaining tickers to ensure consistent column formatting.
@@ -294,6 +339,13 @@ def get_bulk_prices(
         API key for Financial Modeling Prep. Required if using FMP.
     eodhd_api_key : str | None, optional
         API key for EODHD. Required if using EODHD.
+    request_pacing_seconds : float, optional
+        Delay (Epic 10, "API Resilience for Price-Vendor Fetches" plan) between successive
+        per-ticker fetches in the loop below, default 0.25s. A real portfolio in this project's
+        own config.yaml has 58 tickers; firing that many requests back-to-back with zero pacing
+        risks tripping a free-tier vendor's per-minute rate limit mid-batch. Not applied before
+        the FIRST request or during the earlier vendor-auto-detection probe. 0 disables pacing
+        entirely (used by this module's own test suite to keep it fast).
 
     Returns
     -------
@@ -430,7 +482,9 @@ def get_bulk_prices(
     )
     price_frames = []
 
-    for ticker in tickers:
+    for i, ticker in enumerate(tickers):
+        if i > 0 and request_pacing_seconds:
+            time.sleep(request_pacing_seconds)
         df = None
         last_error = None
         ticker_price_col = price_col

@@ -42,6 +42,11 @@ README says so on purpose.
 **What's actually here:**
 - Risk-managed backtest engine, correlation-spike detection, liquidity-stress-aware slippage,
   time-based stops, VaR/CVaR, scenario shocks, capacity checks
+- Resilient price-vendor fetching (FMP -> EODHD -> yfinance auto-fallback cascade): bounded
+  retry-with-backoff on transient failures (HTTP 429/5xx, network-level errors) before falling
+  through to the next vendor, plus rate-limit-aware pacing between per-ticker requests so a
+  larger portfolio doesn't burst-fire requests at a free-tier vendor's rate limit, see
+  `CLAUDE.md`'s `core/functions.py` bullet
 - Live execution against IBKR (`ibapi`), connection retry, fill confirmation, sells-before-buys
   sequencing, cash-aware buy sizing, slippage-tolerance checks, whole-share flooring at
   submission time (IBKR's API has no fractional equity/ETF order support at all, see
@@ -194,7 +199,7 @@ README says so on purpose.
   effective config changes between runs, see `docs/DEPLOYMENT.md`'s "What needs what" section
   for the complete restart-vs-nothing matrix (`config.yaml`/`.env`/Dockerfile changes each need a
   different action, or none at all)
-- 566-test pytest suite covering code mechanics, order sizing, config validation, audit-log
+- 912-test pytest suite covering code mechanics, order sizing, config validation, audit-log
   integrity, multi-portfolio capital math, entirely on synthetic/mocked data, no live broker
   required to run it
 
@@ -341,7 +346,7 @@ momentum-trading/
 │       └── email_diagnostics.py     backs `daily-runner --test-email`, live SMTP+IMAP
 │                                     check independent of config.yaml
 │
-└── tests/                         pytest suite (566 tests), mirrors src/ layout where a
+└── tests/                         pytest suite (912 tests), mirrors src/ layout where a
     ├── conftest.py                  test's primary subject is a single sub-package;
     ├── test_architecture.py         cross-cutting/integration tests stay at tests/ root
     ├── test_daily_runner.py
@@ -355,6 +360,8 @@ momentum-trading/
     ├── core/
     │   ├── test_audit_log.py        hash-chain helper + alert log
     │   ├── test_technical_indicators.py
+    │   ├── test_functions.py        vendor fallback cascade, retry-with-backoff +
+    │   │                              rate-limit pacing (Epic 10)
     │   ├── test_functions_quant_extensions.py   since-inception + trailing-window stats
     │   ├── test_fundamentals.py       P/E, PEG, ROE, Debt-to-Equity, Current Ratio
     │   ├── test_macro_data.py         Fed Funds Rate, CPI (FRED)
@@ -517,9 +524,11 @@ answer whether the strategy actually works.
   15-20% for a long-term/monthly portfolio (as literature recommends) gives room to breathe
   through normal pullbacks but does NOT lock in gains the way a genuine trailing stop would.
   `use_trailing_stop`/`trailing_stop_pct` (opt-in, `false`/`None` default byte-identical to
-  before) now closes this gap: a Python-side daily high-water-mark ratchet, LIVE + BACKTEST,
-  deliberately not a broker-native IBKR `TRAIL` order (documented, considered choice, not an
-  oversight), see `docs/RISK_CONSTRAINTS.md`'s "Trailing Stop-Loss". Separately, Docker's
+  before) now closes this gap: a Python-side daily high-water-mark ratchet, LIVE + BACKTEST, see
+  `docs/RISK_CONSTRAINTS.md`'s "Trailing Stop-Loss". A broker-native IBKR `TRAIL` order also now
+  exists (`attach_broker_trailing_stop`, opt-in, LIVE-ONLY), see the "Broker-Native Trailing
+  Stop" bullet further down this list and `docs/RISK_CONSTRAINTS.md`'s section of the same name.
+  Separately, Docker's
   `RISK_MONITOR_CRON` applies one schedule to every portfolio in `RISK_MONITOR_PORTFOLIOS`, so a
   container mixing a short-term portfolio (recommended: check twice daily, 10:00 AM + 3:30 PM ET)
   with a long-term one (recommended: closing-bell only, 3:45 PM ET) can't express both schedules

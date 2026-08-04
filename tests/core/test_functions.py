@@ -2,12 +2,16 @@
 tests/core/test_functions.py
 
 Covers core/functions.py's get_bulk_prices() per-ticker vendor-fallback fix (Epic 6,
-"Stale-Price Reporting + Live Price-Vendor Priority" plan). No prior pytest coverage existed
-for this module at all (only exercised via notebooks before this), scoped to the fix only, not
-a retroactive audit of the rest of the module.
+"Stale-Price Reporting + Live Price-Vendor Priority" plan), and fetch_with_retry()'s
+retry-with-backoff + rate-limit pacing (Epic 10, "API Resilience for Price-Vendor Fetches"
+plan). No prior pytest coverage existed for this module at all before Epic 6 (only exercised via
+notebooks), scoped to these specific fixes, not a retroactive audit of the rest of the module.
 """
+import json
+
 import pandas as pd
 import pytest
+from urllib.error import HTTPError, URLError
 
 import momentum_trading.core.functions as fn
 
@@ -49,7 +53,8 @@ class TestGetBulkPricesVendorFallback:
         monkeypatch.setattr(fn, "get_stock_prices", fake_get_stock_prices)
 
         df = fn.get_bulk_prices(["A", "B"], "2024-01-01", "2024-01-10",
-                                 fmp_api_key="fmp-key", eodhd_api_key="eod-key")
+                                 fmp_api_key="fmp-key", eodhd_api_key="eod-key",
+                                 request_pacing_seconds=0)
 
         assert set(df.columns) == {"A", "B"}  # B must not be silently dropped
         assert not df["B"].isna().all()
@@ -66,7 +71,8 @@ class TestGetBulkPricesVendorFallback:
         monkeypatch.setattr(fn, "get_stock_prices", fake_get_stock_prices)
 
         df = fn.get_bulk_prices(["A", "B"], "2024-01-01", "2024-01-10",
-                                 fmp_api_key="fmp-key", eodhd_api_key="eod-key")
+                                 fmp_api_key="fmp-key", eodhd_api_key="eod-key",
+                                 request_pacing_seconds=0)
 
         assert set(df.columns) == {"A", "B"}
         # exactly one attempt per ticker (plus the one-off first-ticker vendor-detection probe)
@@ -87,7 +93,8 @@ class TestGetBulkPricesVendorFallback:
         monkeypatch.setattr(fn, "get_stock_prices", fake_get_stock_prices)
 
         df = fn.get_bulk_prices(["A", "B"], "2024-01-01", "2024-01-10",
-                                 source="FMP", fmp_api_key="fmp-key", eodhd_api_key="eod-key")
+                                 source="FMP", fmp_api_key="fmp-key", eodhd_api_key="eod-key",
+                                 request_pacing_seconds=0)
 
         assert set(df.columns) == {"A"}  # B dropped, no cascade for an explicit source
 
@@ -103,6 +110,210 @@ class TestGetBulkPricesVendorFallback:
         monkeypatch.setattr(fn, "get_stock_prices", fake_get_stock_prices)
 
         df = fn.get_bulk_prices(["A", "B"], "2024-01-01", "2024-01-10",
-                                 fmp_api_key="fmp-key", eodhd_api_key="eod-key")
+                                 fmp_api_key="fmp-key", eodhd_api_key="eod-key",
+                                 request_pacing_seconds=0)
 
         assert set(df.columns) == {"A"}  # B genuinely unavailable everywhere, correctly dropped
+
+
+class TestFetchWithRetry:
+    """
+    fetch_with_retry() (Epic 10, "API Resilience for Price-Vendor Fetches" plan): retries only
+    genuinely transient failures (HTTPError 429/5xx, URLError, OSError), not a bad API key/no
+    access (any other 4xx) or a genuine "no data" ValueError, since retrying those wastes time
+    on a failure a retry can't fix. backoff_seconds is passed tiny in every test below so the
+    suite stays fast, no need to monkeypatch time.sleep here (unlike the vendor-closure tests
+    below, which can't override fetch_with_retry()'s own hardcoded call args).
+    """
+
+    def test_retries_http_429_then_succeeds(self):
+        calls = []
+
+        def flaky():
+            calls.append(1)
+            if len(calls) < 3:
+                raise HTTPError("http://x", 429, "Too Many Requests", None, None)
+            return "ok"
+
+        assert fn.fetch_with_retry(flaky, max_attempts=3, backoff_seconds=0.001) == "ok"
+        assert len(calls) == 3
+
+    def test_retries_http_503_then_succeeds(self):
+        calls = []
+
+        def flaky():
+            calls.append(1)
+            if len(calls) < 2:
+                raise HTTPError("http://x", 503, "Service Unavailable", None, None)
+            return "ok"
+
+        assert fn.fetch_with_retry(flaky, max_attempts=3, backoff_seconds=0.001) == "ok"
+        assert len(calls) == 2
+
+    def test_retries_urlerror_then_succeeds(self):
+        calls = []
+
+        def flaky():
+            calls.append(1)
+            if len(calls) < 2:
+                raise URLError("connection reset")
+            return "ok"
+
+        assert fn.fetch_with_retry(flaky, max_attempts=3, backoff_seconds=0.001) == "ok"
+        assert len(calls) == 2
+
+    def test_retries_oserror_then_succeeds(self):
+        # Covers yfinance/requests-style network failures, which don't raise urllib exceptions
+        # at all (ConnectionError/TimeoutError are OSError subclasses in Python 3).
+        calls = []
+
+        def flaky():
+            calls.append(1)
+            if len(calls) < 2:
+                raise ConnectionError("connection refused")
+            return "ok"
+
+        assert fn.fetch_with_retry(flaky, max_attempts=3, backoff_seconds=0.001) == "ok"
+        assert len(calls) == 2
+
+    def test_does_not_retry_http_403(self):
+        calls = []
+
+        def always_fails():
+            calls.append(1)
+            raise HTTPError("http://x", 403, "Forbidden", None, None)
+
+        with pytest.raises(HTTPError):
+            fn.fetch_with_retry(always_fails, max_attempts=3, backoff_seconds=0.001)
+        assert len(calls) == 1
+
+    def test_does_not_retry_http_402(self):
+        calls = []
+
+        def always_fails():
+            calls.append(1)
+            raise HTTPError("http://x", 402, "Payment Required", None, None)
+
+        with pytest.raises(HTTPError):
+            fn.fetch_with_retry(always_fails, max_attempts=3, backoff_seconds=0.001)
+        assert len(calls) == 1
+
+    def test_does_not_retry_plain_value_error(self):
+        calls = []
+
+        def always_fails():
+            calls.append(1)
+            raise ValueError("No data returned")
+
+        with pytest.raises(ValueError):
+            fn.fetch_with_retry(always_fails, max_attempts=3, backoff_seconds=0.001)
+        assert len(calls) == 1
+
+    def test_reraises_last_exception_after_exhausting_attempts(self):
+        calls = []
+
+        def always_fails():
+            calls.append(1)
+            raise URLError("still down")
+
+        with pytest.raises(URLError):
+            fn.fetch_with_retry(always_fails, max_attempts=3, backoff_seconds=0.001)
+        assert len(calls) == 3
+
+
+class TestVendorClosuresUseRetry:
+    """
+    Confirms each of get_stock_prices()'s three vendor closures actually routes its network
+    call through fetch_with_retry() (Epic 10), not just that the helper exists unused elsewhere.
+    Monkeypatches time.sleep (not backoff_seconds, which these closures don't expose to a
+    caller) to keep the suite fast despite fetch_with_retry()'s hardcoded default backoff.
+    """
+
+    def test_fmp_closure_retries_transient_http_error(self, monkeypatch):
+        monkeypatch.setattr(fn.time, "sleep", lambda s: None)
+        calls = []
+
+        class FakeResponse:
+            def read(self):
+                return json.dumps([{"date": "2024-01-02", "close": 100.0, "adjClose": 100.0}]).encode()
+
+        def fake_urlopen(url, context=None):
+            calls.append(url)
+            if len(calls) < 3:
+                raise HTTPError(url, 503, "Service Unavailable", None, None)
+            return FakeResponse()
+
+        monkeypatch.setattr(fn, "urlopen", fake_urlopen)
+        df = fn.get_stock_prices("AAPL", "2024-01-01", "2024-01-10",
+                                  fmp_api_key="key", source="FMP")
+        assert not df.empty
+        assert len(calls) >= 3  # at least the 3 primary-OHLCV attempts before success
+
+    def test_eodhd_closure_retries_transient_http_error(self, monkeypatch):
+        monkeypatch.setattr(fn.time, "sleep", lambda s: None)
+        calls = []
+
+        class FakeResponse:
+            def read(self):
+                return json.dumps([{"date": "2024-01-02", "close": 100.0}]).encode()
+
+        def fake_urlopen(url, context=None):
+            calls.append(url)
+            if len(calls) < 2:
+                raise HTTPError(url, 429, "Too Many Requests", None, None)
+            return FakeResponse()
+
+        monkeypatch.setattr(fn, "urlopen", fake_urlopen)
+        df = fn.get_stock_prices("AAPL", "2024-01-01", "2024-01-10",
+                                  eodhd_api_key="key", source="EOD")
+        assert not df.empty
+        assert len(calls) == 2
+
+    def test_yf_closure_retries_transient_connection_error(self, monkeypatch):
+        monkeypatch.setattr(fn.time, "sleep", lambda s: None)
+        calls = []
+        real_df = pd.DataFrame({"Close": [100.0]}, index=pd.bdate_range("2024-01-02", periods=1))
+
+        def fake_download(*args, **kwargs):
+            calls.append(1)
+            if len(calls) < 2:
+                raise ConnectionError("connection refused")
+            return real_df
+
+        monkeypatch.setattr(fn.yf, "download", fake_download)
+        df = fn.get_stock_prices("AAPL", "2024-01-01", "2024-01-10", source="yf")
+        assert not df.empty
+        assert len(calls) == 2
+
+
+class TestGetBulkPricesPacing:
+    """
+    request_pacing_seconds (Epic 10): a small delay between successive per-ticker fetches in
+    get_bulk_prices()'s loop, to avoid tripping a vendor's rate limit on a larger portfolio (a
+    real portfolio in this project's own config.yaml has 58 tickers). Not applied before the
+    first request or during the earlier vendor-auto-detection probe.
+    """
+
+    def _fake_get_stock_prices(self, symbol, start_date, end_date, fmp_api_key=None,
+                                eodhd_api_key=None, source=None):
+        return _make_df("adjClose")
+
+    def test_sleeps_between_tickers_by_default(self, monkeypatch):
+        sleep_calls = []
+        monkeypatch.setattr(fn.time, "sleep", lambda s: sleep_calls.append(s))
+        monkeypatch.setattr(fn, "get_stock_prices", self._fake_get_stock_prices)
+
+        fn.get_bulk_prices(["A", "B", "C"], "2024-01-01", "2024-01-10", fmp_api_key="key")
+
+        # 3 tickers -> 2 inter-ticker sleeps (none before the first ticker in the loop).
+        assert sleep_calls == [0.25, 0.25]
+
+    def test_zero_pacing_is_a_no_op(self, monkeypatch):
+        sleep_calls = []
+        monkeypatch.setattr(fn.time, "sleep", lambda s: sleep_calls.append(s))
+        monkeypatch.setattr(fn, "get_stock_prices", self._fake_get_stock_prices)
+
+        fn.get_bulk_prices(["A", "B", "C"], "2024-01-01", "2024-01-10", fmp_api_key="key",
+                            request_pacing_seconds=0)
+
+        assert sleep_calls == []

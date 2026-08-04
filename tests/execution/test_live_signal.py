@@ -30,7 +30,7 @@ from momentum_trading.execution.live_signal import (
     compute_required_lookback_days, resolve_lookback_period_row_count,
     _realized_weighted_portfolio_vol, apply_absolute_momentum_filter,
     compute_stop_loss_price, log_signal_rankings, SIGNAL_RANKINGS_LOG_HEADER, OrdersResult,
-    resolve_ticker_stop_loss_pct,
+    resolve_ticker_stop_loss_pct, IBKR_INFORMATIONAL_CODES,
 )
 from momentum_trading.core.audit_log import read_recent_alerts
 
@@ -437,6 +437,26 @@ class TestComputeRequiredLookbackDays:
         days = compute_required_lookback_days(cfg, buffer_days=0)
         momentum_days = round(12) * 31
         assert days >= 2 * momentum_days
+
+    def test_momentum_crash_lookback_days_none_is_byte_identical(self):
+        # Epic 14: the default (None) must not change this function's return value at all.
+        cfg_off = BacktestConfig(lookback_period=12, holding_period=1, use_regime_filter=False)
+        cfg_default = BacktestConfig(lookback_period=12, holding_period=1, use_regime_filter=False,
+                                      momentum_crash_lookback_days=None)
+        assert compute_required_lookback_days(cfg_off) == compute_required_lookback_days(cfg_default)
+
+    def test_momentum_crash_lookback_days_widens_the_fetch(self):
+        # Real, confirmed gap found via Epic 14's own real-data crash-period verification:
+        # momentum_crash_lookback_days (e.g. 504, ~24 months) is far larger than every other
+        # candidate here, and without this, bench.pct_change(periods=504) is always NaN against
+        # any live fetch narrower than 504 days.
+        cfg_off = BacktestConfig(lookback_period=12, holding_period=1, use_regime_filter=True,
+                                  regime_benchmark="SPY", regime_vol_threshold=0.25)
+        cfg_on = BacktestConfig(lookback_period=12, holding_period=1, use_regime_filter=True,
+                                 regime_benchmark="SPY", regime_vol_threshold=0.25,
+                                 momentum_crash_lookback_days=504)
+        assert compute_required_lookback_days(cfg_on) > compute_required_lookback_days(cfg_off)
+        assert compute_required_lookback_days(cfg_on, buffer_days=0) >= 504
 
 
 class TestResolveLookbackPeriodRowCount:
@@ -3366,6 +3386,137 @@ class TestRegimeVolatilityDimension:
         assert read_recent_alerts(portfolio="p1", log_path=alerts_path) == []
 
 
+class TestMomentumCrashDynamicScaling:
+    """
+    momentum_crash_lookback_days/momentum_crash_derate (Epic 14, Daniel & Moskowitz 2016
+    "Momentum Crashes"): an EXTRA multiplicative derate on top of regime_scalar, only when the
+    benchmark is BOTH in a sustained decline over momentum_crash_lookback_days AND currently
+    volatile (regime_vol_threshold's high_vol, the SAME signal, reused not duplicated). None
+    (the default) must be byte-identical to before this field existed.
+    """
+
+    def _bearish_high_vol_prices(self, n=550, seed=31):
+        # Long-window DOWN trend with high day-to-day noise: both the long-window bear
+        # condition AND the short-window high-vol condition are true at the most recent date.
+        rng = np.random.default_rng(seed)
+        dates = pd.bdate_range("2022-01-01", periods=n)
+        bench = 100 * np.cumprod(1 + rng.normal(-0.003, 0.03, n))
+        a = 50 * np.cumprod(1 + rng.normal(0.0005, 0.001, n))
+        b = 30 * np.cumprod(1 + rng.normal(0.0005, 0.001, n))
+        return pd.DataFrame({"A": a, "B": b, "SPY": bench}, index=dates)
+
+    def _bearish_calm_prices(self, n=550, seed=32):
+        # Long-window decline, but LOW recent vol: bear_now=True, high_vol=False. Confirms the
+        # AND-condition, not just the bear half alone.
+        rng = np.random.default_rng(seed)
+        dates = pd.bdate_range("2022-01-01", periods=n)
+        bench = 100 * np.cumprod(1 + rng.normal(-0.003, 0.003, n))
+        a = 50 * np.cumprod(1 + rng.normal(0.0005, 0.001, n))
+        b = 30 * np.cumprod(1 + rng.normal(0.0005, 0.001, n))
+        return pd.DataFrame({"A": a, "B": b, "SPY": bench}, index=dates)
+
+    def _bullish_high_vol_prices(self, n=550, seed=21):
+        # Long-window UP trend but high recent vol: high_vol=True, bear_now=False. Confirms
+        # this is genuinely an AND, not reachable via the vol condition alone (which
+        # MARKET_VOLATILITY_REGIME_DEFENSIVE already covers independently).
+        rng = np.random.default_rng(seed)
+        dates = pd.bdate_range("2022-01-01", periods=n)
+        bench = 100 * np.cumprod(1 + rng.normal(0.003, 0.03, n))
+        a = 50 * np.cumprod(1 + rng.normal(0.0005, 0.001, n))
+        b = 30 * np.cumprod(1 + rng.normal(0.0005, 0.001, n))
+        return pd.DataFrame({"A": a, "B": b, "SPY": bench}, index=dates)
+
+    def test_none_default_is_byte_identical(self, tmp_path):
+        prices = self._bearish_high_vol_prices()
+        alerts_path = str(tmp_path / "alerts_log.csv")
+        cfg_without = BacktestConfig(use_regime_filter=True, regime_benchmark="SPY",
+                                      regime_sma_window=20, regime_vol_threshold=0.30,
+                                      regime_vol_lookback_days=21,
+                                      momentum_crash_lookback_days=None,
+                                      use_correlation_spike_regime=False,
+                                      min_gross_exposure=0.2, max_gross_exposure=1.0,
+                                      target_portfolio_vol=10.0)
+        _, exposure_without = compute_target_weights(["A", "B"], prices, cfg_without,
+                                                       portfolio="p1", alerts_log_path=alerts_path)
+        cfg_omitted = BacktestConfig(use_regime_filter=True, regime_benchmark="SPY",
+                                      regime_sma_window=20, regime_vol_threshold=0.30,
+                                      regime_vol_lookback_days=21,
+                                      use_correlation_spike_regime=False,
+                                      min_gross_exposure=0.2, max_gross_exposure=1.0,
+                                      target_portfolio_vol=10.0)
+        _, exposure_omitted = compute_target_weights(["A", "B"], prices, cfg_omitted,
+                                                       portfolio="p2", alerts_log_path=alerts_path)
+        assert exposure_without == pytest.approx(exposure_omitted)
+
+    def test_joint_bear_and_high_vol_applies_extra_derate(self, tmp_path):
+        prices = self._bearish_high_vol_prices()
+        alerts_path = str(tmp_path / "alerts_log.csv")
+        cfg_off = BacktestConfig(use_regime_filter=True, regime_benchmark="SPY",
+                                  regime_sma_window=20, regime_vol_threshold=0.30,
+                                  regime_vol_lookback_days=21,
+                                  use_correlation_spike_regime=False,
+                                  min_gross_exposure=0.2, max_gross_exposure=1.0,
+                                  target_portfolio_vol=10.0)
+        _, exposure_off = compute_target_weights(["A", "B"], prices, cfg_off,
+                                                   portfolio="p1", alerts_log_path=alerts_path)
+
+        cfg_on = BacktestConfig(use_regime_filter=True, regime_benchmark="SPY",
+                                 regime_sma_window=20, regime_vol_threshold=0.30,
+                                 regime_vol_lookback_days=21,
+                                 momentum_crash_lookback_days=400, momentum_crash_derate=0.3,
+                                 use_correlation_spike_regime=False,
+                                 min_gross_exposure=0.2, max_gross_exposure=1.0,
+                                 target_portfolio_vol=10.0)
+        _, exposure_on = compute_target_weights(["A", "B"], prices, cfg_on,
+                                                  portfolio="p2", alerts_log_path=alerts_path)
+
+        # Both hit the pre-existing min_gross_exposure floor via the OR condition (bearish SMA
+        # and/or high vol), the NEW mechanism must push exposure BELOW that shared floor.
+        assert exposure_on < exposure_off
+        assert exposure_on == pytest.approx(exposure_off * 0.3, rel=0.05)
+
+        rows = read_recent_alerts(portfolio="p2", log_path=alerts_path)
+        alert_types = [r["alert_type"] for r in rows]
+        assert "MOMENTUM_CRASH_PROTECTION_ACTIVE" in alert_types
+
+    def test_bear_alone_without_high_vol_does_not_trigger(self, tmp_path):
+        prices = self._bearish_calm_prices()
+        alerts_path = str(tmp_path / "alerts_log.csv")
+        cfg = BacktestConfig(use_regime_filter=True, regime_benchmark="SPY",
+                              regime_sma_window=20, regime_vol_threshold=0.30,
+                              regime_vol_lookback_days=21,
+                              momentum_crash_lookback_days=400, momentum_crash_derate=0.3,
+                              use_correlation_spike_regime=False,
+                              min_gross_exposure=0.2, max_gross_exposure=1.0,
+                              target_portfolio_vol=10.0)
+        _, gross_exposure = compute_target_weights(["A", "B"], prices, cfg,
+                                                     portfolio="p1", alerts_log_path=alerts_path)
+        assert gross_exposure == pytest.approx(cfg.min_gross_exposure, rel=0.05)
+        rows = read_recent_alerts(portfolio="p1", log_path=alerts_path)
+        alert_types = [r["alert_type"] for r in rows]
+        assert "MOMENTUM_CRASH_PROTECTION_ACTIVE" not in alert_types
+
+    def test_high_vol_alone_without_bear_does_not_trigger(self, tmp_path):
+        # High vol + BULLISH trend: MARKET_VOLATILITY_REGIME_DEFENSIVE fires (the pre-existing
+        # OR mechanism), but MOMENTUM_CRASH_PROTECTION_ACTIVE must not, confirming this is
+        # genuinely an AND condition, not reachable via elevated vol alone.
+        prices = self._bullish_high_vol_prices()
+        alerts_path = str(tmp_path / "alerts_log.csv")
+        cfg = BacktestConfig(use_regime_filter=True, regime_benchmark="SPY",
+                              regime_sma_window=20, regime_vol_threshold=0.30,
+                              regime_vol_lookback_days=21,
+                              momentum_crash_lookback_days=400, momentum_crash_derate=0.3,
+                              use_correlation_spike_regime=False,
+                              min_gross_exposure=0.2, max_gross_exposure=1.0,
+                              target_portfolio_vol=10.0)
+        _, gross_exposure = compute_target_weights(["A", "B"], prices, cfg,
+                                                     portfolio="p1", alerts_log_path=alerts_path)
+        rows = read_recent_alerts(portfolio="p1", log_path=alerts_path)
+        alert_types = [r["alert_type"] for r in rows]
+        assert "MARKET_VOLATILITY_REGIME_DEFENSIVE" in alert_types
+        assert "MOMENTUM_CRASH_PROTECTION_ACTIVE" not in alert_types
+
+
 class TestCorrelationSpikeScaling:
     """
     use_correlation_spike_regime's live-trading equivalent,
@@ -4298,6 +4449,19 @@ class TestCancelRestingStopBeforeSell:
                               attach_broker_trailing_stop=True, trailing_stop_pct=0.10)
 
         assert calls == [1]
+
+
+class TestIbkrCode2109IsInformational:
+    """
+    Epic 14 real paper-account regression test (2026-08-04): IBKR error 2109 ("Order Event
+    Warning: Attribute 'Outside Regular Trading Hours' is ignored based on the order type and
+    destination. PlaceOrder is now being processed.") fired for real orders that went on to
+    fill normally, confirmed via a real execDetails/commissionReport in that same run. A newly
+    observed code, not previously catalogued.
+    """
+
+    def test_2109_is_in_the_informational_set(self):
+        assert 2109 in IBKR_INFORMATIONAL_CODES
 
 
 class TestInformationalOrderErrorDoesNotCorruptStatus:

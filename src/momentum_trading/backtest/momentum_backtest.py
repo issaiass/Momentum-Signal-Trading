@@ -297,6 +297,34 @@ class BacktestConfig:
     regime_vol_threshold: float | None = None
     regime_vol_lookback_days: int = 21
 
+    # --- Momentum-crash-specific dynamic scaling (Epic 14, Daniel & Moskowitz 2016 "Momentum
+    #     Crashes"). Distinct from regime_vol_threshold above, which is an OR condition (either
+    #     the SMA trend is bearish OR vol is elevated, either alone floors regime_scalar to
+    #     min_gross_exposure). DM's actual empirical finding is narrower: momentum's real crash
+    #     risk is a market that has been in a SUSTAINED prior downturn AND is volatile AT THE
+    #     SAME TIME (past losers, excluded from a long-only momentum book, violently rebound
+    #     during exactly this joint regime). Since regime_vol_threshold's high_vol ALONE already
+    #     floors exposure today, an AND-condition that also requires high_vol and floors to the
+    #     SAME min_gross_exposure would add nothing (a design trap found and avoided while
+    #     planning this, confirmed by tracing the logic, not assumed). This is instead an
+    #     ADDITIONAL multiplicative derate stacked on TOP of regime_scalar * vol_scalar, able to
+    #     push exposure BELOW min_gross_exposure specifically during this one empirically-worse
+    #     joint regime, which nothing else in this codebase can do. None (default) = disabled,
+    #     byte-identical to before these fields existed. See
+    #     docs/RISK_CONSTRAINTS.md's "Momentum-Crash-Specific Dynamic Scaling" section.
+    momentum_crash_lookback_days: int | None = None  # e.g. 504 (~24 months), DM's own
+        # empirical choice, trading-day count for consistency with every sibling field on this
+        # page (regime_sma_window/regime_vol_lookback_days/portfolio_vol_lookback are all
+        # trading-day counts, not months). The bear-market window: benchmark's trailing return
+        # over this many trading days being negative is the "sustained prior downturn" half of
+        # the joint condition. Requires regime_vol_threshold to also be set (reuses that same
+        # elevated-volatility signal rather than a duplicate threshold field), validated.
+    momentum_crash_derate: float = 0.5  # required in (0, 1.0], only meaningful when
+        # momentum_crash_lookback_days is set. e.g. 0.5 = an EXTRA 50% cut to gross_exposure
+        # (multiplied on top of whatever regime_scalar * vol_scalar already computed) specifically
+        # when the benchmark is BOTH in a sustained decline over momentum_crash_lookback_days AND
+        # currently volatile (regime_vol_threshold exceeded).
+
     # --- execution realism ---
     base_slippage_bps: float = 2.0          # baseline slippage in basis points
     vol_slippage_multiplier: float = 0.5    # extra slippage scaled by annualized vol
@@ -702,6 +730,19 @@ class BacktestConfig:
             errors.append(f"regime_vol_threshold ({self.regime_vol_threshold}) must be > 0 or None")
         if self.regime_vol_lookback_days < 2:
             errors.append(f"regime_vol_lookback_days ({self.regime_vol_lookback_days}) must be >= 2")
+        if self.momentum_crash_lookback_days is not None:
+            if self.momentum_crash_lookback_days <= 0:
+                errors.append(
+                    f"momentum_crash_lookback_days ({self.momentum_crash_lookback_days}) must be > 0 or None"
+                )
+            if self.regime_vol_threshold is None:
+                errors.append(
+                    "momentum_crash_lookback_days is set but regime_vol_threshold is None; "
+                    "momentum-crash protection reuses regime_vol_threshold's elevated-volatility "
+                    "signal, set regime_vol_threshold too."
+                )
+        if not (0 < self.momentum_crash_derate <= 1.0):
+            errors.append(f"momentum_crash_derate ({self.momentum_crash_derate}) should be in (0, 1.0]")
 
         if errors:
             raise ValueError("Invalid BacktestConfig:\n  - " + "\n  - ".join(errors))
@@ -1298,11 +1339,23 @@ def run_risk_managed_backtest(
         )
         config.use_regime_filter = False
 
-    # Precompute regime signal (benchmark above its long SMA), on close prices
+    # Precompute regime signal (benchmark above its long SMA), on close prices. Sourced from
+    # close_full (the FULL pre-simulation-mask panel), not the already-window-masked `prices`,
+    # a real, confirmed gap found via Epic 14's own real-crash-period verification: `prices` only
+    # starts at sim_start_date - 1 day, so a long lookback (e.g. momentum_crash_lookback_days=504,
+    # ~24 months) could be entirely NaN even when the caller's own daily_prices panel has plenty
+    # more real history before that, the identical silent-NaN failure mode
+    # compute_required_lookback_days() exists to prevent for every other consumer. Purely
+    # additive: close_full and prices share the SAME values for every date prices.index actually
+    # covers (close_full has MORE preceding history, never less, never future/look-ahead data),
+    # so this is byte-identical whenever the caller already provided enough buffer (the common
+    # case) and only fixes the previously-silent shortfall otherwise. Every output below is
+    # `.reindex(prices.index)`, so only dates within the actual simulation window are ever
+    # looked up during the day-loop regardless of this wider source.
     regime_bullish = None
     regime_high_vol = None
     if config.use_regime_filter:
-        bench = prices[config.regime_benchmark]
+        bench = close_full[config.regime_benchmark]
         sma = bench.rolling(config.regime_sma_window, min_periods=config.regime_sma_window // 2).mean()
         regime_bullish = (bench >= sma).reindex(prices.index).fillna(False)
 
@@ -1317,6 +1370,16 @@ def run_risk_managed_backtest(
                 * np.sqrt(252)
             )
             regime_high_vol = (realized_bench_vol > config.regime_vol_threshold).reindex(prices.index).fillna(False)
+
+        # Momentum-crash-specific dynamic scaling (Epic 14, Daniel & Moskowitz 2016): the bear-
+        # market half of the joint condition, reuses regime_high_vol above for the vol half, no
+        # duplicate vol computation. A LONGER, slower-moving window than the SMA check above.
+        momentum_crash_bear = None
+        if config.momentum_crash_lookback_days is not None:
+            trailing_bench_return = bench.pct_change(periods=config.momentum_crash_lookback_days)
+            momentum_crash_bear = (trailing_bench_return < 0).reindex(prices.index).fillna(False)
+    else:
+        momentum_crash_bear = None
 
     trading_days = _trading_days(prices, config.exchange)
     rebalance_dates = _rebalance_dates(monthly_picks, trading_days)
@@ -1554,7 +1617,32 @@ def run_risk_managed_backtest(
                             config.min_gross_exposure, config.max_gross_exposure,
                         )
 
-                        gross_exposure = min(config.max_gross_exposure, regime_scalar * vol_scalar)
+                        # --- momentum-crash-specific dynamic scaling (Epic 14): an EXTRA
+                        #     multiplicative derate, stacked on TOP of regime_scalar * vol_scalar
+                        #     (not a floor-clamp like the mechanisms above), only when the
+                        #     benchmark is BOTH in a sustained decline over
+                        #     momentum_crash_lookback_days AND currently volatile
+                        #     (regime_high_vol, the SAME signal regime_vol_threshold computes).
+                        #     Can push exposure BELOW min_gross_exposure specifically for this
+                        #     one joint regime, which nothing above this can do. ---
+                        momentum_crash_scalar = 1.0
+                        if momentum_crash_bear is not None and regime_high_vol is not None:
+                            bear_now = bool(momentum_crash_bear.loc[today]) if today in momentum_crash_bear.index else False
+                            high_vol_now = bool(regime_high_vol.loc[today]) if today in regime_high_vol.index else False
+                            if bear_now and high_vol_now:
+                                momentum_crash_scalar = config.momentum_crash_derate
+                                log_file.write(
+                                    f"{today.strftime('%Y-%m-%d')} MOMENTUM CRASH PROTECTION: "
+                                    f"{config.regime_benchmark} down over trailing "
+                                    f"{config.momentum_crash_lookback_days}d AND realized vol "
+                                    f"elevated, extra derate to {config.momentum_crash_derate:.0%} "
+                                    f"of computed exposure\n"
+                                )
+
+                        gross_exposure = min(
+                            config.max_gross_exposure,
+                            regime_scalar * vol_scalar * momentum_crash_scalar,
+                        )
 
                         # --- position sizing: custom weights (if provided for this date) or
                         #     inverse-vol + optional correlation penalty, via the SAME resolver

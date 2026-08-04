@@ -823,6 +823,80 @@ SPY is above its 150D SMA, realized_vol=11.95% (threshold=0.10%) -> scalar=0.20`
 real order sizing, and real IBKR paper orders were placed at that throttled size (`BUY 5 EFA`,
 `BUY 7 EEM`), not the 100% exposure an SMA-only check would have allowed.
 
+## Momentum-Crash-Specific Dynamic Scaling [New, LIVE + BACKTEST, opt-in] [`momentum_crash_lookback_days`/`momentum_crash_derate`]
+
+Daniel & Moskowitz's 2016 paper "Momentum Crashes" identifies a narrower, more dangerous regime
+than "elevated volatility alone" (the section above): momentum's real crash risk is a market that
+has been in a **sustained prior downturn AND is volatile at the same time** (past losers,
+excluded from a long-only momentum book, violently rebound during exactly this joint regime, the
+worst case for a momentum strategy). The volatility-dimension regime filter above already floors
+exposure whenever `high_vol` is true, alone, regardless of the trend, so an AND-condition
+requiring the SAME `high_vol` flag and clamping to the SAME `min_gross_exposure` floor would add
+literally nothing, a real design trap found and avoided while building this (see `CLAUDE.md`'s
+`backtest/momentum_backtest.py` bullet for the full trace). Instead, this is an ADDITIONAL
+multiplicative derate stacked on top of `regime_scalar * vol_scalar`, able to push exposure
+BELOW `min_gross_exposure` specifically during this one empirically-worse joint regime, which
+nothing else in this codebase can do.
+
+```yaml
+risk_overrides:
+  regime_vol_threshold: 0.25              # required prerequisite, reused not duplicated
+  momentum_crash_lookback_days: 504       # ~24 months, Daniel & Moskowitz's own empirical choice
+  momentum_crash_derate: 0.5              # an EXTRA 50% cut on top of regime_scalar * vol_scalar
+```
+
+`None` (the default for `momentum_crash_lookback_days`) is byte-identical to before this existed.
+Requires `regime_vol_threshold` to also be set (validated at load time, fail loud): the vol half
+of the joint condition reuses that same signal rather than a duplicate threshold field.
+
+**Formula, identical in both live and backtest**:
+
+```
+bear_now     = benchmark's trailing return over momentum_crash_lookback_days is negative
+high_vol_now = regime_vol_threshold's own elevated-vol signal (same one, not duplicated)
+momentum_crash_scalar = momentum_crash_derate if (bear_now and high_vol_now) else 1.0
+gross_exposure = min(max_gross_exposure, regime_scalar * vol_scalar * momentum_crash_scalar)
+```
+
+**`MOMENTUM_CRASH_PROTECTION_ACTIVE`** (WARNING, `log_alert()` live / `log_file.write()` in the
+backtest) fires only when this joint condition specifically is active, distinct from
+`MARKET_VOLATILITY_REGIME_DEFENSIVE` (which can fire from `high_vol` alone, an unrelated cause).
+
+**Two real, confirmed gaps found and fixed while validating this against real 2008/2020/2022
+historical data**, not synthetic:
+1. `compute_required_lookback_days()` (`execution/live_signal.py`) didn't include
+   `momentum_crash_lookback_days` in its candidates, so a live fetch could be far too narrow
+   (e.g. the default 400 days against a 504-day lookback need), silently meaning this feature
+   could never fire live, the identical silent-NaN failure mode that function exists to prevent
+   for every other consumer. Fixed.
+2. A deeper, previously-latent issue in `run_risk_managed_backtest()`: the regime/vol precompute
+   (`regime_bullish`/`regime_high_vol`, and now `momentum_crash_bear`) sourced from the
+   already-simulation-window-masked price panel, not the caller's full `daily_prices`, so a long
+   lookback could be entirely `NaN` even with plenty more real history available. Fixed by
+   sourcing from the unmasked panel instead, purely additive (byte-identical whenever the caller
+   already provided enough buffer), also benefits the SMA/vol dimensions above, just less
+   visibly since their windows are smaller.
+
+**Real validation results** (`notebooks/research/crash_period_stress_test.ipynb`, 12 backtests,
+both a monthly and weekly regime, `momentum_crash_lookback_days=504`/`derate=0.5`/
+`regime_vol_threshold=0.25`, run 2026-08-04 after both fixes above): the condition fired 9 times
+(2008 GFC, monthly), 39 times (2008 GFC, weekly), 1 time (2020 COVID, monthly), and 2 times (2020
+COVID, weekly); zero times in the slower, non-crash-shaped 2022 decline. When it fired, it
+modestly improved max drawdown at a modest cost to total return, an honest, mixed result, not a
+clean win. This specific 3-way comparison also can't fully isolate the marginal effect of
+`momentum_crash_derate` alone (the "full + protection" variant necessarily also turns on
+`regime_vol_threshold` as a prerequisite, a confound the deterministic unit tests
+(`TestMomentumCrashDynamicScaling`, `tests/execution/test_live_signal.py`) don't have, those
+isolate the joint condition against an identical `regime_vol_threshold` baseline). See
+`README.md`'s Known Gaps for the full results table.
+
+**Real paper-account regression test** (2026-08-04, `portfolio2`, port 7497): confirmed
+end-to-end order generation/execution with these fields active, no crashes, orders correctly
+computed and submitted. Surfaced a new, previously-uncatalogued IBKR informational code (`2109`,
+"Outside Regular Trading Hours is ignored... PlaceOrder is now being processed"), confirmed
+non-fatal (an order carrying it filled normally with a real `execDetails`/`commissionReport` in
+that same run) and added to `IBKR_INFORMATIONAL_CODES`.
+
 ## Position Size Hard-Cap [Mandatory tier]
 
 `max_position_weight` (default `0.35`): a flat, single-name cap, identical for every ticker
@@ -1167,6 +1241,12 @@ auto_execute_stop_loss: false   # opt-in, see "Stop-Loss Width" above for why th
 | `use_absolute_momentum` | `false` | Same opt-in precedent as `skip_month_guardrail`, a real signal-construction change, not enabled by default here either |
 | `max_bid_ask_spread_pct` | `null` | Disabled by default, real-time market data is a real operational dependency (paid subscription), not something to silently assume is available |
 | `stop_loss_pct` | `0.18` | Wider fixed stop for the long-term regime, room to breathe through normal pullbacks, see "Stop-Loss Width" above for why this is not a true trailing stop |
+
+`momentum_crash_lookback_days`/`regime_vol_threshold` deliberately left at their `null`
+(disabled) defaults in both presets below: the real 2008/2020/2022 validation (see "Momentum-
+Crash-Specific Dynamic Scaling" above) showed a modest, honest, mixed result (better max
+drawdown, worse total return, when it fires), not a clean win to recommend by default the way
+the other fields on this page are. Enable it deliberately, not as a preset default.
 
 ### Short-Term Momentum (Weekly)
 

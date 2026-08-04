@@ -469,6 +469,76 @@ that tests enforce, don't casually violate these when editing:
   bullet below), same "live and backtest must not diverge" principle every other regime/vol
   mechanism here follows. See `docs/RISK_CONSTRAINTS.md`'s "Regime Filter: Volatility
   Dimension".
+  `momentum_crash_lookback_days: int | None = None` + `momentum_crash_derate: float = 0.5`
+  (Epic 14, Daniel & Moskowitz 2016 "Momentum Crashes") are a THIRD regime dimension, opt-in,
+  `None` byte-identical to before. A real design trap was found and avoided while planning this:
+  the first instinct was to reuse `min_gross_exposure` for a new bear-market-AND-high-vol
+  condition (matching how `use_correlation_spike_regime` already clamps to that same shared
+  floor), but tracing the logic confirmed this would be COMPLETELY REDUNDANT, since
+  `regime_vol_threshold`'s `high_vol` ALONE already floors `regime_scalar` to
+  `min_gross_exposure` today, an AND-condition requiring the SAME `high_vol` flag and clamping to
+  the SAME floor adds nothing. DM's actual finding is narrower and more dangerous than "high vol
+  alone": momentum crashes specifically when the market has been in a SUSTAINED prior downturn
+  AND is volatile AT THE SAME TIME (past losers, excluded from a long-only book, violently
+  rebound during exactly this joint regime). Implemented instead as an ADDITIONAL multiplicative
+  derate stacked ON TOP of `regime_scalar * vol_scalar`
+  (`gross_exposure = min(max_gross_exposure, regime_scalar * vol_scalar * momentum_crash_scalar)`,
+  `momentum_crash_scalar = momentum_crash_derate if (bear_now and high_vol_now) else 1.0`), able
+  to push exposure BELOW `min_gross_exposure` specifically during this one empirically-worse
+  joint regime, which nothing else here can do, the real, genuinely incremental protection.
+  Requires `regime_vol_threshold` to also be set (reuses that SAME elevated-vol signal rather
+  than a duplicate threshold field), validated in `__post_init__`, fail loud not silent, same
+  precedent as `use_liquidity_filter`'s missing-`daily_volume` `ValueError`.
+  `momentum_crash_bear` (`bench.pct_change(periods=momentum_crash_lookback_days) < 0`, the
+  bear-market half) is precomputed alongside `regime_bullish`/`regime_high_vol`, reusing
+  `regime_high_vol` for the vol half, no duplicate vol computation.
+  `execution/live_signal.py`'s `compute_target_weights()` gets the identical formula (single
+  most-recent-value computation, same `.iloc[-1]`/`.tail(...)` pattern `regime_vol_threshold`'s
+  own live code already uses), plus a new `MOMENTUM_CRASH_PROTECTION_ACTIVE` `WARNING` alert
+  (`log_alert()`), same triple-step pattern as `MARKET_VOLATILITY_REGIME_DEFENSIVE`, fired only
+  when THIS condition (not the pre-existing OR condition) is what's driving the extra derate.
+  Confirmed via 4 deterministic live-side unit tests (`TestMomentumCrashDynamicScaling`) that this
+  is genuinely an AND, not reachable via `high_vol` or the bear condition alone.
+  Two real, confirmed gaps were found and fixed while validating this against real 2008/2020/2022
+  historical data (`notebooks/research/crash_period_stress_test.ipynb`, Epic 13's cached proxy
+  universe), not synthetic: (1) `compute_required_lookback_days()` (`execution/live_signal.py`)
+  did not include `momentum_crash_lookback_days` in its candidates, despite its own docstring's
+  "covers every real consumer of `daily_prices`" promise; `momentum_crash_lookback_days` (e.g.
+  504, ~24 months) is far larger than every other candidate there, so without this,
+  `bench.pct_change(periods=504).iloc[-1]` would be ALWAYS `NaN` against `fetch_live_prices()`'s
+  own 400-day default, silently meaning this feature could never fire in real live trading, the
+  identical silent-NaN failure mode that function exists to prevent for every other consumer.
+  Fixed: added to the candidates list. (2) A deeper, previously-latent issue in
+  `run_risk_managed_backtest()` itself: `regime_bullish`/`regime_high_vol`/`momentum_crash_bear`
+  were all computed from `prices` (the ALREADY-simulation-window-masked panel, starting only at
+  `sim_start_date - 1 day`), not from `close_full` (the caller's full, pre-mask `daily_prices`),
+  so a long lookback could be entirely `NaN` even when the caller's own panel had plenty more
+  real history before that. Fixed: `bench` now sources from `close_full`, every output still
+  `.reindex(prices.index)` so only in-window dates are ever looked up during the day-loop.
+  Purely additive: byte-identical whenever the caller already provided enough buffer (the common
+  case, confirmed by the full pre-existing suite passing unchanged), only fixes the previously-
+  silent shortfall otherwise; benefits `regime_sma_window`/`regime_vol_threshold` too, not just
+  this new field, though their smaller windows made the gap far less visible before now.
+  A third, separate methodology bug was found in the crash-period notebook itself (not `src/`):
+  it was passing an already-window-truncated price panel (crash-period start to end only) to
+  `run_custom_backtest()`, discarding the 2005+ history a 504-day lookback needs even after fix
+  (2) above, since the notebook's OWN truncation happened before the function ever saw the data.
+  Fixed: the notebook now bounds the price panel only at the window's END, not its START (picks
+  stay window-bound, governing `sim_start_date` exactly as before).
+  **Real validation results** (12 backtests, 2008/2020/2022, both regimes, `momentum_crash_
+  lookback_days=504`/`derate=0.5`/`regime_vol_threshold=0.25`, run 2026-08-04, after both fixes):
+  the condition fired 9/39/1/2 times across the four 2008-GFC/2020-COVID monthly/weekly
+  scenarios (0 times in 2022's slower, non-crash-shaped decline), and when it fired, modestly
+  IMPROVED max drawdown at a modest cost to total return, honest and mixed, not a clean win the
+  way Epic 13's baseline-vs-full comparison was; this specific 3-way notebook comparison also
+  can't fully isolate the marginal effect in isolation (the `full + momentum_crash_protection`
+  variant necessarily also turns on `regime_vol_threshold` as a prerequisite, a confound the
+  deterministic unit tests don't have). See `README.md`'s Known Gaps entry for the full table.
+  A real, previously-uncatalogued IBKR informational code (`2109`, "Order Event Warning:
+  Attribute 'Outside Regular Trading Hours' is ignored... PlaceOrder is now being processed")
+  surfaced during this epic's real paper-account regression test (2026-08-04) and was added to
+  `IBKR_INFORMATIONAL_CODES`, confirmed non-fatal (orders carrying it filled normally with a real
+  `execDetails`/`commissionReport` in that same run).
   `run_risk_managed_backtest()`'s rebalance-trigger condition (Epic 2, "Redefining Stop-Loss
   Price, Plus Two Remaining Known Gaps" plan) closes the backtest/live parity gap documented
   above and in `docs/RISK_CONSTRAINTS.md`'s "Whole-Book Negative Momentum Cash Filter": was `if

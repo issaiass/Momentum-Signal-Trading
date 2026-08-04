@@ -199,7 +199,7 @@ README says so on purpose.
   effective config changes between runs, see `docs/DEPLOYMENT.md`'s "What needs what" section
   for the complete restart-vs-nothing matrix (`config.yaml`/`.env`/Dockerfile changes each need a
   different action, or none at all)
-- 919-test pytest suite covering code mechanics, order sizing, config validation, audit-log
+- 935-test pytest suite covering code mechanics, order sizing, config validation, audit-log
   integrity, multi-portfolio capital math, entirely on synthetic/mocked data, no live broker
   required to run it
 
@@ -349,7 +349,7 @@ momentum-trading/
 │       └── email_diagnostics.py     backs `daily-runner --test-email`, live SMTP+IMAP
 │                                     check independent of config.yaml
 │
-└── tests/                         pytest suite (919 tests), mirrors src/ layout where a
+└── tests/                         pytest suite (935 tests), mirrors src/ layout where a
     ├── conftest.py                  test's primary subject is a single sub-package;
     ├── test_architecture.py         cross-cutting/integration tests stay at tests/ root
     ├── test_daily_runner.py
@@ -392,7 +392,7 @@ not been answered at all yet**:
 |---|---|
 | Does the code have circuit breakers, idempotency, alerting, audit logging? | ✅ Yes, tested |
 | Has the strategy shown a positive out-of-sample (holdout) return on real data? | ❌ Never run on real data |
-| Has it been validated against real 2008/2020/2022 history? | ⚠️ The risk-control *mechanism* has, using a long-history ETF proxy universe (see Known Gaps below), not the exact currently-configured portfolios (most of their tickers didn't exist in 2008). Real result: the risk-managed variant beat a naive-momentum baseline on max drawdown in all 6 head-to-head runs (both a monthly and weekly cadence, across 2008/2020/2022), most dramatically in 2008 (weekly regime: -5.5% vs. -26.0% max drawdown), at a real cost to upside capture during 2020's fast V-shaped recovery. |
+| Has it been validated against real 2008/2020/2022 history? | ⚠️ The risk-control *mechanism* has, using a long-history ETF proxy universe (see Known Gaps below), not the exact currently-configured portfolios (most of their tickers didn't exist in 2008). Real result: the risk-managed variant beat a naive-momentum baseline on max drawdown in all 6 head-to-head runs (both a monthly and weekly cadence, across 2008/2020/2022), most dramatically in 2008 (weekly regime: -11.5% vs. -26.0% max drawdown), at a real cost to upside capture during 2020's fast V-shaped recovery, and was actually worse than baseline on both metrics for 2022's monthly regime specifically, an honest, mixed result, not a uniform win. |
 | Has it connected to a real broker even once? | ✅ Yes, paper (port 7497) connection, account summary, position fetch, and **confirmed real BUY and SELL order fills** (verified directly in TWS's own execution log across two portfolios, real prices, matching quantities). Getting here surfaced and fixed three real bugs (every order silently rejected while the run logged success; a misleadingly-short fill-confirmation poll window; an informational per-order notice mistaken for a rejection, causing an already-filled order to be logged as failed) and one hard IBKR platform limitation worked around (no fractional equity orders via API, ever, floored to whole shares). The live/real-money port (7496) is still unexercised |
 | Has real live-vs-backtest divergence been measured? | ⚠️ Attempted for real (2026-08-03) against all three real portfolios' actual `dry_run=False` trade history; the notebook's methodology bugs are fixed and verified (real config load, `dry_run=False` filtering, `strategy_type`-aware signal reproduction, `custom_weights` sizing parity), and real Live P&L was computed successfully for all three. The head-to-head Backtest number itself is still blocked, not by a code defect but by real trading history simply being too young: `_build_report()`'s monthly-return diffing needs at least two completed calendar-month buckets to produce a non-NaN return, and the real history (~1-2 weeks old as of this writing, entirely inside one still-open month) can't supply that yet. See the Known Gaps entry below and `notebooks/operational/live_vs_backtest_reconciliation.ipynb`; rerun once real trading has spanned at least one full month-end. |
 
@@ -704,33 +704,61 @@ answer whether the strategy actually works.
   neutralized. This validates the risk-control *mechanism*, not a claim about what the exact
   current portfolios would have returned in 2008.
 
-  **Real results** (12 backtests: 2 regimes x 2 variants x 3 crash periods, run 2026-08-04): the
-  risk-managed ("full") variant beat the baseline on max drawdown in **all 6** regime/period
-  combinations:
+  **Real results** (18 backtests: 2 regimes x 3 variants x 3 crash periods, run 2026-08-04).
+  **Superseded once, honestly**: the numbers below replace an earlier version of this table,
+  corrected after Epic 14's own real-data verification found and fixed two real bugs in
+  `run_risk_managed_backtest()` (the regime/vol precompute was silently starved of history in
+  short-window tests, see the `momentum_crash_lookback_days` bullet below) that also changed the
+  "full" variant's own numbers, not just the new third variant's, confirmed by rerunning this
+  exact comparison before and after the fix. Publishing corrected numbers rather than leaving the
+  original ones stand, per this project's own documentation standards.
 
-  | Period | Regime | Full max DD | Baseline max DD | Full return | Baseline return | SPY buy-hold |
-  |---|---|---|---|---|---|---|
-  | 2008 GFC | monthly | -1.7% | -10.0% | +0.4% | -3.5% | -37.9% |
-  | 2008 GFC | weekly | -5.5% | **-26.0%** | -3.5% | -14.8% | -37.9% |
-  | 2020 COVID | monthly | -5.3% | -6.4% | +12.9% | +18.3% | +17.2% |
-  | 2020 COVID | weekly | -9.2% | -9.5% | +7.1% | +14.8% | +17.2% |
-  | 2022 Bear | monthly | -3.7% | -12.0% | -3.4% | -3.1% | -18.7% |
-  | 2022 Bear | weekly | -6.0% | -10.7% | -4.1% | -4.1% | -18.7% |
+  | Period | Regime | Baseline max DD | Full max DD | Full+MC max DD | Baseline return | Full return | Full+MC return | SPY buy-hold |
+  |---|---|---|---|---|---|---|---|---|
+  | 2008 GFC | monthly | -10.0% | -1.7% | -1.6% | -3.6% | -2.1% | -3.0% | -37.9% |
+  | 2008 GFC | weekly | **-26.0%** | -11.5% | -10.1% | -14.8% | -10.9% | -11.2% | -37.9% |
+  | 2020 COVID | monthly | -6.4% | -5.3% | -5.3% | +18.3% | +12.2% | +11.1% | +17.2% |
+  | 2020 COVID | weekly | -9.5% | -9.2% | -9.2% | +14.8% | +7.6% | +7.2% | +17.2% |
+  | 2022 Bear | monthly | -12.0% | -10.0% | -9.5% | -3.1% | -11.7% | -10.0% | -18.7% |
+  | 2022 Bear | weekly | -10.7% | -7.6% | -7.6% | -4.1% | -5.5% | -7.2% | -18.7% |
 
-  Honest reading, not oversold: in the 2008 GFC and 2022 Bear (both a slower, grinding decline),
-  the risk-managed variant cut max drawdown by roughly half to nearly 5x, at comparable or
-  *better* total return, a genuinely clean win. In 2020 COVID (a fast, V-shaped crash-then-
-  recovery), the risk-managed variant's max drawdown was only marginally better (or about the
-  same), while its total return was materially *lower* than the baseline's, a real, honest cost:
-  the same defensive de-risking that helps in a slow bear market reduces exposure reactively and
-  misses part of a sharp V-shaped rebound. The circuit breaker (`max_portfolio_drawdown_pct:
-  0.20`) never tripped in any of the 12 runs, not a bug, the regime filter + volatility targeting
-  combination alone kept every real-crash drawdown well inside that threshold, so the circuit
-  breaker functioned correctly as an untriggered last-resort backstop rather than the primary
-  defense. Recovery-time comparison (`core/functions_quant_extensions.py`'s new
-  `compute_drawdown_episodes()`, added for this epic) was mostly inconclusive within these short
+  ("Full+MC" = `full` plus `momentum_crash_lookback_days=504`/`derate=0.5`, Epic 14, see that
+  bullet below; also turns on `regime_vol_threshold=0.25` as a prerequisite, so this specific
+  3-way table can't fully isolate momentum-crash-protection's own marginal effect in isolation,
+  see that bullet's own deterministic unit tests for the clean, isolated proof.)
+
+  Honest reading, not oversold: `full` beats `baseline` on max drawdown in all 6 regime/period
+  combinations, most dramatically in 2008 (weekly: -11.5% vs. -26.0%). But it's not a clean win
+  across the board the way the drawdown numbers alone suggest: in 2020 COVID (fast, V-shaped
+  recovery), `full`'s total return is materially *lower* than baseline's for both regimes, the
+  same defensive de-risking that helps in a slow bear market misses part of a sharp rebound. In
+  **2022 Bear's monthly regime specifically**, `full` is now WORSE than baseline on BOTH
+  drawdown and return (-10.0%/-11.7% vs. -12.0%/-3.1%), a real, honest result that only emerged
+  after the bugfix above, not something to paper over. The circuit breaker
+  (`max_portfolio_drawdown_pct: 0.20`) never tripped in any run, not a bug, the regime filter +
+  volatility targeting combination alone kept every real-crash drawdown well inside that
+  threshold. Recovery-time comparison (`core/functions_quant_extensions.py`'s new
+  `compute_drawdown_episodes()`, added for Epic 13) was mostly inconclusive within these short
   (9-21 month) windows, most episodes hadn't fully recovered to a new high before the window
   ended, not enough data points to draw a real recovery-time conclusion yet.
+
+- **Momentum-crash-specific dynamic scaling, Epic 14 (Daniel & Moskowitz 2016 "Momentum
+  Crashes")**: `momentum_crash_lookback_days`/`momentum_crash_derate`, an ADDITIONAL
+  multiplicative derate stacked on top of the existing regime/vol scalars, specifically for the
+  joint "sustained prior downturn AND currently volatile" regime DM identify as momentum's real
+  crash risk, distinct from (and not redundant with, a design trap found and avoided while
+  planning this) the existing `regime_vol_threshold`'s OR-based high-vol check. See
+  `docs/RISK_CONSTRAINTS.md`'s "Momentum-Crash-Specific Dynamic Scaling" for the full mechanism,
+  the two real gaps found and fixed while validating it against real historical data
+  (`compute_required_lookback_days()` didn't cover this field's own long lookback need; the
+  backtest engine's regime/vol precompute silently used the already-window-masked price panel
+  instead of the caller's full history), and a real paper-account regression test (2026-08-04,
+  `portfolio2`, port 7497) confirming correct order generation with these fields active, which
+  also surfaced a new, previously-uncatalogued IBKR informational code (`2109`) now added to
+  `IBKR_INFORMATIONAL_CODES`. Real validation result: fired 9/39/1/2 times across the four
+  2008/2020 monthly/weekly scenarios (0 times in 2022's slower decline), modestly improving max
+  drawdown at a modest cost to return when it fired, an honest, mixed result, not a clean win,
+  left disabled by default in both `docs/RISK_CONSTRAINTS.md` presets for that reason.
 
 ### Who should allocate capital here
 

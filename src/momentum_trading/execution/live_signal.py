@@ -104,7 +104,15 @@ IBKR_HOST = os.environ.get("IBKR_HOST", "127.0.0.1")
 # (reqId), so place_orders_ibkr()'s error() callback below must not let it overwrite that
 # order's tracked status to "ERROR: ...", doing so falsely marks a still-pending (or already
 # filled) order as terminally failed and makes the poll loop stop watching it too early.
-IBKR_INFORMATIONAL_CODES = {2104, 2106, 2107, 2108, 2119, 2137, 2158, 10349}
+# 2109 is the same per-order-notice pattern, confirmed via a real paper account run (Epic 14
+# regression test, 2026-08-04): "Order Event Warning: Attribute 'Outside Regular Trading Hours'
+# is ignored based on the order type and destination. PlaceOrder is now being processed." fires
+# whenever allow_extended_hours submits an order outside RTH to an order type/destination that
+# doesn't actually need the outsideRth flag honored, IBKR processes the order normally regardless
+# (the message says so explicitly: "is now being processed"), confirmed by the SELL orders
+# carrying this exact code filling seconds later with a real execDetails/commissionReport in
+# that same run.
+IBKR_INFORMATIONAL_CODES = {2104, 2106, 2107, 2108, 2109, 2119, 2137, 2158, 10349}
 
 
 def _log_ibkr_message(reqId: int, errorCode: int, errorString: str) -> None:
@@ -350,6 +358,18 @@ def compute_required_lookback_days(cfg: BacktestConfig, buffer_days: int = 60) -
         candidates.append(cfg.correlation_lookback_days)
     if cfg.use_correlation_spike_regime:
         candidates.append(cfg.correlation_spike_baseline_window)
+    # Momentum-crash-specific dynamic scaling (Epic 14): a real, confirmed gap found while
+    # validating this feature against real historical data, not synthetic. momentum_crash_
+    # lookback_days (e.g. 504, ~24 months) is far larger than every other candidate here
+    # (regime_sma_window/vol_lookback_days/portfolio_vol_lookback are all well under 200), and
+    # was NOT previously covered by this function despite its own docstring's "covers every
+    # real consumer of daily_prices" promise, confirmed by direct reproduction: without this,
+    # bench.pct_change(periods=504).iloc[-1] is ALWAYS NaN against fetch_live_prices()'s own
+    # 400-day default (or any live fetch narrower than 504 days), so momentum_crash_lookback_
+    # days would silently NEVER fire in live trading, the identical silent-NaN failure mode
+    # this function exists to prevent for every other consumer.
+    if cfg.momentum_crash_lookback_days is not None:
+        candidates.append(cfg.momentum_crash_lookback_days)
     # Rank Delta (opt-in, cfg.use_rank_delta, Epic 7 "Rank Delta (Momentum Rank Trend) Column"
     # plan): comparing today's rank to the rank lookback_period ago needs that OLDER row to
     # itself have a valid (non-NaN) score, which needs its OWN full lookback_period of history
@@ -657,6 +677,7 @@ def compute_target_weights(
                                       momentum_scores=momentum_scores)
 
     regime_scalar = 1.0
+    momentum_crash_scalar = 1.0
     if cfg.use_regime_filter and cfg.regime_benchmark in daily_prices.columns:
         bench = daily_prices[cfg.regime_benchmark]
         sma = bench.rolling(cfg.regime_sma_window, min_periods=cfg.regime_sma_window // 2).mean()
@@ -695,6 +716,31 @@ def compute_target_weights(
                       f"threshold {cfg.regime_vol_threshold:.2%}; reducing exposure to "
                       f"{cfg.min_gross_exposure:.0%}", log_path=alerts_log_path)
 
+        # --- Momentum-crash-specific dynamic scaling (Epic 14, Daniel & Moskowitz 2016
+        #     "Momentum Crashes"), live-trading equivalent of run_risk_managed_backtest()'s
+        #     identical formula. An EXTRA multiplicative derate stacked on TOP of regime_scalar
+        #     (not a floor-clamp like the mechanisms above), only when the benchmark is BOTH in
+        #     a sustained decline over momentum_crash_lookback_days AND currently volatile
+        #     (high_vol, the SAME signal computed above). Can push exposure BELOW
+        #     min_gross_exposure specifically for this one joint regime. ---
+        if cfg.momentum_crash_lookback_days is not None:
+            trailing_bench_return = bench.pct_change(periods=cfg.momentum_crash_lookback_days).iloc[-1]
+            bear_now = bool(pd.notna(trailing_bench_return) and trailing_bench_return < 0)
+            if bear_now and high_vol:
+                momentum_crash_scalar = cfg.momentum_crash_derate
+                logger.warning(
+                    "MOMENTUM CRASH PROTECTION: %s down over trailing %dd AND realized vol "
+                    "elevated, extra derate to %.0f%% of computed exposure",
+                    cfg.regime_benchmark, cfg.momentum_crash_lookback_days,
+                    cfg.momentum_crash_derate * 100,
+                )
+                log_alert(portfolio, "MOMENTUM_CRASH_PROTECTION_ACTIVE", "WARNING",
+                          f"{cfg.regime_benchmark} down {trailing_bench_return:.2%} over trailing "
+                          f"{cfg.momentum_crash_lookback_days}d AND realized vol "
+                          f"{realized_bench_vol:.2%} exceeds threshold {cfg.regime_vol_threshold:.2%}; "
+                          f"extra derate to {cfg.momentum_crash_derate:.0%} of computed exposure",
+                          log_path=alerts_log_path)
+
     # --- Correlation-spike defensive scaling, live-trading
     #     equivalent of the backtest's use_correlation_spike_regime (same placement,
     #     same defensive action, momentum_backtest.py's run_risk_managed_backtest). ---
@@ -723,7 +769,7 @@ def compute_target_weights(
                 f"{realized_vol:.2%}" if realized_vol is not None else "n/a",
                 cfg.target_portfolio_vol, vol_scalar)
 
-    gross_exposure = min(cfg.max_gross_exposure, regime_scalar * vol_scalar)
+    gross_exposure = min(cfg.max_gross_exposure, regime_scalar * vol_scalar * momentum_crash_scalar)
     return weights, gross_exposure
 
 

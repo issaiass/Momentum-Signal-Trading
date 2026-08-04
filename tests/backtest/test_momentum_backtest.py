@@ -273,6 +273,37 @@ class TestBacktestConfigValidation:
         with pytest.raises(ValueError, match="regime_vol_lookback_days"):
             BacktestConfig(regime_vol_lookback_days=1)
 
+    def test_momentum_crash_lookback_days_defaults_none(self):
+        # None preserves pre-existing behavior exactly, opt-in (Epic 14).
+        assert BacktestConfig().momentum_crash_lookback_days is None
+
+    def test_momentum_crash_derate_defaults_half(self):
+        assert BacktestConfig().momentum_crash_derate == 0.5
+
+    def test_momentum_crash_lookback_days_zero_or_negative_raises(self):
+        with pytest.raises(ValueError, match="momentum_crash_lookback_days"):
+            BacktestConfig(momentum_crash_lookback_days=0, regime_vol_threshold=0.25)
+        with pytest.raises(ValueError, match="momentum_crash_lookback_days"):
+            BacktestConfig(momentum_crash_lookback_days=-10, regime_vol_threshold=0.25)
+
+    def test_momentum_crash_derate_outside_range_raises(self):
+        with pytest.raises(ValueError, match="momentum_crash_derate"):
+            BacktestConfig(momentum_crash_derate=0.0)
+        with pytest.raises(ValueError, match="momentum_crash_derate"):
+            BacktestConfig(momentum_crash_derate=1.5)
+
+    def test_momentum_crash_lookback_days_requires_regime_vol_threshold(self):
+        # Reuses regime_vol_threshold's own elevated-vol signal rather than a duplicate
+        # threshold field, so setting one without the other is a real, fail-loud
+        # misconfiguration, not a silent no-op.
+        with pytest.raises(ValueError, match="regime_vol_threshold"):
+            BacktestConfig(momentum_crash_lookback_days=504)
+
+    def test_momentum_crash_lookback_days_with_regime_vol_threshold_is_accepted(self):
+        cfg = BacktestConfig(momentum_crash_lookback_days=504, regime_vol_threshold=0.25)
+        assert cfg.momentum_crash_lookback_days == 504
+        assert cfg.momentum_crash_derate == 0.5
+
     def test_run_custom_backtest_rejects_invalid_override(self, synthetic_monthly_picks, synthetic_daily_prices):
         # The run_custom_backtest() wrapper builds a BacktestConfig internally
         # from **kwargs, this confirms validation actually fires through that
@@ -1117,6 +1148,72 @@ class TestCrashProtection:
                                                 initial_capital=1000.0, use_regime_filter=True,
                                                 regime_benchmark="SPY")
         pd.testing.assert_frame_equal(df_default, df_explicit_none)
+
+    def test_momentum_crash_protection_run_succeeds(self, synthetic_monthly_picks, synthetic_daily_prices):
+        # Integration smoke test: confirms momentum_crash_lookback_days/momentum_crash_derate
+        # (Epic 14) wire into the actual rebalance loop without crashing.
+        df = run_custom_backtest(synthetic_monthly_picks, synthetic_daily_prices,
+                                  initial_capital=1000.0, use_regime_filter=True,
+                                  regime_benchmark="SPY", regime_vol_threshold=0.001,
+                                  regime_vol_lookback_days=21,
+                                  momentum_crash_lookback_days=100, momentum_crash_derate=0.5)
+        assert not df.empty
+
+    def test_momentum_crash_lookback_days_none_matches_prior_behavior(self, synthetic_monthly_picks, synthetic_daily_prices):
+        # Byte-identical-behavior regression: momentum_crash_lookback_days=None (the default)
+        # must produce the exact same equity curve as a run that never mentions the field.
+        df_without = run_custom_backtest(synthetic_monthly_picks, synthetic_daily_prices,
+                                          initial_capital=1000.0, use_regime_filter=True,
+                                          regime_benchmark="SPY", regime_vol_threshold=0.001,
+                                          regime_vol_lookback_days=21)
+        df_explicit_none = run_custom_backtest(synthetic_monthly_picks, synthetic_daily_prices,
+                                                initial_capital=1000.0, use_regime_filter=True,
+                                                regime_benchmark="SPY", regime_vol_threshold=0.001,
+                                                regime_vol_lookback_days=21,
+                                                momentum_crash_lookback_days=None)
+        pd.testing.assert_frame_equal(df_without, df_explicit_none)
+
+    def test_momentum_crash_protection_fires_only_in_the_joint_bear_high_vol_regime(self, tmp_path):
+        # Custom panel (not the generic fixture): SPY declines steadily for ~435 trading days
+        # (a real sustained bear market over the momentum_crash_lookback_days=400 window), then
+        # the final 45 days are ALSO much more volatile (triggers regime_vol_threshold's
+        # high_vol signal too), the specific joint regime Daniel & Moskowitz (2016) identify.
+        # Confirms the log fires ONLY when momentum_crash_lookback_days is set, not otherwise,
+        # against the IDENTICAL price panel and regime_vol_threshold (so the only difference
+        # between the two runs is this one field).
+        np.random.seed(11)
+        dates = pd.bdate_range("2018-01-01", periods=480)
+        n = len(dates)
+        tail = 45
+        calm_bear = np.random.normal(-0.001, 0.005, n - tail)
+        volatile_tail = np.random.normal(-0.001, 0.04, tail)
+        spy = 100 * np.cumprod(1 + np.concatenate([calm_bear, volatile_tail]))
+        other = 100 * np.cumprod(1 + np.random.normal(0.0005, 0.01, n))
+        prices = pd.DataFrame({"SPY": spy, "QQQ": other}, index=dates)
+
+        month_ends = prices.resample("ME").last().index
+        picks = pd.Series({d: ["QQQ"] for d in month_ends if d >= dates[60]})
+
+        log_with = str(tmp_path / "with.txt")
+        run_custom_backtest(
+            picks, prices, initial_capital=1000.0, use_regime_filter=True,
+            regime_benchmark="SPY", regime_sma_window=20,
+            regime_vol_threshold=0.20, regime_vol_lookback_days=21,
+            momentum_crash_lookback_days=400, momentum_crash_derate=0.3,
+            log_file_path=log_with,
+        )
+        with open(log_with) as f:
+            assert "MOMENTUM CRASH PROTECTION" in f.read()
+
+        log_without = str(tmp_path / "without.txt")
+        run_custom_backtest(
+            picks, prices, initial_capital=1000.0, use_regime_filter=True,
+            regime_benchmark="SPY", regime_sma_window=20,
+            regime_vol_threshold=0.20, regime_vol_lookback_days=21,
+            log_file_path=log_without,
+        )
+        with open(log_without) as f:
+            assert "MOMENTUM CRASH PROTECTION" not in f.read()
 
     def test_liquidity_stress_multiplier_validates(self):
         # The multiplier scales slippage UP under stress; a value <1.0 would

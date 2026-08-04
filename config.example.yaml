@@ -235,6 +235,29 @@ default_risk:
                                    # Dimension".
   regime_vol_lookback_days: 21    # trailing trading days for the volatility dimension above
                                    # (~1 month), only meaningful when regime_vol_threshold is set
+  momentum_crash_lookback_days: null  # the "Momentum-Crash-Specific Dynamic Scaling" constraint
+                                   # (Epic 14, Daniel & Moskowitz 2016 "Momentum Crashes"). null
+                                   # (default) = disabled, byte-identical to before this field
+                                   # existed. Distinct from regime_vol_threshold above (an OR
+                                   # condition, either a bearish SMA trend OR elevated vol alone
+                                   # already floors exposure to min_gross_exposure): this is an
+                                   # AND condition, the benchmark's trailing return over THIS
+                                   # many trading days being negative (e.g. 504 =~ 24 months,
+                                   # DM's own empirical choice) AND regime_vol_threshold's
+                                   # elevated-vol signal both true at once, the specific joint
+                                   # regime DM found momentum crashes hardest in (past losers,
+                                   # excluded from a long-only book, violently rebounding).
+                                   # Requires regime_vol_threshold to also be set (reuses that
+                                   # same vol signal), validated at load time. See
+                                   # docs/RISK_CONSTRAINTS.md's "Momentum-Crash-Specific Dynamic
+                                   # Scaling".
+  momentum_crash_derate: 0.5      # required in (0, 1.0], only meaningful when
+                                   # momentum_crash_lookback_days is set. An EXTRA multiplicative
+                                   # cut to gross_exposure on top of whatever regime_scalar *
+                                   # vol_scalar already computed, e.g. 0.5 = an additional 50% cut
+                                   # during the joint bear+high-vol regime above. Can push
+                                   # exposure BELOW min_gross_exposure specifically for this one
+                                   # regime, which nothing else in this codebase does.
   target_portfolio_vol: 0.15      # the "Volatility Scaling" constraint (Mandatory tier,
                                    # docs/RISK_CONSTRAINTS.md): annualized vol target for the
                                    # WHOLE book, distinct from position_vol_budget below (which

@@ -1136,3 +1136,63 @@ class TestCrashProtection:
                                    initial_capital=1000.0, liquidity_stress_reduce_only=True,
                                    liquidity_stress_vol_ratio=1.5)
         assert not df2.empty
+
+
+class TestFirstRebalanceDateCollision:
+    """
+    Epic 11, "Fix First-Rebalance-Date Collision" plan: a real, confirmed, previously-flagged bug
+    (see CLAUDE.md's backtest/momentum_backtest.py bullet). sim_start_date (the first trading day
+    at/after the first signal's next calendar month) could collide with prices.index[0] when the
+    caller's own daily_prices panel doesn't extend before it (a short/synthetic monthly_picks
+    series), and the day-loop's old `prices.index[1:]` slice would then silently skip the very
+    first rebalance entirely, months_held never advances, no position ever opens. Deliberately
+    does NOT use the "December warm-up" padding pattern other tests in this file use specifically
+    to AVOID this collision (see TestBacktestTrailingStop's own docstring), this class exists to
+    reproduce it directly.
+    """
+
+    def _cfg(self, log_path):
+        return BacktestConfig(holding_period=1, use_regime_filter=False, commission=0.0,
+                               base_slippage_bps=0.0, min_trade_size=0.0, drift_threshold=0.0,
+                               max_position_weight=1.0, initial_capital=1000.0,
+                               log_file_path=str(log_path))
+
+    def test_first_rebalance_fires_when_no_buffer_day_exists(self, tmp_path):
+        # Price history starts EXACTLY on the computed sim_start_date (2024-02-01, the first
+        # trading day at/after the first signal's next month), with ZERO days before it,
+        # deliberately reproducing the collision: no real T-1 buffer day is available at all, so
+        # prices.index[0] == sim_start_date.
+        dates = pd.bdate_range("2024-02-01", periods=40)
+        rng = np.random.default_rng(1)
+        a = 50 * np.cumprod(1 + rng.normal(0.001, 0.01, len(dates)))
+        prices = pd.DataFrame({"A": a}, index=dates)
+        monthly_picks = pd.Series([["A"]], index=[pd.Timestamp("2024-01-15")])
+
+        log_path = tmp_path / "trades_log.txt"
+        df = run_risk_managed_backtest(monthly_picks, prices, self._cfg(log_path))
+
+        log_text = log_path.read_text()
+        # Before this fix: prices.index[1:] silently skipped 2024-02-01 (prices.index[0] itself),
+        # no BUY was ever logged, the backtest held 100% uninvested cash the entire run.
+        assert "BUY:" in log_text
+        assert "A" in log_text
+        assert not df.empty
+
+    def test_first_rebalance_still_fires_when_a_real_buffer_day_exists(self, tmp_path):
+        # The common, unaffected case: ample price history before the first signal (matching
+        # every pre-existing test's own shape in this file), confirms this fix didn't disturb it,
+        # a real buffer day exists so prices.index[0] is genuinely a pre-simulation reference day,
+        # not the rebalance date itself.
+        dates = pd.bdate_range("2023-11-01", periods=90)
+        rng = np.random.default_rng(2)
+        a = 50 * np.cumprod(1 + rng.normal(0.001, 0.01, len(dates)))
+        prices = pd.DataFrame({"A": a}, index=dates)
+        monthly_picks = pd.Series([["A"]], index=[pd.Timestamp("2024-01-15")])
+
+        log_path = tmp_path / "trades_log.txt"
+        df = run_risk_managed_backtest(monthly_picks, prices, self._cfg(log_path))
+
+        log_text = log_path.read_text()
+        assert "BUY:" in log_text
+        assert "A" in log_text
+        assert not df.empty

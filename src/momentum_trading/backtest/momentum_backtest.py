@@ -1352,7 +1352,21 @@ def run_risk_managed_backtest(
             f"stop_loss={config.stop_loss_pct}, regime_filter={config.use_regime_filter}\n\n"
         )
 
-        for today in prices.index[1:]:
+        # Epic 11, "Fix First-Rebalance-Date Collision" plan: deliberately NOT prices.index[1:].
+        # prices.index[0] is meant to be a pre-simulation "T-1" buffer day (the mask above reaches
+        # one calendar day before sim_start_date), but when the caller's own daily_prices panel
+        # doesn't extend far enough back (a short/synthetic monthly_picks series whose first
+        # signal collides with the earliest available price data), prices.index[0] collapses to
+        # sim_start_date itself, and skipping it would silently skip the very first rebalance
+        # entirely (a real, confirmed bug, previously worked around in tests rather than fixed).
+        # Processing prices.index[0] is always safe: in the common case (a real buffer day exists)
+        # it is never itself a computed rebalance date, so every block below is a no-op for it
+        # except the unconditional end-of-day valuation, which appends a harmless EXACT duplicate
+        # of the pre-loop portfolio_history seed above (same date, same initial_capital value);
+        # _build_report()'s own `daily[~daily.index.duplicated(keep="last")]` (confirmed by
+        # reading it) already collapses that duplicate, so this is byte-identical output for
+        # every real multi-year backtest and every pre-existing test fixture.
+        for today in prices.index:
             today_prices = prices.loc[today]        # close, for valuation/signals
             today_exec = exec_prices.loc[today]      # open, for fills
 

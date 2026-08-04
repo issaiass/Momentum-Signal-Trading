@@ -460,17 +460,33 @@ that tests enforce, don't casually violate these when editing:
   still overrides both branches identically (unchanged): a halted portfolio is neither
   rebalanced nor force-liquidated, matching live's own circuit-breaker semantics ("halt NEW
   rebalancing," not "force an exit"). A genuine, pre-existing, unrelated quirk was found and
-  worked around (not fixed, out of this epic's scope) while building this epic's regression
-  tests: the very FIRST signal date in ANY `monthly_picks` series can have its computed
-  rebalance date collide with `run_risk_managed_backtest()`'s own simulation-window start date
-  (`sim_start_date`, itself derived from that same first signal date), which the day-loop's `for
-  today in prices.index[1:]:` then silently excludes, so the FIRST rebalance in a short/synthetic
-  `monthly_picks` series can silently never fire, depending on exact calendar alignment (confirmed
-  directly: reproducible with `pd.bdate_range` fixtures, whether it triggers depends on where
-  weekends/`NYSE` holidays fall relative to that first signal's month boundary). Real, multi-year
-  `monthly_picks` series used elsewhere in this project's own tests/notebooks never surface this
-  (losing only the very first of many rebalances doesn't visibly break anything), which is
-  presumably why it was never caught before. Not fixed here, flagged for a future look.
+  worked around (not fixed, out of that epic's scope at the time) while building that epic's
+  regression tests: the very FIRST signal date in ANY `monthly_picks` series could have its
+  computed rebalance date collide with `run_risk_managed_backtest()`'s own simulation-window
+  start date (`sim_start_date`, itself derived from that same first signal date), which the
+  day-loop's old `for today in prices.index[1:]:` then silently excluded, so the FIRST rebalance
+  in a short/synthetic `monthly_picks` series could silently never fire, depending on exact
+  calendar alignment (confirmed directly: reproducible with `pd.bdate_range` fixtures, whether it
+  triggered depended on where weekends/`NYSE` holidays fell relative to that first signal's month
+  boundary). Real, multi-year `monthly_picks` series used elsewhere in this project's own
+  tests/notebooks never surfaced this (losing only the very first of many rebalances doesn't
+  visibly break anything), which is presumably why it was never caught before this. **Fixed**
+  (Epic 11, "Fix First-Rebalance-Date Collision" plan): the day-loop now iterates the FULL
+  `prices.index` (the `[1:]` slice is gone). `prices.index[0]` is meant to be a pre-simulation
+  "T-1" buffer day (the price-panel mask keeps one calendar day before `sim_start_date`), correct
+  when a real trading day exists there; when it doesn't (the collision case), `prices.index[0]`
+  collapses to `sim_start_date` itself, and the old slice skipped it. Processing it unconditionally
+  is safe in BOTH cases: in the common case it's never itself a computed rebalance date, so the
+  day-loop's own blocks are no-ops for it except the unconditional end-of-day valuation, which
+  appends an exact duplicate of the pre-loop `portfolio_history` seed (same date, same
+  `initial_capital`); `_build_report()`'s own `daily[~daily.index.duplicated(keep="last")]`
+  (confirmed by reading it, unchanged) already collapses that duplicate, so this is byte-identical
+  output for every real multi-year backtest and every pre-existing test fixture. In the collision
+  case, the rebalance block now correctly fires on `sim_start_date`, a real position opens, and the
+  loop's own valuation overwrites the seed's placeholder value via that same dedup. See
+  `tests/backtest/test_momentum_backtest.py`'s `TestFirstRebalanceDateCollision` (deliberately
+  does NOT use the "December warm-up" padding pattern other tests in that file use specifically to
+  avoid this collision, reproduces it directly instead).
   `use_trailing_stop: bool = False` + `trailing_stop_pct: float | None = None` (Epic 1,
   "Institutional Momentum Best-Practice Gaps" plan, opt-in, `False` byte-identical to before)
   back the "Trailing Stop-Loss" constraint: distinct from `stop_loss_pct` (fixed from entry,

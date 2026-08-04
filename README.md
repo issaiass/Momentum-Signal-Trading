@@ -199,7 +199,7 @@ README says so on purpose.
   effective config changes between runs, see `docs/DEPLOYMENT.md`'s "What needs what" section
   for the complete restart-vs-nothing matrix (`config.yaml`/`.env`/Dockerfile changes each need a
   different action, or none at all)
-- 912-test pytest suite covering code mechanics, order sizing, config validation, audit-log
+- 914-test pytest suite covering code mechanics, order sizing, config validation, audit-log
   integrity, multi-portfolio capital math, entirely on synthetic/mocked data, no live broker
   required to run it
 
@@ -346,7 +346,7 @@ momentum-trading/
 │       └── email_diagnostics.py     backs `daily-runner --test-email`, live SMTP+IMAP
 │                                     check independent of config.yaml
 │
-└── tests/                         pytest suite (912 tests), mirrors src/ layout where a
+└── tests/                         pytest suite (914 tests), mirrors src/ layout where a
     ├── conftest.py                  test's primary subject is a single sub-package;
     ├── test_architecture.py         cross-cutting/integration tests stay at tests/ root
     ├── test_daily_runner.py
@@ -564,15 +564,19 @@ answer whether the strategy actually works.
   correctly liquidates to cash in this case. Fixed: an empty `target_tickers` now flows through
   the exact same sell/buy pipeline as any other rebalance. See `docs/RISK_CONSTRAINTS.md`'s
   "Whole-Book Negative Momentum Cash Filter".
-- **A separate, minor, unfixed quirk found while building the fix above**: the very FIRST signal
-  date in any `monthly_picks` series can have its computed rebalance date collide with
-  `run_risk_managed_backtest()`'s own simulation-window start date, which the day-loop then
-  silently excludes, so the first rebalance in a short/synthetic `monthly_picks` series can
-  silently never fire, depending on exact calendar alignment (confirmed reproducible, depends on
-  weekend/NYSE-holiday placement relative to that first signal's month boundary). Real,
-  multi-year `monthly_picks` series (this project's own actual usage) never surface this, losing
-  only the very first of many rebalances doesn't visibly affect a long backtest. Not fixed,
-  flagged for a future look, see `CLAUDE.md`'s `backtest/momentum_backtest.py` bullet.
+- **A separate, minor quirk found while building the fix above, now also fixed (Epic 11, "Fix
+  First-Rebalance-Date Collision" plan)**: the very FIRST signal date in any `monthly_picks`
+  series could have its computed rebalance date collide with `run_risk_managed_backtest()`'s own
+  simulation-window start date, which the day-loop then silently excluded, so the first rebalance
+  in a short/synthetic `monthly_picks` series could silently never fire, depending on exact
+  calendar alignment (confirmed reproducible, depended on weekend/NYSE-holiday placement relative
+  to that first signal's month boundary). Real, multi-year `monthly_picks` series (this project's
+  own actual usage) never surfaced this, losing only the very first of many rebalances doesn't
+  visibly affect a long backtest, which is presumably why it went uncaught for a while. Fixed by
+  widening the day-loop to process every day in the simulation window (previously skipped the
+  first one unconditionally); confirmed safe for the common case via `_build_report()`'s
+  pre-existing exact-duplicate-date dedup. See `CLAUDE.md`'s `backtest/momentum_backtest.py`
+  bullet for the full mechanism.
 - **A real, confirmed crash in the daily/monthly report's window-comparison stats, now fixed**:
   `notifications.send_daily` had never been turned on against real accumulated deployment
   history before (confirmed, first time this session), crashing with `TypeError: float()

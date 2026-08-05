@@ -304,6 +304,32 @@ class TestBacktestConfigValidation:
         assert cfg.momentum_crash_lookback_days == 504
         assert cfg.momentum_crash_derate == 0.5
 
+    def test_var_cvar_budget_requires_var_budget_pct(self):
+        # Epic 1, Story 1.4: enabled_risk_strategies naming var_cvar_budget without a
+        # var_budget_pct set would silently be an inert no-op (cvar scalar always falls back to
+        # max_gross_exposure), fail loud instead, same precedent as momentum_crash's own
+        # cross-field requirement above.
+        with pytest.raises(ValueError, match="var_budget_pct"):
+            BacktestConfig(enabled_risk_strategies=["var_cvar_budget"])
+
+    def test_var_cvar_budget_with_var_budget_pct_is_accepted(self):
+        cfg = BacktestConfig(enabled_risk_strategies=["var_cvar_budget"], var_budget_pct=0.05)
+        assert cfg.var_budget_pct == 0.05
+        assert cfg.var_cvar_confidence == 0.95
+        assert cfg.var_cvar_lookback_days == 252
+
+    def test_invalid_var_budget_pct_raises(self):
+        with pytest.raises(ValueError, match="var_budget_pct"):
+            BacktestConfig(var_budget_pct=1.5)
+
+    def test_invalid_var_cvar_confidence_raises(self):
+        with pytest.raises(ValueError, match="var_cvar_confidence"):
+            BacktestConfig(var_cvar_confidence=1.5)
+
+    def test_invalid_var_cvar_lookback_days_raises(self):
+        with pytest.raises(ValueError, match="var_cvar_lookback_days"):
+            BacktestConfig(var_cvar_lookback_days=1)
+
     def test_run_custom_backtest_rejects_invalid_override(self, synthetic_monthly_picks, synthetic_daily_prices):
         # The run_custom_backtest() wrapper builds a BacktestConfig internally
         # from **kwargs, this confirms validation actually fires through that
@@ -312,6 +338,50 @@ class TestBacktestConfigValidation:
         # which silently BYPASSED __post_init__ validation entirely).
         with pytest.raises(ValueError):
             run_custom_backtest(synthetic_monthly_picks, synthetic_daily_prices, stop_loss_pct=2.0)
+
+
+class TestEnabledRiskStrategiesRegistry:
+    """
+    Epic 1, Story 1.1: enabled_risk_strategies is a second, deliberately separate enabling
+    mechanism alongside this file's many existing use_X: bool fields, only for genuinely
+    stackable new overlay strategies (see RISK_STRATEGY_ALIASES's own module-level docstring
+    for why). These tests guard the registry/validation plumbing itself, not any one overlay's
+    actual behavior (each overlay's own Story adds its own dedicated tests).
+    """
+
+    def test_default_is_empty_list_and_valid(self):
+        cfg = BacktestConfig()
+        assert cfg.enabled_risk_strategies == []  # byte-identical default
+
+    def test_known_canonical_name_is_accepted(self):
+        # var_cvar_budget also requires var_budget_pct (Story 1.4's own cross-field
+        # validation), set here purely to isolate THIS test's claim (the name itself is
+        # recognized) from that separate requirement, which has its own dedicated tests.
+        BacktestConfig(enabled_risk_strategies=["var_cvar_budget"], var_budget_pct=0.05)  # should not raise
+        BacktestConfig(enabled_risk_strategies=["liquidity_adjusted_sizing"])  # should not raise
+
+    def test_known_alias_is_accepted(self):
+        # var_budget is a documented alias of var_cvar_budget, not just the canonical name.
+        BacktestConfig(enabled_risk_strategies=["var_budget"], var_budget_pct=0.05)  # should not raise
+
+    def test_unrecognized_name_raises(self):
+        with pytest.raises(ValueError, match="enabled_risk_strategies"):
+            BacktestConfig(enabled_risk_strategies=["not_a_real_strategy"])
+
+    def test_non_list_raises(self):
+        with pytest.raises(ValueError, match="enabled_risk_strategies"):
+            BacktestConfig(enabled_risk_strategies="var_cvar_budget")
+
+    def test_risk_strategy_enabled_helper(self):
+        from momentum_trading.backtest.momentum_backtest import risk_strategy_enabled
+
+        cfg_on = BacktestConfig(enabled_risk_strategies=["var_cvar_budget"], var_budget_pct=0.05)
+        cfg_alias_on = BacktestConfig(enabled_risk_strategies=["var_budget"], var_budget_pct=0.05)
+        cfg_off = BacktestConfig()
+        assert risk_strategy_enabled(cfg_on, "var_cvar_budget") is True
+        assert risk_strategy_enabled(cfg_alias_on, "var_cvar_budget") is True
+        assert risk_strategy_enabled(cfg_off, "var_cvar_budget") is False
+        assert risk_strategy_enabled(cfg_off, "liquidity_adjusted_sizing") is False
 
 
 class TestBacktestRuns:
@@ -329,6 +399,44 @@ class TestBacktestRuns:
     def test_default_run_produces_output(self, synthetic_monthly_picks, synthetic_daily_prices):
         df = run_custom_backtest(synthetic_monthly_picks, synthetic_daily_prices,
                                   holding_period=1, commission=0, initial_capital=1000.0)
+        assert not df.empty
+        assert "tearsheet" in df.attrs
+
+    def test_equal_risk_contribution_sizing_runs_end_to_end(self, synthetic_monthly_picks, synthetic_daily_prices):
+        # Epic 1, Story 1.3: confirms the full day-loop (run_custom_backtest ->
+        # run_risk_managed_backtest -> resolve_target_weights -> _equal_risk_contribution_weights
+        # -> shrinkage_covariance) doesn't crash across a real multi-rebalance run, not just a
+        # single resolve_target_weights() call in isolation.
+        df = run_custom_backtest(synthetic_monthly_picks, synthetic_daily_prices,
+                                  holding_period=1, commission=0, initial_capital=1000.0,
+                                  sizing_method="equal_risk_contribution")
+        assert not df.empty
+        assert "tearsheet" in df.attrs
+
+    def test_liquidity_adjusted_sizing_without_daily_volume_raises(
+        self, synthetic_monthly_picks, synthetic_daily_prices,
+    ):
+        # Epic 1, Story 1.5: same "opt-in extra data the caller must supply, fail loud if
+        # missing" precedent use_liquidity_filter's own daily_volume requirement already
+        # establishes, rather than silently skipping the requested constraint.
+        with pytest.raises(ValueError, match="daily_volume"):
+            run_custom_backtest(synthetic_monthly_picks, synthetic_daily_prices,
+                                 holding_period=1, commission=0, initial_capital=1000.0,
+                                 enabled_risk_strategies=["liquidity_adjusted_sizing"],
+                                 max_pct_of_adv=0.05)
+
+    def test_liquidity_adjusted_sizing_runs_end_to_end_with_daily_volume(
+        self, synthetic_monthly_picks, synthetic_daily_prices,
+    ):
+        rng = np.random.default_rng(11)
+        daily_volume = pd.DataFrame(
+            rng.integers(1000, 5000, size=synthetic_daily_prices.shape),  # deliberately thin
+            index=synthetic_daily_prices.index, columns=synthetic_daily_prices.columns,
+        )
+        df = run_custom_backtest(synthetic_monthly_picks, synthetic_daily_prices,
+                                  holding_period=1, commission=0, initial_capital=1000.0,
+                                  enabled_risk_strategies=["liquidity_adjusted_sizing"],
+                                  max_pct_of_adv=0.05, daily_volume=daily_volume)
         assert not df.empty
         assert "tearsheet" in df.attrs
 
@@ -709,6 +817,49 @@ class TestResolveTargetWeights:
         assert w_on["C"] > w_off["C"]
         assert w_on["A"] < w_off["A"]
 
+    def test_shrinkage_covariance_off_is_byte_identical_to_pre_epic1_behavior(self):
+        # Epic 1, Story 1.2: use_shrinkage_covariance=False (the default) must be bit-identical
+        # to this function's behavior before the field existed, since every pre-existing test
+        # above (including the one right above this) constructs BacktestConfig without it.
+        np.random.seed(1)
+        dates = pd.bdate_range("2018-01-01", "2018-12-31")
+        base = np.cumprod(1 + np.random.normal(0.001, 0.015, len(dates))) * 100
+        prices = pd.DataFrame({
+            "A": base * (1 + np.random.normal(0, 0.001, len(dates))),
+            "B": base * (1 + np.random.normal(0, 0.001, len(dates))),
+            "C": np.cumprod(1 + np.random.normal(0.001, 0.015, len(dates))) * 100,
+        }, index=dates)
+        cfg_explicit_off = BacktestConfig(
+            max_position_weight=0.9, use_correlation_penalty=True,
+            correlation_penalty_strength=0.8, use_shrinkage_covariance=False,
+        )
+        cfg_default = BacktestConfig(
+            max_position_weight=0.9, use_correlation_penalty=True, correlation_penalty_strength=0.8,
+        )
+        w_explicit_off = resolve_target_weights(["A", "B", "C"], prices, dates[-1], cfg_explicit_off)
+        w_default = resolve_target_weights(["A", "B", "C"], prices, dates[-1], cfg_default)
+        assert w_explicit_off == w_default
+
+    def test_shrinkage_covariance_on_still_downweights_correlated_pair(self):
+        # The shrinkage-covariance path must still deliver the correlation penalty's own core
+        # claim (correlated assets downweighted relative to an independent one), it changes HOW
+        # the correlation matrix is estimated, not WHAT the penalty does with it.
+        np.random.seed(1)
+        dates = pd.bdate_range("2018-01-01", "2018-12-31")
+        base = np.cumprod(1 + np.random.normal(0.001, 0.015, len(dates))) * 100
+        prices = pd.DataFrame({
+            "A": base * (1 + np.random.normal(0, 0.001, len(dates))),
+            "B": base * (1 + np.random.normal(0, 0.001, len(dates))),
+            "C": np.cumprod(1 + np.random.normal(0.001, 0.015, len(dates))) * 100,
+        }, index=dates)
+        cfg_shrunk = BacktestConfig(
+            max_position_weight=0.9, use_correlation_penalty=True,
+            correlation_penalty_strength=0.8, use_shrinkage_covariance=True,
+        )
+        w_shrunk = resolve_target_weights(["A", "B", "C"], prices, dates[-1], cfg_shrunk)
+        assert w_shrunk["C"] > w_shrunk["A"]
+        assert w_shrunk["C"] > w_shrunk["B"]
+
     def test_custom_weights_with_no_matching_tickers_raises(self, synthetic_daily_prices):
         # Guards against a silent no-op: if custom_weights references tickers
         # that aren't in the actual picks list (e.g. a stale config after the
@@ -812,6 +963,58 @@ class TestResolveTargetWeights:
         weights = resolve_target_weights(["SPY", "QQQ"], synthetic_daily_prices, as_of, cfg)
         assert weights["SPY"] <= 0.35 + 1e-6
         assert weights["QQQ"] <= 0.35 + 1e-6
+
+    def test_equal_risk_contribution_is_accepted_sizing_method(self):
+        BacktestConfig(sizing_method="equal_risk_contribution")  # should not raise
+
+    def test_equal_risk_contribution_equalizes_risk_not_dollars(self):
+        # Epic 1, Story 1.3, the actual numeric claim ERC exists to deliver: build a low-vol and
+        # a high-vol, UNCORRELATED ticker, ERC must give the high-vol one a SMALLER dollar
+        # weight than the low-vol one (opposite of equal_weight's identical 1/N), and the two
+        # resulting RISK contributions (weight * volatility, uncorrelated so no cross term) must
+        # end up approximately equal, not the dollar weights themselves.
+        np.random.seed(3)
+        dates = pd.bdate_range("2023-01-01", "2024-12-31")
+        low_vol = np.cumprod(1 + np.random.normal(0.0002, 0.005, len(dates))) * 100
+        high_vol = np.cumprod(1 + np.random.normal(0.0002, 0.03, len(dates))) * 100
+        prices = pd.DataFrame({"LOW": low_vol, "HIGH": high_vol}, index=dates)
+
+        cfg = BacktestConfig(sizing_method="equal_risk_contribution", max_position_weight=0.95)
+        weights = resolve_target_weights(["LOW", "HIGH"], prices, dates[-1], cfg)
+
+        assert weights["LOW"] > weights["HIGH"]  # the low-vol ticker gets MORE dollar weight
+
+        window = prices.loc[:dates[-1]].iloc[-(cfg.vol_lookback_days + 1):]
+        rets = window[["LOW", "HIGH"]].pct_change().dropna(how="all")
+        vol_low = rets["LOW"].std()
+        vol_high = rets["HIGH"].std()
+        risk_low = weights["LOW"] * vol_low
+        risk_high = weights["HIGH"] * vol_high
+        # approximately equal risk contribution (uncorrelated assets, so this is a clean check),
+        # a generous tolerance since this is an iterative numerical solve, not a closed form
+        assert risk_low == pytest.approx(risk_high, rel=0.15)
+
+    def test_equal_risk_contribution_falls_back_to_inverse_vol_with_one_pick(self, synthetic_daily_prices):
+        # Degenerate case: fewer than 2 valid tickers can't be risk-solved, falls back to
+        # inverse_vol (which for a single ticker is just weight=1.0), same graceful-fallback
+        # precedent every other sizing method's own edge case already establishes.
+        cfg = BacktestConfig(sizing_method="equal_risk_contribution", max_position_weight=1.0)
+        as_of = synthetic_daily_prices.index[-1]
+        weights = resolve_target_weights(["SPY"], synthetic_daily_prices, as_of, cfg)
+        assert weights["SPY"] == pytest.approx(1.0, abs=1e-6)
+
+    def test_equal_risk_contribution_still_subject_to_position_caps(self, synthetic_daily_prices):
+        cfg = BacktestConfig(sizing_method="equal_risk_contribution", max_position_weight=0.35)
+        as_of = synthetic_daily_prices.index[-1]
+        weights = resolve_target_weights(["SPY", "QQQ"], synthetic_daily_prices, as_of, cfg)
+        assert weights["SPY"] <= 0.35 + 1e-6
+        assert weights["QQQ"] <= 0.35 + 1e-6
+
+    def test_equal_risk_contribution_weights_sum_to_one(self, synthetic_daily_prices):
+        cfg = BacktestConfig(sizing_method="equal_risk_contribution", max_position_weight=0.99)
+        as_of = synthetic_daily_prices.index[-1]
+        weights = resolve_target_weights(["SPY", "QQQ", "XLK"], synthetic_daily_prices, as_of, cfg)
+        assert sum(weights.values()) == pytest.approx(1.0, abs=1e-6)
 
     def test_volatility_budget_caps_high_vol_position_more_than_low_vol(self):
         # The "Volatility-Adjustment" (Scaling) constraint: two tickers start at an equal
@@ -1065,6 +1268,77 @@ class TestComputeVolScalar:
                                   initial_capital=1000.0, target_portfolio_vol=0.15,
                                   portfolio_vol_lookback=21, random_seed=42)
         assert not df.empty
+
+
+class TestComputeVarCvarScalar:
+    """
+    compute_var_cvar_scalar() (Epic 1, "Institutional Risk-Management Features" plan, Story
+    1.4), an exact mirror of compute_vol_scalar()'s shape/tests above, a new multiplicative
+    gross-exposure scalar composed alongside vol_scalar/momentum_crash_scalar.
+    """
+
+    def test_scales_down_when_cvar_exceeds_budget(self):
+        from momentum_trading.backtest.momentum_backtest import compute_var_cvar_scalar
+        # budget 5% loss, realized CVaR 10% loss -> scalar = 0.05/0.10 = 0.5
+        scalar = compute_var_cvar_scalar(cvar_pct=0.10, var_budget_pct=0.05,
+                                          min_gross_exposure=0.20, max_gross_exposure=1.0)
+        assert scalar == pytest.approx(0.5)
+
+    def test_clips_at_max_gross_exposure_when_cvar_is_small(self):
+        from momentum_trading.backtest.momentum_backtest import compute_var_cvar_scalar
+        # budget 5%, realized CVaR 1% -> raw scalar = 5.0, clipped to max_gross_exposure
+        scalar = compute_var_cvar_scalar(cvar_pct=0.01, var_budget_pct=0.05,
+                                          min_gross_exposure=0.20, max_gross_exposure=1.0)
+        assert scalar == pytest.approx(1.0)
+
+    def test_clips_at_min_gross_exposure_when_cvar_is_extreme(self):
+        from momentum_trading.backtest.momentum_backtest import compute_var_cvar_scalar
+        # budget 5%, realized CVaR 90% -> raw scalar ~0.056, clipped to min_gross_exposure
+        scalar = compute_var_cvar_scalar(cvar_pct=0.90, var_budget_pct=0.05,
+                                          min_gross_exposure=0.20, max_gross_exposure=1.0)
+        assert scalar == pytest.approx(0.20)
+
+    def test_none_cvar_falls_back_to_max_gross_exposure(self):
+        from momentum_trading.backtest.momentum_backtest import compute_var_cvar_scalar
+        # Not enough return history yet, same "no information to scale down" fallback
+        # compute_vol_scalar() already establishes.
+        scalar = compute_var_cvar_scalar(cvar_pct=None, var_budget_pct=0.05,
+                                          min_gross_exposure=0.20, max_gross_exposure=1.0)
+        assert scalar == pytest.approx(1.0)
+
+    def test_zero_cvar_falls_back_to_max_gross_exposure(self):
+        from momentum_trading.backtest.momentum_backtest import compute_var_cvar_scalar
+        scalar = compute_var_cvar_scalar(cvar_pct=0.0, var_budget_pct=0.05,
+                                          min_gross_exposure=0.20, max_gross_exposure=1.0)
+        assert scalar == pytest.approx(1.0)
+
+    def test_backtest_byte_identical_when_var_cvar_budget_not_enabled(
+        self, synthetic_monthly_picks, synthetic_daily_prices,
+    ):
+        # enabled_risk_strategies=[] (the default) must produce byte-identical output to before
+        # this field existed, confirmed by comparing against the SAME call with the field
+        # omitted entirely.
+        df_default = run_custom_backtest(synthetic_monthly_picks, synthetic_daily_prices,
+                                          initial_capital=1000.0, random_seed=42)
+        df_explicit_empty = run_custom_backtest(synthetic_monthly_picks, synthetic_daily_prices,
+                                                 initial_capital=1000.0, random_seed=42,
+                                                 enabled_risk_strategies=[])
+        pd.testing.assert_series_equal(
+            df_default["Month End Portfolio Value"], df_explicit_empty["Month End Portfolio Value"],
+        )
+
+    def test_backtest_var_cvar_budget_runs_end_to_end(
+        self, synthetic_monthly_picks, synthetic_daily_prices,
+    ):
+        # Run-succeeds test: the full day-loop wiring (portfolio_history -> historical_var_cvar
+        # -> compute_var_cvar_scalar -> gross_exposure) doesn't crash across a real
+        # multi-rebalance run with a deliberately tight budget likely to actually throttle.
+        df = run_custom_backtest(synthetic_monthly_picks, synthetic_daily_prices,
+                                  initial_capital=1000.0, random_seed=42,
+                                  enabled_risk_strategies=["var_cvar_budget"],
+                                  var_budget_pct=0.01, var_cvar_lookback_days=21)
+        assert not df.empty
+        assert "tearsheet" in df.attrs
 
 
 class TestCrashProtection:

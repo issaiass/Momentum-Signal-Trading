@@ -63,6 +63,34 @@ ALLOWED_STRATEGY_TYPES = (
     "path_dependent_momentum", "correlation_weighted_momentum", "multi_timeframe_composite",
 )
 
+# Institutional risk-strategy overlays (docs/RISK_CONSTRAINTS.md's "Opt-in overlay strategies"
+# section), toggled via BacktestConfig.enabled_risk_strategies, a plain list[str] of names.
+# Distinct, deliberately, from this file's existing one-`use_X: bool`-field-per-feature
+# convention (use_liquidity_filter, use_trailing_stop, etc.): those are all MUTUALLY
+# INDEPENDENT single toggles that predate this registry and are left completely untouched.
+# This registry exists ONLY for features that are (a) genuinely stackable/independent overlays,
+# not a single mutually-exclusive dispatch choice (sizing_method already IS that mechanism for
+# choices like "equal_risk_contribution", so ERC is deliberately NOT listed here, seeing
+# "equal_risk_contribution" as a sizing_method value is enough), and (b) new as of this epic, so
+# adding a second enabling convention doesn't retroactively touch any shipped `use_X` field's
+# behavior. Each canonical name maps to the set of accepted alias strings a user may write in
+# config.yaml; an unrecognized string anywhere in enabled_risk_strategies is a validation error
+# (fail loud on a typo, matching sizing_method's own unknown-value handling), not a silent no-op.
+RISK_STRATEGY_ALIASES: dict[str, frozenset[str]] = {
+    "var_cvar_budget": frozenset({"var_cvar_budget", "var_budget", "value_at_risk_budget"}),
+    "liquidity_adjusted_sizing": frozenset({"liquidity_adjusted_sizing", "adv_scaled_sizing"}),
+}
+
+
+def risk_strategy_enabled(cfg: "BacktestConfig", canonical: str) -> bool:
+    """
+    True if any alias of `canonical` (see RISK_STRATEGY_ALIASES) appears in
+    cfg.enabled_risk_strategies. Every new-overlay call site should use this helper rather than
+    an ad-hoc `"name" in cfg.enabled_risk_strategies` check, so a future added alias only needs
+    to be taught to the registry once, not to every call site.
+    """
+    return any(alias in cfg.enabled_risk_strategies for alias in RISK_STRATEGY_ALIASES[canonical])
+
 
 @dataclass
 class BacktestConfig:
@@ -214,6 +242,22 @@ class BacktestConfig:
     vol_lookback_days: int = 63             # ~3 months, used for inverse-vol weights
     target_portfolio_vol: float = 0.15      # annualized vol target for the book
     portfolio_vol_lookback: int = 21        # trailing window to estimate realized vol
+
+    # --- VaR/CVaR Budget (Epic 1, "Institutional Risk-Management Features" plan, Story 1.4).
+    #     Gated via enabled_risk_strategies: [var_cvar_budget] below, not a plain use_X bool
+    #     (see that field's own docstring for why). var_budget_pct=None (default) means the
+    #     overlay is effectively inert even if named in enabled_risk_strategies (a required-
+    #     field validation error, see __post_init__, prevents that combination from silently
+    #     doing nothing). ---
+    var_budget_pct: float | None = None     # e.g. 0.05, required when var_cvar_budget is
+                                             # enabled: throttle gross exposure once CVaR would
+                                             # risk more than this fraction of capital
+    var_cvar_confidence: float = 0.95       # confidence level passed to historical_var_cvar()
+    var_cvar_lookback_days: int = 252       # ~1 year of daily returns for the VaR/CVaR estimate,
+                                             # a deliberately longer window than
+                                             # portfolio_vol_lookback's 21 days, tail-risk
+                                             # estimation needs more history than a short-term
+                                             # vol estimate does
     max_gross_exposure: float = 1.0         # never lever above 100% invested
     min_gross_exposure: float = 0.20        # floor so we don't fully flatline
     max_position_weight: float = 0.35       # single-name cap, FLAT, identical for every ticker
@@ -456,6 +500,19 @@ class BacktestConfig:
     use_correlation_penalty: bool = False
     correlation_lookback_days: int = 63
     correlation_penalty_strength: float = 0.5   # 0 = no penalty, 1 = full pairwise-correlation scaling
+    use_shrinkage_covariance: bool = False  # Epic 1, Story 1.2 ("Institutional Risk-Management
+                                             # Features" plan): only meaningful when
+                                             # use_correlation_penalty is also True. False
+                                             # (default) is byte-identical to before this field
+                                             # existed, the correlation matrix comes from raw
+                                             # pandas .corr(). True derives it instead from
+                                             # core/covariance.py's shrinkage_covariance()
+                                             # (Ledoit-Wolf-style), better-conditioned when
+                                             # correlation_lookback_days is small relative to the
+                                             # number of tickers. A plain bool, not routed through
+                                             # enabled_risk_strategies below, it modifies an
+                                             # already-`use_X`-gated mechanism rather than being a
+                                             # new standalone overlay.
 
     # --- aggregate-drift rebalance skip (item 11) ---
     aggregate_drift_threshold: float = 0.0   # 0 = disabled (always rebalance if scheduled); e.g. 0.02 = skip whole rebalance if <2% aggregate drift
@@ -553,10 +610,15 @@ class BacktestConfig:
     # --- Alternative position-sizing method ---
     sizing_method: str = "inverse_vol"   # "inverse_vol" (default), "score_proportional",
                                           # "equal_weight" (non-parametric, ignores both score
-                                          # magnitude and trailing vol, every pick gets 1/N), or
+                                          # magnitude and trailing vol, every pick gets 1/N),
                                           # "risk_based" (fixed-fractional, see risk_per_trade_pct
                                           # below and docs/RISK_CONSTRAINTS.md's "Risk-Based
-                                          # Position Sizing")
+                                          # Position Sizing"), or "equal_risk_contribution" (Epic
+                                          # 1, "Institutional Risk-Management Features" plan:
+                                          # risk-parity, every pick contributes an EQUAL share of
+                                          # total portfolio risk, uses core/covariance.py's
+                                          # shrinkage_covariance(), see docs/RISK_CONSTRAINTS.md's
+                                          # "Equal Risk Contribution (ERC) Sizing")
     risk_per_trade_pct: float = 0.02     # only meaningful when sizing_method == "risk_based":
                                           # sizes each position so a full stop-out loses exactly
                                           # this fraction of total capital, e.g. 0.02 = risk 2%
@@ -584,6 +646,13 @@ class BacktestConfig:
     #     blend_momentum_scores(). Defaults match that function's own defaults exactly. ---
     multi_timeframe_lookbacks: list = field(default_factory=lambda: [3, 6, 12])
     multi_timeframe_weights: list | None = None   # None (default) = equal weight per lookback
+
+    # --- Opt-in institutional risk-strategy overlays (docs/RISK_CONSTRAINTS.md's "Opt-in
+    #     overlay strategies" section). [] (default) is byte-identical to before this field
+    #     existed. See RISK_STRATEGY_ALIASES/risk_strategy_enabled() above for the exact
+    #     enabling mechanism and why it's a second convention alongside this file's many
+    #     existing use_X: bool fields, not a replacement for them. ---
+    enabled_risk_strategies: list = field(default_factory=list)
 
     def __post_init__(self):
         """Fail fast on nonsensical config combinations instead of producing silently wrong sizing."""
@@ -646,11 +715,11 @@ class BacktestConfig:
                         f"'stop_loss_pct': float}} dict keyed by ticker string"
                     )
                     continue
-                extra_keys = set(override) - {"enabled", "stop_loss_pct"}
+                extra_keys = set(override) - {"enabled", "stop_loss_pct", "max_pct_of_adv"}
                 if extra_keys:
                     errors.append(
                         f"ticker_risk_overrides[{ticker!r}] has unknown key(s) {sorted(extra_keys)}, "
-                        f"only 'enabled'/'stop_loss_pct' are allowed"
+                        f"only 'enabled'/'stop_loss_pct'/'max_pct_of_adv' are allowed"
                     )
                 if "enabled" in override and not isinstance(override["enabled"], bool):
                     errors.append(f"ticker_risk_overrides[{ticker!r}]['enabled'] must be a bool")
@@ -658,6 +727,11 @@ class BacktestConfig:
                     errors.append(
                         f"ticker_risk_overrides[{ticker!r}]['stop_loss_pct'] "
                         f"({override['stop_loss_pct']}) should be in (0, 1.0)"
+                    )
+                if "max_pct_of_adv" in override and not (0 < override["max_pct_of_adv"] <= 1.0):
+                    errors.append(
+                        f"ticker_risk_overrides[{ticker!r}]['max_pct_of_adv'] "
+                        f"({override['max_pct_of_adv']}) should be in (0, 1.0]"
                     )
         if self.drift_threshold < 0:
             errors.append(f"drift_threshold ({self.drift_threshold}) must be >= 0")
@@ -689,6 +763,12 @@ class BacktestConfig:
             errors.append(f"commission ({self.commission}) must be >= 0")
         if self.target_portfolio_vol <= 0:
             errors.append(f"target_portfolio_vol ({self.target_portfolio_vol}) must be > 0")
+        if self.var_budget_pct is not None and not (0 < self.var_budget_pct < 1.0):
+            errors.append(f"var_budget_pct ({self.var_budget_pct}) should be in (0, 1.0) or None")
+        if not (0 < self.var_cvar_confidence < 1.0):
+            errors.append(f"var_cvar_confidence ({self.var_cvar_confidence}) should be in (0, 1.0)")
+        if self.var_cvar_lookback_days < 2:
+            errors.append(f"var_cvar_lookback_days ({self.var_cvar_lookback_days}) must be >= 2")
         if self.position_vol_budget is not None and self.position_vol_budget <= 0:
             errors.append(f"position_vol_budget ({self.position_vol_budget}) must be > 0 or None")
         if not self.defensive_ticker or not self.defensive_ticker.strip():
@@ -717,10 +797,13 @@ class BacktestConfig:
             errors.append(f"max_price_staleness_minutes ({self.max_price_staleness_minutes}) must be > 0 or None")
         if self.max_holding_days is not None and self.max_holding_days <= 0:
             errors.append(f"max_holding_days ({self.max_holding_days}) must be > 0 or None")
-        if self.sizing_method not in ("inverse_vol", "score_proportional", "equal_weight", "risk_based"):
+        if self.sizing_method not in (
+            "inverse_vol", "score_proportional", "equal_weight", "risk_based",
+            "equal_risk_contribution",
+        ):
             errors.append(
                 f"sizing_method ({self.sizing_method!r}) must be 'inverse_vol', "
-                f"'score_proportional', 'equal_weight', or 'risk_based'"
+                f"'score_proportional', 'equal_weight', 'risk_based', or 'equal_risk_contribution'"
             )
         if not (0 < self.risk_per_trade_pct < 1.0):
             errors.append(f"risk_per_trade_pct ({self.risk_per_trade_pct}) should be in (0, 1.0)")
@@ -743,6 +826,21 @@ class BacktestConfig:
                 )
         if not (0 < self.momentum_crash_derate <= 1.0):
             errors.append(f"momentum_crash_derate ({self.momentum_crash_derate}) should be in (0, 1.0]")
+        if not isinstance(self.enabled_risk_strategies, list):
+            errors.append(f"enabled_risk_strategies ({self.enabled_risk_strategies!r}) must be a list")
+        else:
+            known_aliases = {alias for aliases in RISK_STRATEGY_ALIASES.values() for alias in aliases}
+            unknown = [name for name in self.enabled_risk_strategies if name not in known_aliases]
+            if unknown:
+                errors.append(
+                    f"enabled_risk_strategies has unrecognized name(s) {unknown}, must be one of "
+                    f"{sorted(known_aliases)}"
+                )
+            elif risk_strategy_enabled(self, "var_cvar_budget") and self.var_budget_pct is None:
+                errors.append(
+                    "enabled_risk_strategies includes var_cvar_budget but var_budget_pct is "
+                    "None, set a budget"
+                )
 
         if errors:
             raise ValueError("Invalid BacktestConfig:\n  - " + "\n  - ".join(errors))
@@ -840,20 +938,44 @@ def detect_correlation_spike(
 
 def _correlation_penalty_weights(
     weights: dict, daily_prices: pd.DataFrame, as_of: pd.Timestamp,
-    lookback_days: int, strength: float,
+    lookback_days: int, strength: float, use_shrinkage: bool = False,
 ) -> dict:
     """
     Downweights tickers that are highly correlated with the rest of the current
     picks, so two near-duplicate exposures (e.g. XLK and QQQ both selected)
     don't get sized as if they were independent risk sources. strength=0 is a
     no-op; strength=1 applies the full penalty.
+
+    use_shrinkage=False (default) is byte-identical to this function's pre-Epic-1 behavior:
+    the correlation matrix comes from raw window.corr(). use_shrinkage=True (Epic 1, Story 1.2,
+    BacktestConfig.use_shrinkage_covariance) instead derives it from
+    core/covariance.py's shrinkage_covariance(), better-conditioned when lookback_days is small
+    relative to len(tickers), converted back to a correlation matrix (a covariance matrix and
+    its implied correlation matrix agree on which pairs are relatively more/less correlated,
+    the diagonal-normalization step below is what this function actually consumes either way).
     """
     tickers = [t for t in weights if t in daily_prices.columns]
     if len(tickers) < 2 or strength <= 0:
         return weights
 
     window = daily_prices[tickers].loc[:as_of].pct_change().tail(lookback_days)
-    corr = window.corr()
+    if use_shrinkage:
+        from ..core.covariance import shrinkage_covariance
+
+        try:
+            cov = shrinkage_covariance(window)
+            std = np.sqrt(np.diag(cov.values))
+            outer_std = np.outer(std, std)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                corr_values = np.where(outer_std > 0, cov.values / outer_std, np.nan)
+            corr = pd.DataFrame(corr_values, index=cov.index, columns=cov.columns)
+        except ValueError:
+            # Not enough tickers/observations for a shrinkage solve (e.g. a 1-ticker window
+            # after column alignment) -- fall back to the pre-existing raw-corr path rather
+            # than crash a rebalance over a degenerate edge case.
+            corr = window.corr()
+    else:
+        corr = window.corr()
     if corr.isna().all().all():
         return weights
 
@@ -933,6 +1055,22 @@ def resolve_ticker_stop_loss_pct(ticker: str, cfg: "BacktestConfig") -> float | 
     return override.get("stop_loss_pct", cfg.stop_loss_pct)
 
 
+def resolve_ticker_max_pct_of_adv(ticker: str, cfg: "BacktestConfig") -> float:
+    """
+    Resolves the EFFECTIVE Liquidity-Adjusted Position Sizing cap for one ticker (Epic 1,
+    "Institutional Risk-Management Features" plan, Story 1.5), honoring cfg.ticker_risk_
+    overrides's optional 'max_pct_of_adv' key over the portfolio-wide cfg.max_pct_of_adv, same
+    resolution shape as resolve_ticker_stop_loss_pct() above: a ticker with no override entry,
+    or one that doesn't set this specific key, resolves to the portfolio-wide value unchanged.
+
+    Unlike resolve_ticker_stop_loss_pct(), this never returns None: 'enabled': false in a
+    ticker's override only disables the STOP-LOSS check (a distinct concern, see that
+    function's own docstring), not liquidity-adjusted sizing.
+    """
+    override = cfg.ticker_risk_overrides.get(ticker, {})
+    return override.get("max_pct_of_adv", cfg.max_pct_of_adv)
+
+
 def _risk_based_weights(picks: list[str], cfg: "BacktestConfig") -> dict:
     """
     Fixed-fractional ("risk 1-2% of capital per trade") position sizing, standard CTA/Van Tharp
@@ -992,9 +1130,12 @@ def resolve_target_weights(
     pick's momentum score, requires momentum_scores to be passed in; falls
     back to equal-weight if scores aren't available), "equal_weight"
     (non-parametric, every pick gets an identical 1/N weight, see
-    _equal_weight_weights()), and "risk_based" (fixed-fractional sizing off each pick's own
-    stop-loss distance, see _risk_based_weights(), the only one of the four that doesn't
-    normalize weights to sum to 1.0 by construction).
+    _equal_weight_weights()), "risk_based" (fixed-fractional sizing off each pick's own
+    stop-loss distance, see _risk_based_weights(), the only one of the five that doesn't
+    normalize weights to sum to 1.0 by construction), and "equal_risk_contribution" (Epic 1,
+    "Institutional Risk-Management Features" plan, Story 1.3: risk-parity, every pick
+    contributes an equal share of total portfolio risk rather than an equal dollar amount or a
+    volatility-only-based weight, see _equal_risk_contribution_weights()).
     """
     if custom_weights is not None:
         provided = {t: w for t, w in custom_weights.items() if t in picks and w > 0}
@@ -1008,25 +1149,36 @@ def resolve_target_weights(
         weights = _score_proportional_weights(picks, momentum_scores)
         if cfg.use_correlation_penalty:
             weights = _correlation_penalty_weights(
-                weights, daily_prices, as_of, cfg.correlation_lookback_days, cfg.correlation_penalty_strength
+                weights, daily_prices, as_of, cfg.correlation_lookback_days, cfg.correlation_penalty_strength,
+                cfg.use_shrinkage_covariance,
             )
     elif cfg.sizing_method == "equal_weight":
         weights = _equal_weight_weights(picks)
         if cfg.use_correlation_penalty:
             weights = _correlation_penalty_weights(
-                weights, daily_prices, as_of, cfg.correlation_lookback_days, cfg.correlation_penalty_strength
+                weights, daily_prices, as_of, cfg.correlation_lookback_days, cfg.correlation_penalty_strength,
+                cfg.use_shrinkage_covariance,
             )
     elif cfg.sizing_method == "risk_based":
         weights = _risk_based_weights(picks, cfg)
         if cfg.use_correlation_penalty:
             weights = _correlation_penalty_weights(
-                weights, daily_prices, as_of, cfg.correlation_lookback_days, cfg.correlation_penalty_strength
+                weights, daily_prices, as_of, cfg.correlation_lookback_days, cfg.correlation_penalty_strength,
+                cfg.use_shrinkage_covariance,
+            )
+    elif cfg.sizing_method == "equal_risk_contribution":
+        weights = _equal_risk_contribution_weights(picks, daily_prices, as_of, cfg)
+        if cfg.use_correlation_penalty:
+            weights = _correlation_penalty_weights(
+                weights, daily_prices, as_of, cfg.correlation_lookback_days, cfg.correlation_penalty_strength,
+                cfg.use_shrinkage_covariance,
             )
     else:
         weights = _inverse_vol_weights(picks, daily_prices, as_of, cfg.vol_lookback_days)
         if cfg.use_correlation_penalty:
             weights = _correlation_penalty_weights(
-                weights, daily_prices, as_of, cfg.correlation_lookback_days, cfg.correlation_penalty_strength
+                weights, daily_prices, as_of, cfg.correlation_lookback_days, cfg.correlation_penalty_strength,
+                cfg.use_shrinkage_covariance,
             )
 
     weights = _apply_position_caps(weights, cfg.max_position_weight)
@@ -1077,6 +1229,75 @@ def _inverse_vol_weights(
         for t in missing:
             weights[t] = residual / len(missing)
     return weights.to_dict()
+
+
+def _equal_risk_contribution_weights(
+    picks: list[str], daily_prices: pd.DataFrame, as_of: pd.Timestamp, cfg: "BacktestConfig",
+) -> dict:
+    """
+    Equal Risk Contribution (ERC / risk-parity) sizing (Epic 1, "Institutional Risk-Management
+    Features" plan, Story 1.3): every position ends up contributing an EQUAL share of total
+    portfolio risk, distinct from _equal_weight_weights() (equal DOLLAR weight) and
+    _inverse_vol_weights() (weight inversely proportional to a position's OWN volatility alone,
+    ignoring cross-asset correlation entirely). A standard iterative risk-parity solve
+    (multiplicative proportional-scaling toward equal marginal risk contribution, damped via a
+    sqrt step for numerical stability), not a closed-form formula, ERC has no closed form in
+    general.
+
+    Uses core/covariance.py's shrinkage_covariance() as its covariance input, not raw sample
+    covariance directly, the textbook motivating case for shrinkage: a risk-parity solve is
+    sensitive to a poorly-conditioned covariance matrix, exactly the regime a
+    correlation-lookback window small relative to the number of tickers produces.
+
+    Degenerate case (fewer than 2 valid tickers, or an ill-posed/degenerate covariance solve):
+    falls back to _inverse_vol_weights(), same "graceful fallback for an ill-posed case"
+    precedent _score_proportional_weights()'s own missing-score fallback already establishes.
+    """
+    window = daily_prices.loc[:as_of].iloc[-(cfg.vol_lookback_days + 1):]
+    valid = [t for t in picks if t in window.columns]
+    if len(valid) < 2:
+        return _inverse_vol_weights(picks, daily_prices, as_of, cfg.vol_lookback_days)
+
+    rets = window[valid].pct_change()
+    from ..core.covariance import shrinkage_covariance
+
+    try:
+        cov = shrinkage_covariance(rets).values
+    except ValueError:
+        return _inverse_vol_weights(picks, daily_prices, as_of, cfg.vol_lookback_days)
+
+    if not np.all(np.isfinite(cov)) or np.allclose(cov, 0):
+        return _inverse_vol_weights(picks, daily_prices, as_of, cfg.vol_lookback_days)
+
+    n = len(valid)
+    w = np.full(n, 1.0 / n)
+    for _ in range(200):
+        port_var = w @ cov @ w
+        if port_var <= 0:
+            break
+        marginal = cov @ w
+        risk_contrib = w * marginal
+        total_risk = risk_contrib.sum()
+        if total_risk <= 0:
+            break
+        target = total_risk / n
+        ratio = np.divide(
+            target, risk_contrib, out=np.ones_like(risk_contrib), where=risk_contrib > 1e-12
+        )
+        w = w * np.sqrt(np.clip(ratio, 1e-6, 1e6))  # damped multiplicative update
+        w = np.clip(w, 1e-8, None)
+        w = w / w.sum()
+
+    result = dict(zip(valid, w.tolist()))
+    missing = [t for t in picks if t not in result]
+    if missing:
+        # a pick with no price history in `window` can't be risk-solved at all, same
+        # "nothing orphaned" precedent _inverse_vol_weights() already establishes for its own
+        # missing-vol case
+        residual = max(0.0, 1.0 - sum(result.values()))
+        for t in missing:
+            result[t] = residual / len(missing)
+    return result
 
 
 def _apply_position_caps(weights: dict, max_weight: float) -> dict:
@@ -1250,6 +1471,32 @@ def compute_vol_scalar(
     return float(np.clip(target_portfolio_vol / realized_vol, min_gross_exposure, max_gross_exposure))
 
 
+def compute_var_cvar_scalar(
+    cvar_pct: Optional[float], var_budget_pct: float,
+    min_gross_exposure: float, max_gross_exposure: float,
+) -> float:
+    """
+    VaR/CVaR Budget (Epic 1, "Institutional Risk-Management Features" plan, Story 1.4): an
+    exact mirror of compute_vol_scalar()'s shape, a new multiplicative gross-exposure scalar
+    composed alongside vol_scalar/momentum_crash_scalar, NOT a step inside
+    resolve_target_weights() (that function operates purely in weight-space and has no concept
+    of a realized portfolio-returns series to compute CVaR from).
+
+    cvar_pct is None (not enough return history yet) or 0 (a degenerate flat series) both fall
+    back to max_gross_exposure, the identical "not enough information to scale down" behavior
+    compute_vol_scalar() already has.
+
+    cvar_pct itself comes from core/functions_quant_extensions.py's historical_var_cvar()
+    (POSITIVE = a loss magnitude, e.g. 0.05 = a 5% expected-shortfall loss), so
+    var_budget_pct / cvar_pct > 1 (CVaR loss smaller than the budget) clips to max_gross_exposure,
+    and < 1 (CVaR loss exceeds the budget) throttles exposure down, symmetric with
+    compute_vol_scalar()'s target/realized ratio.
+    """
+    if not cvar_pct:
+        return max_gross_exposure
+    return float(np.clip(var_budget_pct / cvar_pct, min_gross_exposure, max_gross_exposure))
+
+
 def _slippage_bps(ticker_returns_window: pd.Series, cfg: BacktestConfig) -> float:
     """
     Base slippage scaled by trailing (vol_lookback_days) annualized vol. If
@@ -1283,6 +1530,7 @@ def run_risk_managed_backtest(
     daily_prices: pd.DataFrame,
     config: BacktestConfig = BacktestConfig(),
     custom_weights_by_date: dict | None = None,
+    daily_volume: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """
     Risk-managed momentum backtest with volatility targeting, regime filtering,
@@ -1300,6 +1548,13 @@ def run_risk_managed_backtest(
         {signal_date: {ticker: weight}}, if present for a given rebalance's
         signal date, those weights are used directly instead of inverse-vol
         sizing (still subject to max_position_weight capping).
+    daily_volume : pd.DataFrame, optional (Epic 1, "Institutional Risk-Management Features"
+        plan, Story 1.5): daily share volume, columns = tickers, same shape as daily_prices.
+        REQUIRED (raises ValueError) when config.enabled_risk_strategies includes
+        liquidity_adjusted_sizing, None (default) otherwise, same "opt-in extra data the
+        caller must supply, fail loud if missing rather than silently skip" precedent
+        use_liquidity_filter's own daily_volume requirement (core/strategy_signals.py's
+        generate_strategy_monthly_picks()) already established.
 
     Returns
     -------
@@ -1307,6 +1562,12 @@ def run_risk_managed_backtest(
         Monthly report with portfolio & benchmark returns, cumulative returns,
         and exposure/cost diagnostics.
     """
+    if risk_strategy_enabled(config, "liquidity_adjusted_sizing") and daily_volume is None:
+        raise ValueError(
+            "config.enabled_risk_strategies includes liquidity_adjusted_sizing but no "
+            "daily_volume was supplied to run_risk_managed_backtest(), pass a daily share "
+            "volume DataFrame (same column shape as daily_prices)."
+        )
     if monthly_picks.empty or daily_prices.empty:
         logger.warning("Empty picks or price data supplied; aborting backtest.")
         return pd.DataFrame()
@@ -1639,9 +1900,38 @@ def run_risk_managed_backtest(
                                     f"of computed exposure\n"
                                 )
 
+                        # --- VaR/CVaR budget (Epic 1, Story 1.4): an ADDITIONAL multiplicative
+                        #     scalar, only when enabled_risk_strategies includes var_cvar_budget.
+                        #     Sourced from the SAME simulated portfolio_history equity curve
+                        #     _realized_portfolio_vol() already uses for vol_scalar above, the
+                        #     real thing that happened in the simulation, not a proxy. ---
+                        var_cvar_scalar = 1.0
+                        if risk_strategy_enabled(config, "var_cvar_budget"):
+                            from ..core.functions_quant_extensions import historical_var_cvar
+
+                            cvar_lookback = config.var_cvar_lookback_days
+                            if len(portfolio_history) >= cvar_lookback + 1:
+                                vals = pd.Series([v for _, v in portfolio_history[-(cvar_lookback + 1):]])
+                                port_rets = vals.pct_change().dropna()
+                                if not port_rets.empty:
+                                    var_cvar = historical_var_cvar(
+                                        port_rets, confidence=config.var_cvar_confidence,
+                                    )
+                                    var_cvar_scalar = compute_var_cvar_scalar(
+                                        var_cvar.get("cvar_pct"), config.var_budget_pct,
+                                        config.min_gross_exposure, config.max_gross_exposure,
+                                    )
+                                    if var_cvar_scalar < 1.0:
+                                        log_file.write(
+                                            f"{today.strftime('%Y-%m-%d')} VAR/CVAR BUDGET: CVaR "
+                                            f"{var_cvar.get('cvar_pct', float('nan')):.2%} exceeds "
+                                            f"budget {config.var_budget_pct:.2%}, extra derate to "
+                                            f"{var_cvar_scalar:.0%} of computed exposure\n"
+                                        )
+
                         gross_exposure = min(
                             config.max_gross_exposure,
-                            regime_scalar * vol_scalar * momentum_crash_scalar,
+                            regime_scalar * vol_scalar * momentum_crash_scalar * var_cvar_scalar,
                         )
 
                         # --- position sizing: custom weights (if provided for this date) or
@@ -1661,6 +1951,25 @@ def run_risk_managed_backtest(
                         target_dollar = {
                             t: total_value * gross_exposure * w for t, w in weights.items()
                         }
+                        # --- Liquidity-Adjusted Position Sizing (Epic 1, Story 1.5), backtest
+                        #     day-loop counterpart to execution/live_signal.py's run() wiring.
+                        #     Grouped by resolved per-ticker cap, same shape as the live side. ---
+                        if risk_strategy_enabled(config, "liquidity_adjusted_sizing"):
+                            from ..core.functions_quant_extensions import scale_dollar_targets_for_capacity
+
+                            by_cap: dict[float, dict] = {}
+                            for t, dollar in target_dollar.items():
+                                cap = resolve_ticker_max_pct_of_adv(t, config)
+                                by_cap.setdefault(cap, {})[t] = dollar
+                            scaled_target_dollar = {}
+                            for cap, subset in by_cap.items():
+                                scaled_target_dollar.update(
+                                    scale_dollar_targets_for_capacity(
+                                        subset, daily_volume, prices, today, cap,
+                                        config.liquidity_lookback_days,
+                                    )
+                                )
+                            target_dollar = scaled_target_dollar
                     else:
                         # Explicit empty picks (whole-book negative momentum cash filter, or the
                         # liquidity filter, zeroed out every pick this period): target_dollar={}
@@ -1934,6 +2243,7 @@ def run_custom_backtest(
     default risk-management settings without touching the config class directly.
     """
     custom_weights_by_date = risk_overrides.pop("custom_weights_by_date", None)
+    daily_volume = risk_overrides.pop("daily_volume", None)
 
     cfg_kwargs = dict(
         holding_period=holding_period,
@@ -1951,7 +2261,9 @@ def run_custom_backtest(
     # against the final, complete set of values, setattr after construction would bypass it.
     cfg = BacktestConfig(**cfg_kwargs)
 
-    return run_risk_managed_backtest(monthly_picks, daily_prices, cfg, custom_weights_by_date=custom_weights_by_date)
+    return run_risk_managed_backtest(monthly_picks, daily_prices, cfg,
+                                      custom_weights_by_date=custom_weights_by_date,
+                                      daily_volume=daily_volume)
 
 
 if __name__ == "__main__":

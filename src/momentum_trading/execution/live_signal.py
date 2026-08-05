@@ -61,10 +61,14 @@ from ..backtest.momentum_backtest import (
     resolve_target_weights,
     detect_correlation_spike,
     compute_vol_scalar,
+    compute_var_cvar_scalar,
+    risk_strategy_enabled,
     resolve_ticker_stop_loss_pct,
+    resolve_ticker_max_pct_of_adv,
 )
 from ..core.functions_quant_extensions import (
     absolute_momentum_overlay, liquidity_filter, technical_confirmation_filter, volume_confirmation_filter,
+    historical_var_cvar,
 )
 
 logger = logging.getLogger("live_signal")
@@ -615,24 +619,25 @@ def check_price_staleness(daily_prices: pd.DataFrame, max_staleness_minutes: int
     }
 
 
-def _realized_weighted_portfolio_vol(
+def _weighted_portfolio_returns_series(
     weights: dict, daily_prices: pd.DataFrame, as_of: pd.Timestamp, lookback_days: int,
-) -> float | None:
+) -> pd.Series | None:
     """
-    Live substitute for momentum_backtest.py's _realized_portfolio_vol(), which measures
-    realized vol from a simulated portfolio_history equity curve that doesn't exist in live
-    trading (no local ledger is ever trusted as portfolio truth, see get_ibkr_positions()'s own
-    docstring). Instead, estimates forward risk directly from trailing daily_prices at the
-    given target weights, the same "trailing data, not a simulated ledger" pattern
-    _inverse_vol_weights() already uses for position-level sizing: combine each ticker's daily
-    return by its target weight into one weighted daily-return series, then annualize its std
-    dev over lookback_days.
+    Live's substitute for a real simulated equity curve (no local ledger is ever trusted as
+    portfolio truth, see get_ibkr_positions()'s own docstring): combines each ticker's daily
+    return by its target weight into one weighted daily-return series over trailing
+    daily_prices, the same "trailing data, not a simulated ledger" pattern
+    _inverse_vol_weights() already uses for position-level sizing.
+
+    Extracted (Epic 1, "Institutional Risk-Management Features" plan, Story 1.4) from what used
+    to be _realized_weighted_portfolio_vol()'s own inline body, specifically so BOTH live-side
+    consumers of "what counts as the portfolio's own realized returns" (that function's vol
+    estimate, and the new VaR/CVaR budget scalar in compute_target_weights() below) can never
+    silently disagree on the answer. A pure refactor: _realized_weighted_portfolio_vol()'s own
+    output is unchanged, confirmed by its existing test suite passing unmodified.
 
     Returns None if there isn't enough trailing history for ANY weighted ticker, or if none of
-    `weights`' tickers are even present in daily_prices, mirroring _realized_portfolio_vol()'s
-    own None-when-insufficient-data behavior; compute_vol_scalar() falls back to
-    max_gross_exposure in that case, the same "not enough information to scale down" behavior
-    the backtest already has.
+    `weights`' tickers are even present in daily_prices.
     """
     tickers = [t for t in weights if t in daily_prices.columns]
     if not tickers:
@@ -646,6 +651,27 @@ def _realized_weighted_portfolio_vol(
     w = pd.Series({t: weights[t] for t in tickers})
     weighted_rets = (rets[tickers].fillna(0.0) * w).sum(axis=1)
     if weighted_rets.empty:
+        return None
+    return weighted_rets
+
+
+def _realized_weighted_portfolio_vol(
+    weights: dict, daily_prices: pd.DataFrame, as_of: pd.Timestamp, lookback_days: int,
+) -> float | None:
+    """
+    Live substitute for momentum_backtest.py's _realized_portfolio_vol(), which measures
+    realized vol from a simulated portfolio_history equity curve that doesn't exist in live
+    trading. See _weighted_portfolio_returns_series() above for the shared returns-series this
+    is now built from (Epic 1, Story 1.4 extraction, byte-identical output).
+
+    Returns None if there isn't enough trailing history for ANY weighted ticker, or if none of
+    `weights`' tickers are even present in daily_prices, mirroring _realized_portfolio_vol()'s
+    own None-when-insufficient-data behavior; compute_vol_scalar() falls back to
+    max_gross_exposure in that case, the same "not enough information to scale down" behavior
+    the backtest already has.
+    """
+    weighted_rets = _weighted_portfolio_returns_series(weights, daily_prices, as_of, lookback_days)
+    if weighted_rets is None:
         return None
     return float(weighted_rets.std() * np.sqrt(252))
 
@@ -769,7 +795,43 @@ def compute_target_weights(
                 f"{realized_vol:.2%}" if realized_vol is not None else "n/a",
                 cfg.target_portfolio_vol, vol_scalar)
 
-    gross_exposure = min(cfg.max_gross_exposure, regime_scalar * vol_scalar * momentum_crash_scalar)
+    # --- VaR/CVaR budget (Epic 1, "Institutional Risk-Management Features" plan, Story 1.4),
+    #     live-trading equivalent of run_risk_managed_backtest()'s identical formula. Sourced
+    #     from _weighted_portfolio_returns_series() (this file's own live substitute for a real
+    #     simulated equity curve, shared with _realized_weighted_portfolio_vol() above), NOT the
+    #     backtest's portfolio_history equity curve, which doesn't exist live, the same
+    #     deliberate backtest/live sourcing asymmetry target_portfolio_vol already has.
+    #     Appended in THIS file's own existing composition order, not copy-pasted from the
+    #     backtest's insertion point, see CLAUDE.md's compute_target_weights() bullet. ---
+    var_cvar_scalar = 1.0
+    if risk_strategy_enabled(cfg, "var_cvar_budget"):
+        port_rets = _weighted_portfolio_returns_series(
+            weights, daily_prices, as_of, cfg.var_cvar_lookback_days,
+        )
+        if port_rets is not None and not port_rets.empty:
+            var_cvar = historical_var_cvar(port_rets, confidence=cfg.var_cvar_confidence)
+            var_cvar_scalar = compute_var_cvar_scalar(
+                var_cvar.get("cvar_pct"), cfg.var_budget_pct,
+                cfg.min_gross_exposure, cfg.max_gross_exposure,
+            )
+            logger.info("VaR/CVaR budget: cvar=%s budget=%.2f -> scalar=%.2f",
+                        f"{var_cvar.get('cvar_pct'):.2%}" if var_cvar.get("cvar_pct") is not None
+                        and pd.notna(var_cvar.get("cvar_pct")) else "n/a",
+                        cfg.var_budget_pct, var_cvar_scalar)
+            if var_cvar_scalar < 1.0:
+                logger.warning(
+                    "VAR/CVAR BUDGET EXCEEDED: CVaR %.2f%% exceeds budget %.2f%%, reducing "
+                    "exposure to %.0f%% of computed exposure",
+                    var_cvar["cvar_pct"] * 100, cfg.var_budget_pct * 100, var_cvar_scalar * 100,
+                )
+                log_alert(portfolio, "VAR_CVAR_BUDGET_EXCEEDED", "WARNING",
+                          f"CVaR {var_cvar['cvar_pct']:.2%} exceeds budget {cfg.var_budget_pct:.2%}; "
+                          f"reducing exposure to {var_cvar_scalar:.0%} of computed exposure",
+                          log_path=alerts_log_path)
+
+    gross_exposure = min(
+        cfg.max_gross_exposure, regime_scalar * vol_scalar * momentum_crash_scalar * var_cvar_scalar,
+    )
     return weights, gross_exposure
 
 
@@ -854,6 +916,13 @@ def generate_orders(
         # same shape check_and_handle_stop_losses()/get_ibkr_positions() use. Feeds
         # compute_stop_loss_price()'s HOLD-row reference price (Epic 8), None (default) is
         # byte-identical to no entry price being known for any ticker (falls back to close_price).
+    target_dollar_override: dict | None = None,  # optional {ticker: scaled $ notional}, Epic 1,
+        # "Institutional Risk-Management Features" plan, Story 1.5 (Liquidity-Adjusted Position
+        # Sizing): when a ticker is present here, ITS value REPLACES the normal
+        # total_value * gross_exposure * weight computation below for that ticker only, every
+        # other ticker computes exactly as before. None (default) is byte-identical to before
+        # this param existed. See run()'s own call site and
+        # core/functions_quant_extensions.py's scale_dollar_targets_for_capacity().
 ) -> dict:
     """
     Returns {ticker: {'action': 'BUY'|'SELL'|'HOLD', 'shares': int, 'reason': str,
@@ -903,6 +972,8 @@ def generate_orders(
     current_positions = current_positions or {}
     current_value = {t: s * latest_prices.get(t, 0.0) for t, s in current_holdings.items()}
     target_dollar = {t: total_value * gross_exposure * w for t, w in target_weights.items()}
+    if target_dollar_override:
+        target_dollar.update(target_dollar_override)
     capital_this_rebalance = total_value * gross_exposure
     all_tickers = set(current_holdings) | set(target_dollar)
 
@@ -2759,15 +2830,16 @@ def run(
     #     recent-vs-earlier volume-trend ratio for that one), fetched at most once per rebalance
     #     regardless of which one(s) are enabled.
     df_volume = None
-    if (cfg.use_liquidity_filter or cfg.use_volume_confirmation) and not ranks.empty:
+    liquidity_adjusted_sizing_on = risk_strategy_enabled(cfg, "liquidity_adjusted_sizing")
+    if (cfg.use_liquidity_filter or cfg.use_volume_confirmation or liquidity_adjusted_sizing_on) and not ranks.empty:
         ohlcv = fetch_ohlcv_for_tickers(tickers, fmp_api_key=fmp_api_key, eodhd_api_key=eodhd_api_key)
         volume_by_ticker = {t: df["volume"] for t, df in ohlcv.items() if "volume" in df.columns}
         if volume_by_ticker:
             df_volume = pd.DataFrame(volume_by_ticker)
         else:
-            logger.warning("[%s] use_liquidity_filter/use_volume_confirmation is set but no "
-                            "volume data could be fetched for any ticker, both filters skipped "
-                            "this rebalance.", portfolio)
+            logger.warning("[%s] use_liquidity_filter/use_volume_confirmation/"
+                            "liquidity_adjusted_sizing is set but no volume data could be "
+                            "fetched for any ticker, all filters skipped this rebalance.", portfolio)
     if cfg.use_liquidity_filter and df_volume is not None:
         ranks = liquidity_filter(ranks, daily_prices[tickers], df_volume,
                                   cfg.min_avg_dollar_volume, cfg.liquidity_lookback_days)
@@ -3025,8 +3097,39 @@ def run(
             skip_result.picks_were_empty = picks_were_empty
             return skip_result
 
+    # --- Liquidity-Adjusted Position Sizing (Epic 1, "Institutional Risk-Management Features"
+    #     plan, Story 1.5): an ACTIVE counterpart to the advisory-only capacity check below,
+    #     which never mutates a size. Scales down any ticker's target dollar allocation that
+    #     would exceed max_pct_of_adv of its own trailing average daily dollar volume, using the
+    #     SAME df_volume already fetched above for use_liquidity_filter/use_volume_confirmation
+    #     (no new fetch). Deliberately downstream of resolve_target_weights()/
+    #     compute_target_weights() (weight-space, no concept of dollars) rather than inside it,
+    #     see docs/RISK_CONSTRAINTS.md's "Liquidity-Adjusted Position Sizing (Active)" for why. ---
+    target_dollar_override = None
+    if liquidity_adjusted_sizing_on and df_volume is not None:
+        from ..core.functions_quant_extensions import scale_dollar_targets_for_capacity
+
+        raw_target_dollar = {t: total_value * gross_exposure * w for t, w in weights.items()}
+        # Group tickers by their resolved max_pct_of_adv (almost always all tickers share the
+        # portfolio-wide default; only a per-ticker ticker_risk_overrides entry creates a second
+        # group), so scale_dollar_targets_for_capacity()'s single-shared-cap contract still
+        # gets exactly one call per distinct cap value, not one call per ticker.
+        by_cap: dict[float, dict] = {}
+        for t, dollar in raw_target_dollar.items():
+            cap = resolve_ticker_max_pct_of_adv(t, cfg)
+            by_cap.setdefault(cap, {})[t] = dollar
+        target_dollar_override = {}
+        for cap, subset in by_cap.items():
+            target_dollar_override.update(
+                scale_dollar_targets_for_capacity(
+                    subset, df_volume, daily_prices, daily_prices.index[-1], cap,
+                    cfg.liquidity_lookback_days,
+                )
+            )
+
     orders = generate_orders(current_holdings, weights, gross_exposure, total_value, latest_prices, cfg,
-                              signal_context=signal_context, current_positions=current_positions)
+                              signal_context=signal_context, current_positions=current_positions,
+                              target_dollar_override=target_dollar_override)
 
     for ticker, order in orders.items():
         logger.info("%-6s %-4s shares=%-8.4f (%s)", ticker, order["action"], order["shares"], order["reason"])

@@ -30,7 +30,7 @@ from momentum_trading.execution.live_signal import (
     compute_required_lookback_days, resolve_lookback_period_row_count,
     _realized_weighted_portfolio_vol, apply_absolute_momentum_filter,
     compute_stop_loss_price, log_signal_rankings, SIGNAL_RANKINGS_LOG_HEADER, OrdersResult,
-    resolve_ticker_stop_loss_pct, IBKR_INFORMATIONAL_CODES,
+    resolve_ticker_stop_loss_pct, resolve_ticker_max_pct_of_adv, IBKR_INFORMATIONAL_CODES,
 )
 from momentum_trading.core.audit_log import read_recent_alerts
 
@@ -1114,6 +1114,86 @@ class TestRunLiquidityFilter:
             )
         assert "filters skipped" in caplog.text
         assert set(orders.keys()) == {"C"}  # filter effectively a no-op when no volume at all
+
+
+class TestRunLiquidityAdjustedSizing:
+    """
+    enabled_risk_strategies: [liquidity_adjusted_sizing] end-to-end through run() (Epic 1,
+    "Institutional Risk-Management Features" plan, Story 1.5): distinct from
+    TestRunLiquidityFilter above (which EXCLUDES an illiquid ticker from selection entirely).
+    This feature keeps a thin ticker selected but SCALES DOWN its target dollar allocation to
+    the ADV cap, reusing the SAME volume-fetch mechanism as that filter.
+    """
+
+    def _ranked_prices(self, seed=11):
+        dates = pd.bdate_range("2024-01-01", "2024-05-15")
+        rng = np.random.default_rng(seed)
+        n = len(dates)
+        a = np.linspace(50, 70, n) * (1 + rng.normal(0, 0.0005, n))
+        b = np.linspace(50, 60, n) * (1 + rng.normal(0, 0.0005, n))
+        return pd.DataFrame({"A": a, "B": b}, index=dates)
+
+    def _install_volume(self, monkeypatch, prices, thin_ticker="A", thin_volume=10.0, liquid_volume=1_000_000.0):
+        def fake_ohlcv(tickers, **k):
+            result = {}
+            for t in tickers:
+                vol = thin_volume if t == thin_ticker else liquid_volume
+                result[t] = pd.DataFrame({
+                    "open": prices[t], "high": prices[t], "low": prices[t], "close": prices[t],
+                    "volume": vol,
+                }, index=prices.index)
+            return result
+        monkeypatch.setattr(live_signal, "fetch_ohlcv_for_tickers", fake_ohlcv)
+
+    def _run_kwargs(self, tmp_path):
+        return dict(
+            log_path=str(tmp_path / "trade_log.csv"),
+            signal_rankings_log_path=str(tmp_path / "signal_rankings_log.csv"),
+            alerts_log_path=str(tmp_path / "alerts_log.csv"),
+        )
+
+    def test_thin_ticker_scaled_down_below_raw_target(self, monkeypatch, tmp_path):
+        prices = self._ranked_prices()
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        self._install_volume(monkeypatch, prices)
+        monkeypatch.chdir(tmp_path)
+        # max_pct_of_adv > 0 ALSO triggers the pre-existing, unrelated advisory capacity check
+        # further down in run() (a real fn.get_stock_prices() network call per ticker), mock it
+        # so this test stays hermetic, matching docs/TESTING.md's "no network access required"
+        # convention; this is pre-existing behavior of that advisory block, not something Story
+        # 1.5 introduced.
+        monkeypatch.setattr(live_signal.fn, "get_stock_prices", lambda *a, **k: (_ for _ in ()).throw(Exception("network disabled in test")))
+
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False, top_n=2,
+                              enabled_risk_strategies=["liquidity_adjusted_sizing"],
+                              max_pct_of_adv=0.05, sizing_method="equal_weight")
+        orders = live_signal.run(
+            tickers=["A", "B"], current_holdings={}, total_value=1_000_000.0, cfg=cfg,
+            top_n=2, lookback_period=1.0, dry_run=True, **self._run_kwargs(tmp_path),
+        )
+        # A's raw target (equal_weight capped to max_position_weight=0.35 of $1M = $350k) would
+        # massively exceed 5% of its thin ~$10/day-times-~10-shares ADV; confirm it was actually
+        # scaled down to a tiny fraction of that, not left anywhere near raw.
+        assert orders["A"]["money_invested"] < 350_000.0 * 0.1  # meaningfully, not just slightly, reduced
+        # B (liquid) should be at its own uncapped target, unaffected.
+        assert orders["B"]["money_invested"] == pytest.approx(350_000.0)
+        assert orders["B"]["money_invested"] > orders["A"]["money_invested"]
+
+    def test_default_disabled_is_byte_identical(self, monkeypatch, tmp_path):
+        prices = self._ranked_prices()
+        monkeypatch.setattr(live_signal, "fetch_live_prices", lambda tickers, **k: prices[list(tickers)])
+        self._install_volume(monkeypatch, prices)
+        monkeypatch.chdir(tmp_path)
+
+        cfg_on = BacktestConfig(holding_period=1, use_regime_filter=False, top_n=2,
+                                 sizing_method="equal_weight")
+        orders_default = live_signal.run(
+            tickers=["A", "B"], current_holdings={}, total_value=1_000_000.0, cfg=cfg_on,
+            top_n=2, lookback_period=1.0, dry_run=True, **self._run_kwargs(tmp_path),
+        )
+        # equal_weight (0.5 each) is capped by the portfolio's default max_position_weight
+        # (0.35), so the real uncapped-by-liquidity target is 35%, not 50%.
+        assert orders_default["A"]["money_invested"] == pytest.approx(350_000.0)
 
 
 class TestRunTechnicalConfirmation:
@@ -2326,6 +2406,34 @@ class TestResolveTickerStopLossPct:
         assert resolve_ticker_stop_loss_pct("AMD", cfg) == pytest.approx(0.08)
 
 
+class TestResolveTickerMaxPctOfAdv:
+    """
+    Per-ticker Liquidity-Adjusted Position Sizing cap override (Epic 1, "Institutional
+    Risk-Management Features" plan, Story 1.5, BacktestConfig.ticker_risk_overrides's new
+    'max_pct_of_adv' key), same resolution shape as TestResolveTickerStopLossPct above.
+    """
+    def test_no_override_falls_back_to_portfolio_default(self):
+        cfg = BacktestConfig(max_pct_of_adv=0.05)
+        assert resolve_ticker_max_pct_of_adv("AAPL", cfg) == pytest.approx(0.05)
+
+    def test_custom_pct_overrides_portfolio_default(self):
+        cfg = BacktestConfig(max_pct_of_adv=0.05,
+                              ticker_risk_overrides={"XLE": {"max_pct_of_adv": 0.10}})
+        assert resolve_ticker_max_pct_of_adv("XLE", cfg) == pytest.approx(0.10)
+
+    def test_custom_pct_does_not_affect_other_tickers(self):
+        cfg = BacktestConfig(max_pct_of_adv=0.05,
+                              ticker_risk_overrides={"XLE": {"max_pct_of_adv": 0.10}})
+        assert resolve_ticker_max_pct_of_adv("SPY", cfg) == pytest.approx(0.05)
+
+    def test_enabled_false_does_not_affect_max_pct_of_adv(self):
+        # 'enabled': false only disables the STOP-LOSS check (a distinct concern), not
+        # liquidity-adjusted sizing, confirmed explicitly since resolve_ticker_stop_loss_pct()
+        # returns None in this exact scenario but this resolver must not.
+        cfg = BacktestConfig(max_pct_of_adv=0.05, ticker_risk_overrides={"AAPL": {"enabled": False}})
+        assert resolve_ticker_max_pct_of_adv("AAPL", cfg) == pytest.approx(0.05)
+
+
 class TestTickerRiskOverridesValidation:
     """BacktestConfig.__post_init__ validation for ticker_risk_overrides."""
     def test_valid_overrides_construct_cleanly(self):
@@ -2346,6 +2454,14 @@ class TestTickerRiskOverridesValidation:
     def test_out_of_range_stop_loss_pct_rejected(self):
         with pytest.raises(ValueError):
             BacktestConfig(ticker_risk_overrides={"AAPL": {"stop_loss_pct": 1.5}})
+
+    def test_valid_max_pct_of_adv_override_construct_cleanly(self):
+        # Epic 1, Story 1.5: max_pct_of_adv joins enabled/stop_loss_pct as a 3rd allowed key.
+        BacktestConfig(ticker_risk_overrides={"XLE": {"max_pct_of_adv": 0.10}})
+
+    def test_out_of_range_max_pct_of_adv_rejected(self):
+        with pytest.raises(ValueError):
+            BacktestConfig(ticker_risk_overrides={"XLE": {"max_pct_of_adv": 1.5}})
 
 
 class TestComputeStopLossPrice:
@@ -2480,6 +2596,34 @@ class TestGenerateOrders:
         assert orders["SPY"]["action"] == "HOLD"
         assert orders["SPY"]["money_invested"] == pytest.approx(500.0)
         assert orders["XLK"]["money_invested"] == pytest.approx(500.0)
+
+    def test_target_dollar_override_replaces_only_the_named_ticker(self):
+        # Epic 1, Story 1.5 (Liquidity-Adjusted Position Sizing): target_dollar_override, when
+        # given, REPLACES the normal total_value*gross_exposure*weight computation only for the
+        # ticker(s) present in it, every other ticker is unaffected.
+        cfg = BacktestConfig(drift_threshold=0.0, min_trade_size=1.0)
+        orders = generate_orders(
+            current_holdings={}, target_weights={"SPY": 0.5, "XLK": 0.5},
+            gross_exposure=1.0, total_value=1000.0,
+            latest_prices={"SPY": 500.0, "XLK": 220.0}, cfg=cfg,
+            target_dollar_override={"XLK": 200.0},  # scaled down from the raw 500.0
+        )
+        assert orders["SPY"]["money_invested"] == pytest.approx(500.0)  # unaffected
+        assert orders["XLK"]["money_invested"] == pytest.approx(200.0)  # overridden
+
+    def test_target_dollar_override_none_is_byte_identical(self):
+        cfg = BacktestConfig(drift_threshold=0.0, min_trade_size=1.0)
+        orders_default = generate_orders(
+            current_holdings={}, target_weights={"SPY": 0.5, "XLK": 0.5}, gross_exposure=1.0,
+            total_value=1000.0, latest_prices={"SPY": 500.0, "XLK": 220.0}, cfg=cfg,
+        )
+        orders_explicit_none = generate_orders(
+            current_holdings={}, target_weights={"SPY": 0.5, "XLK": 0.5}, gross_exposure=1.0,
+            total_value=1000.0, latest_prices={"SPY": 500.0, "XLK": 220.0}, cfg=cfg,
+            target_dollar_override=None,
+        )
+        assert orders_default["SPY"]["money_invested"] == orders_explicit_none["SPY"]["money_invested"]
+        assert orders_default["XLK"]["shares"] == orders_explicit_none["XLK"]["shares"]
 
     def test_pct_money_invested_matches_target_weight(self):
         cfg = BacktestConfig(drift_threshold=0.0, min_trade_size=1.0)
@@ -3167,6 +3311,32 @@ class TestLivePositionCap:
         assert max(weights.values()) <= cfg.max_position_weight + 1e-9
         assert sum(weights.values()) == pytest.approx(1.0)
 
+    def test_equal_risk_contribution_sizing_matches_backtest_exactly(self, tmp_path):
+        # Epic 1, Story 1.3: live/backtest parity test for the new "equal_risk_contribution"
+        # sizing_method. compute_target_weights() and resolve_target_weights() must produce
+        # IDENTICAL weights given identical inputs, since compute_target_weights() calls
+        # resolve_target_weights() directly (the same single-source-of-truth function the
+        # backtest engine calls) with as_of = daily_prices.index[-1], proving live sizing can
+        # never silently diverge from what the backtest would compute for this sizing method.
+        from momentum_trading.backtest.momentum_backtest import resolve_target_weights
+
+        rng = np.random.default_rng(7)
+        dates = pd.bdate_range("2024-01-01", periods=120)
+        n = len(dates)
+        low_vol = 100 * np.cumprod(1 + rng.normal(0.0002, 0.004, n))
+        high_vol = 100 * np.cumprod(1 + rng.normal(0.0002, 0.025, n))
+        prices = pd.DataFrame({"LOW": low_vol, "HIGH": high_vol}, index=dates)
+
+        cfg = BacktestConfig(sizing_method="equal_risk_contribution",
+                              use_regime_filter=False, use_correlation_spike_regime=False,
+                              max_position_weight=0.95)
+        alerts_path = str(tmp_path / "alerts_log.csv")
+        live_weights, _ = compute_target_weights(["LOW", "HIGH"], prices, cfg,
+                                                   portfolio="p1", alerts_log_path=alerts_path)
+        backtest_weights = resolve_target_weights(["LOW", "HIGH"], prices, prices.index[-1], cfg)
+
+        assert live_weights == backtest_weights
+
 
 class TestRealizedWeightedPortfolioVol:
     """
@@ -3287,6 +3457,75 @@ class TestVolTargetingScaling:
         assert gross_exposure == pytest.approx(expected)
         # Confirm this composition actually differs from vol_scalar alone (proves both are active).
         assert gross_exposure < vol_scalar
+
+
+class TestVarCvarBudgetLive:
+    """
+    VaR/CVaR Budget (Epic 1, "Institutional Risk-Management Features" plan, Story 1.4),
+    live-trading equivalent of run_risk_managed_backtest()'s identical formula. Sourced from
+    _weighted_portfolio_returns_series() (this file's own live substitute for a real simulated
+    equity curve), NOT the backtest's portfolio_history, a deliberate sourcing asymmetry (see
+    docs/RISK_CONSTRAINTS.md's "VaR/CVaR Budget" section), so these tests confirm the MECHANISM
+    fires correctly here, not that live/backtest numbers match bit-for-bit.
+    """
+
+    def _synthetic_universe(self, n=280, vol=0.02, seed=17):
+        rng = np.random.default_rng(seed)
+        dates = pd.bdate_range("2023-01-01", periods=n)
+        a = 100 * np.cumprod(1 + rng.normal(0.0002, vol, n))
+        b = 50 * np.cumprod(1 + rng.normal(0.0002, vol, n))
+        return pd.DataFrame({"A": a, "B": b}, index=dates)
+
+    def test_disabled_by_default_is_byte_identical(self, tmp_path):
+        prices = self._synthetic_universe()
+        cfg_default = BacktestConfig(use_regime_filter=False, use_correlation_spike_regime=False)
+        cfg_explicit_off = BacktestConfig(use_regime_filter=False, use_correlation_spike_regime=False,
+                                           enabled_risk_strategies=[])
+        alerts_path = str(tmp_path / "alerts_log.csv")
+        w1, exp1 = compute_target_weights(["A", "B"], prices, cfg_default,
+                                           portfolio="p1", alerts_log_path=alerts_path)
+        w2, exp2 = compute_target_weights(["A", "B"], prices, cfg_explicit_off,
+                                           portfolio="p1", alerts_log_path=alerts_path)
+        assert w1 == w2
+        assert exp1 == pytest.approx(exp2)
+
+    def test_tight_budget_throttles_exposure_below_max(self, tmp_path):
+        prices = self._synthetic_universe(vol=0.03)  # meaningfully volatile
+        cfg = BacktestConfig(use_regime_filter=False, use_correlation_spike_regime=False,
+                              target_portfolio_vol=10.0,  # neutralize the vol-targeting scalar
+                              enabled_risk_strategies=["var_cvar_budget"],
+                              var_budget_pct=0.01,  # deliberately tight, should bind
+                              var_cvar_lookback_days=63, min_gross_exposure=0.10,
+                              max_gross_exposure=1.0)
+        alerts_path = str(tmp_path / "alerts_log.csv")
+        _, gross_exposure = compute_target_weights(["A", "B"], prices, cfg,
+                                                     portfolio="p1", alerts_log_path=alerts_path)
+        assert gross_exposure < cfg.max_gross_exposure
+
+    def test_wide_budget_stays_at_max_gross_exposure(self, tmp_path):
+        prices = self._synthetic_universe(vol=0.005)  # deliberately calm
+        cfg = BacktestConfig(use_regime_filter=False, use_correlation_spike_regime=False,
+                              target_portfolio_vol=10.0,
+                              enabled_risk_strategies=["var_cvar_budget"],
+                              var_budget_pct=0.50,  # deliberately loose, should never bind
+                              var_cvar_lookback_days=63, min_gross_exposure=0.10,
+                              max_gross_exposure=1.0)
+        alerts_path = str(tmp_path / "alerts_log.csv")
+        _, gross_exposure = compute_target_weights(["A", "B"], prices, cfg,
+                                                     portfolio="p1", alerts_log_path=alerts_path)
+        assert gross_exposure == pytest.approx(cfg.max_gross_exposure)
+
+    def test_exceeded_budget_writes_alert(self, tmp_path):
+        prices = self._synthetic_universe(vol=0.03)
+        cfg = BacktestConfig(use_regime_filter=False, use_correlation_spike_regime=False,
+                              target_portfolio_vol=10.0,
+                              enabled_risk_strategies=["var_cvar_budget"],
+                              var_budget_pct=0.01, var_cvar_lookback_days=63,
+                              min_gross_exposure=0.10, max_gross_exposure=1.0)
+        alerts_path = str(tmp_path / "alerts_log.csv")
+        compute_target_weights(["A", "B"], prices, cfg, portfolio="p1", alerts_log_path=alerts_path)
+        alert_contents = open(alerts_path).read()
+        assert "VAR_CVAR_BUDGET_EXCEEDED" in alert_contents
 
 
 class TestRegimeVolatilityDimension:

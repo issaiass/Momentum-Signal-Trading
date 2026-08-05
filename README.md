@@ -147,7 +147,24 @@ README says so on purpose.
   SUMMED weight of every ticker mapped to the same sector (a manual mapping, no vendor
   sector-data source exists in this project), scaling an over-cap sector down to exactly the
   limit without redistributing the freed weight elsewhere, left as unallocated cash instead, see
-  `docs/RISK_CONSTRAINTS.md`'s "Sector / Asset-Class Concentration Cap" section. Restart-safe by
+  `docs/RISK_CONSTRAINTS.md`'s "Sector / Asset-Class Concentration Cap" section. Equal Risk
+  Contribution (ERC/risk-parity) sizing (`sizing_method: equal_risk_contribution`, LIVE +
+  BACKTEST): a 5th sizing option alongside `inverse_vol`/`score_proportional`/`equal_weight`/
+  `risk_based`, every pick contributes an equal share of total portfolio risk rather than an
+  equal dollar amount or a volatility-only weight, backed by a new Ledoit-Wolf-style shrinkage
+  covariance estimator (`core/covariance.py`, also optionally usable by the existing correlation
+  penalty via `use_shrinkage_covariance`) for a better-conditioned covariance matrix than raw
+  sample covariance. VaR/CVaR Budget (`enabled_risk_strategies: [var_cvar_budget]`, opt-in, LIVE
+  + BACKTEST): an active pre-trade gross-exposure throttle using `historical_var_cvar()`
+  (previously fully coded but wired into nothing anywhere in the codebase), a new multiplicative
+  scalar alongside the existing volatility-targeting/momentum-crash scalars. Liquidity-Adjusted
+  Position Sizing (`enabled_risk_strategies: [liquidity_adjusted_sizing]`, opt-in, LIVE +
+  BACKTEST): continuous ADV-based position-size scaling, distinct from the pre-existing advisory-
+  only capacity check (which only warns, never resizes), scales any oversized target allocation
+  down to exactly its ADV cap. All three verified end-to-end (2026-08-05) against a real IBKR
+  paper account and inside a rebuilt Docker container, real BUY fills confirmed for each feature
+  individually and combined, see `docs/RISK_CONSTRAINTS.md`'s "Opt-in overlay strategies"
+  section for the full verification writeup. Restart-safe by
   construction in `--live` mode (broker-sourced
   holdings, calendar-derived scheduling, persisted local/bind-mounted state, both native Python
   and Docker), plus a non-blocking `MISSED_REBALANCE_DAY` warning if a scheduled rebalance was

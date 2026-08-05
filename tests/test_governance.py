@@ -87,6 +87,63 @@ class TestCapacityCheck:
         assert bool(result["LIQUID"]["flagged"]) is False
 
 
+class TestScaleDollarTargetsForCapacity:
+    """
+    scale_dollar_targets_for_capacity() (Epic 1, "Institutional Risk-Management Features"
+    plan, Story 1.5), the ACTIVE counterpart to check_capacity() above: instead of only
+    flagging an oversized target, it scales it down to exactly the ADV cap. Reuses
+    check_capacity()'s own ADV formula internally, these tests confirm that reuse produces the
+    exact numeric claim (scaled to the cap, not "roughly less"), and that an under-cap ticker is
+    left completely unchanged.
+    """
+
+    def test_thin_ticker_scaled_down_to_exact_cap(self):
+        dates = pd.bdate_range("2026-01-01", "2026-03-01")
+        prices = pd.DataFrame({"THIN": 50.0, "LIQUID": 200.0}, index=dates)
+        volume = pd.DataFrame({"THIN": 1000, "LIQUID": 5_000_000}, index=dates)
+        # THIN's ADV = 50 * 1000 = 50,000/day; 5% of that = 2,500. Target of 5,000 is 2x the cap.
+        scaled = fnx.scale_dollar_targets_for_capacity(
+            {"THIN": 5000.0, "LIQUID": 5000.0}, volume, prices, dates[-1], max_pct_of_adv=0.05,
+        )
+        assert scaled["THIN"] == pytest.approx(2500.0)
+
+    def test_liquid_ticker_under_cap_is_unchanged(self):
+        dates = pd.bdate_range("2026-01-01", "2026-03-01")
+        prices = pd.DataFrame({"THIN": 50.0, "LIQUID": 200.0}, index=dates)
+        volume = pd.DataFrame({"THIN": 1000, "LIQUID": 5_000_000}, index=dates)
+        scaled = fnx.scale_dollar_targets_for_capacity(
+            {"THIN": 5000.0, "LIQUID": 5000.0}, volume, prices, dates[-1], max_pct_of_adv=0.05,
+        )
+        assert scaled["LIQUID"] == pytest.approx(5000.0)
+
+    def test_missing_volume_data_leaves_targets_unchanged(self):
+        # check_capacity()'s own "can't check, treat as fine" precedent: a ticker with no usable
+        # ADV data is left at its original target, not silently zeroed or scaled to 0.
+        dates = pd.bdate_range("2026-01-01", "2026-03-01")
+        prices = pd.DataFrame({"THIN": 50.0}, index=dates)
+        scaled = fnx.scale_dollar_targets_for_capacity(
+            {"THIN": 5000.0}, None, prices, dates[-1], max_pct_of_adv=0.05,
+        )
+        assert scaled["THIN"] == pytest.approx(5000.0)
+
+    def test_no_max_pct_of_adv_gate_means_nothing_flagged(self):
+        # max_pct_of_adv=0 disables the constraint entirely (matches BacktestConfig's own
+        # max_pct_of_adv=0.0 default meaning "disabled").
+        dates = pd.bdate_range("2026-01-01", "2026-03-01")
+        prices = pd.DataFrame({"THIN": 50.0}, index=dates)
+        volume = pd.DataFrame({"THIN": 1000}, index=dates)
+        scaled = fnx.scale_dollar_targets_for_capacity(
+            {"THIN": 5000.0}, volume, prices, dates[-1], max_pct_of_adv=0.0,
+        )
+        # 0% of ADV as the cap would mean EVERYTHING is over cap; confirm this function still
+        # scales it down to the (zero) cap rather than silently treating 0 as "disabled" itself,
+        # a genuinely different contract from check_capacity()'s own advisory flagging. Callers
+        # (execution/live_signal.py, backtest/momentum_backtest.py) are responsible for not
+        # calling this function at all when max_pct_of_adv is 0/disabled, matching how they
+        # already gate check_capacity() the same way.
+        assert scaled["THIN"] == pytest.approx(0.0)
+
+
 class TestHashChainAuditLog:
     """
     The trade log's hash-chain exists to make tampering DETECTABLE (not

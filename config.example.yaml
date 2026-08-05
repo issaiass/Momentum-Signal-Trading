@@ -273,6 +273,23 @@ default_risk:
                                    # not a replacement for either.
   portfolio_vol_lookback: 21      # trailing trading days used to estimate realized portfolio
                                    # vol for the target_portfolio_vol scaling above (~1 month)
+
+  # VaR/CVaR Budget (Epic 1, "Institutional Risk-Management Features" plan), an ADDITIONAL
+  # multiplicative exposure scalar alongside target_portfolio_vol above, gated via
+  # enabled_risk_strategies: [var_cvar_budget] (see that field near sizing_method below), not
+  # a plain use_X toggle. Closes a real, confirmed gap: core/functions_quant_extensions.py's
+  # historical_var_cvar() existed, fully coded, but was wired into nothing before this epic.
+  var_budget_pct: null            # required when var_cvar_budget is enabled, e.g. 0.05 =
+                                   # throttle exposure once 95%-confidence CVaR (Expected
+                                   # Shortfall) would risk more than 5% of capital. null
+                                   # (default) leaves this overlay inert even if named in
+                                   # enabled_risk_strategies (a validation error prevents that
+                                   # combination from silently doing nothing).
+  var_cvar_confidence: 0.95       # confidence level passed to historical_var_cvar()
+  var_cvar_lookback_days: 252     # ~1 year of daily returns, deliberately longer than
+                                   # portfolio_vol_lookback above, tail-risk estimation needs
+                                   # more history than a short-term vol estimate does
+
   vol_lookback_days: 63           # trailing trading days used for inverse-vol POSITION sizing
                                    # (~3 months), distinct from portfolio_vol_lookback above,
                                    # which is for the PORTFOLIO-level scalar, not per-ticker weights
@@ -362,20 +379,26 @@ default_risk:
                                    # above, both children attach as an IBKR One-Cancels-All (OCA)
                                    # pair, whichever triggers first cancels the other. See
                                    # docs/RISK_CONSTRAINTS.md's "Broker-Native Trailing Stop".
-  ticker_risk_overrides: {}       # per-ticker override of stop_loss_pct above, {} (default) =
-                                   # every ticker uses the portfolio-wide stop_loss_pct, no
+  ticker_risk_overrides: {}       # per-ticker override of stop_loss_pct/max_pct_of_adv, {}
+                                   # (default) = every ticker uses the portfolio-wide values, no
                                    # per-ticker behavior change. Keyed by ticker, each entry may
-                                   # set 'enabled' (bool) and/or 'stop_loss_pct' (float in
-                                   # (0, 1.0)), 'enabled: false' disables the stop-loss check
-                                   # entirely for that ticker (never flagged/sold, no broker-side
-                                   # bracket attached even if attach_broker_stop_loss is on for
-                                   # the rest of the portfolio); a 'stop_loss_pct' without
-                                   # 'enabled: false' uses that ticker-specific width instead of
-                                   # the portfolio default. Example:
+                                   # set 'enabled' (bool), 'stop_loss_pct' (float in (0, 1.0)),
+                                   # and/or 'max_pct_of_adv' (float in (0, 1.0], Epic 1's
+                                   # Liquidity-Adjusted Position Sizing cap, see
+                                   # enabled_risk_strategies below). 'enabled: false' disables
+                                   # ONLY the stop-loss check for that ticker (never flagged/
+                                   # sold, no broker-side bracket attached even if
+                                   # attach_broker_stop_loss is on for the rest of the
+                                   # portfolio, and NOT liquidity-adjusted sizing, a distinct
+                                   # concern); a 'stop_loss_pct' without 'enabled: false' uses
+                                   # that ticker-specific width instead of the portfolio
+                                   # default. Example:
                                    #   ticker_risk_overrides:
                                    #     AAPL: {enabled: false}       # never stop-loss-checked
                                    #     AMD: {stop_loss_pct: 0.08}   # tighter than the portfolio default
-                                   # See docs/RISK_CONSTRAINTS.md's "Per-Ticker Stop-Loss Override".
+                                   #     XLE: {max_pct_of_adv: 0.10}  # looser ADV cap than the portfolio default
+                                   # See docs/RISK_CONSTRAINTS.md's "Per-Ticker Stop-Loss
+                                   # Override" and "Liquidity-Adjusted Position Sizing (Active)".
   use_correlation_penalty: false  # true = downweight sizing for positions correlated with other
                                    # current picks (distinct from use_correlation_spike_regime below)
   correlation_lookback_days: 63   # LIVE + BACKTEST, only meaningful when use_correlation_penalty
@@ -392,6 +415,16 @@ default_risk:
                                    # correlation-based downweighting. 0.5 (default) is a
                                    # moderate middle ground; a value outside [0, 1.0] fails
                                    # config validation with a clear error naming this field.
+  use_shrinkage_covariance: false # Epic 1 ("Institutional Risk-Management Features" plan).
+                                   # Only meaningful when use_correlation_penalty is also true.
+                                   # false (default) is byte-identical to before this field
+                                   # existed: the correlation matrix comes from raw pandas
+                                   # .corr(). true instead derives it from
+                                   # core/covariance.py's shrinkage_covariance() (Ledoit-Wolf-
+                                   # style), better-conditioned than a raw sample matrix when
+                                   # correlation_lookback_days is small relative to the number
+                                   # of tickers. See docs/RISK_CONSTRAINTS.md's "Shrinkage
+                                   # Covariance Estimator".
   aggregate_drift_threshold: 0.0  # 0 = disabled (always rebalance if scheduled);
                                    # e.g. 0.02 = skip the WHOLE rebalance if aggregate drift is <2%
                                    # (applies to both backtest and --live, same formula)
@@ -473,17 +506,41 @@ default_risk:
   sizing_method: inverse_vol          # "inverse_vol" (default, underweights noisier names),
                                        # "score_proportional" (stronger momentum gets more
                                        # capital), "equal_weight" (non-parametric, every pick
-                                       # gets an identical 1/N weight), or "risk_based"
+                                       # gets an identical 1/N weight), "risk_based"
                                        # (fixed-fractional, sizes off risk_per_trade_pct below
                                        # and each pick's own stop-loss distance, see
                                        # docs/RISK_CONSTRAINTS.md's "Risk-Based Position
-                                       # Sizing"; the only one of the four that does NOT
+                                       # Sizing"; the only one of the five that does NOT
                                        # normalize weights to sum to 1.0, aggregate exposure
-                                       # emerges from the risk budget instead)
+                                       # emerges from the risk budget instead), or
+                                       # "equal_risk_contribution" (Epic 1, "Institutional
+                                       # Risk-Management Features" plan: risk-parity, every
+                                       # pick contributes an EQUAL share of total portfolio
+                                       # risk rather than an equal dollar amount or a
+                                       # volatility-only weight, uses core/covariance.py's
+                                       # shrinkage_covariance(), see docs/RISK_CONSTRAINTS.md's
+                                       # "Equal Risk Contribution (ERC) Sizing")
   risk_per_trade_pct: 0.02            # only meaningful when sizing_method is "risk_based":
                                        # sizes each position so a full stop-out loses exactly
                                        # this fraction of total capital, e.g. 0.02 = risk 2% of
                                        # capital per trade
+
+  # Opt-in institutional risk-strategy overlays (docs/RISK_CONSTRAINTS.md's "Opt-in overlay
+  # strategies" section), a list of names, deliberately a SEPARATE enabling mechanism from the
+  # use_X: true/false toggles used everywhere else in this file. Reserved for genuinely
+  # independent/stackable overlays only (not a mutually-exclusive choice like sizing_method,
+  # which already has its own "pick by name" mechanism, e.g. "equal_risk_contribution" below).
+  # [] (default) is byte-identical to before this field existed. An unrecognized name here is a
+  # hard config error (fail loud on a typo), not a silent no-op.
+  enabled_risk_strategies: []         # e.g. ["var_cvar_budget", "liquidity_adjusted_sizing"].
+                                       # Recognized names (see RISK_STRATEGY_ALIASES in
+                                       # backtest/momentum_backtest.py for accepted aliases of
+                                       # each): "var_cvar_budget" (Value-at-Risk / Expected
+                                       # Shortfall active pre-trade exposure budget, see
+                                       # var_budget_pct below), "liquidity_adjusted_sizing"
+                                       # (continuous ADV-based position-size scaling, distinct
+                                       # from the existing advisory-only max_pct_of_adv warning
+                                       # below, see docs/RISK_CONSTRAINTS.md)
 
   # Selectable momentum strategy (docs/MOMENTUM_STRATEGIES.md), per-portfolio via risk_overrides,
   # same mechanism as every other field here (portfolio A can run dual_momentum while portfolio B
@@ -548,7 +605,14 @@ default_risk:
                                        # check_capacity() function (core/functions_quant_
                                        # extensions.py) is also directly callable from a
                                        # notebook for ad-hoc backtest-side capacity analysis,
-                                       # this field only wires it into the LIVE path.
+                                       # this field only wires it into the LIVE path. Also reused
+                                       # as the ACTIVE scaling ceiling (not just an advisory
+                                       # warning) once enabled_risk_strategies below includes
+                                       # liquidity_adjusted_sizing (Epic 1, LIVE + BACKTEST,
+                                       # unlike this advisory check which is LIVE-only), see
+                                       # docs/RISK_CONSTRAINTS.md's "Liquidity-Adjusted Position
+                                       # Sizing (Active)"; this advisory warning itself stays
+                                       # completely unchanged either way.
 
   # Liquidity / universe filter, LIVE + BACKTEST, a PRE-selection eligibility filter (distinct
   # from max_pct_of_adv above, a POST-selection advisory warning): zeroes a ticker's RANK on any

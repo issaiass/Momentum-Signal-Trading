@@ -38,6 +38,97 @@ Everything in this table lives entirely in the `daily_runner.py`/`execution/live
 `risk/risk_monitor.py`, that's deliberate, not an oversight, see "Independence from
 `risk_monitor.py`" at the bottom of this file.
 
+## Institutional risk-practice audit (24-item review, Epic 1)
+
+A broader, one-time audit against 24 institutional/hedge-fund risk-management practices
+(requested directly, not derived from the 7-tier table above, which predates this audit and is
+its own narrower, already-implemented curated subset). Confirmed by reading the actual code, not
+guessed. Status legend: **Implemented (pre-existing)** = already shipped before this audit, no
+work done here; **Not Applicable** = conflicts with a fundamental architecture invariant of this
+system (strictly long-only, no shorting, no derivatives, cash-only/unlevered, single broker),
+same treatment as the pre-existing HTB Sentinel row above; **Planned** = real gap, scheduled into
+one of Epics 1-4 below, each row updated to **Implemented** with real details as its own Epic
+lands (not written speculatively in advance).
+
+| # | Practice | Status |
+|---|---|---|
+| 1 | Volatility Targeting / Scaling | **Implemented (pre-existing)**, see "Volatility Scaling (Portfolio-Level)" above |
+| 2 | ATR-Based Trailing Stops | **Planned, Epic 2** — the existing `use_trailing_stop`/`trailing_stop_pct` trail is percentage-based; `core/technical_indicators.py`'s `atr()` exists but was, before this audit, wired into nothing but the email report |
+| 3 | Cross-Sectional Beta Neutralization | **Not Applicable** — requires a short leg to neutralize net beta against; this system is strictly long-only |
+| 4 | Sector and Industry Neutralization | **Not Applicable (today)** — true benchmark-relative neutralization needs a real constituent-weights feed (e.g. actual S&P 500 sector weights) this project doesn't integrate; the existing `max_sector_weight`/`ticker_sectors` hard cap (row 20 below) is the practical substitute this system ships |
+| 5 | Equal Risk Contribution (Risk Parity) | **Planned, Epic 1** — a new `sizing_method: equal_risk_contribution` value, see "Equal Risk Contribution (ERC) Sizing" below |
+| 6 | Value-at-Risk (VaR) Budgeting | **Planned, Epic 1** — `core/functions_quant_extensions.py`'s `historical_var_cvar()` existed, fully coded, but before this audit was wired into nothing (its only 2 callers in the whole repo were `tests/test_governance.py`), see "VaR/CVaR Budget (Active Pre-Trade Constraint)" below |
+| 7 | Expected Shortfall (Conditional VaR) Optimization | **Planned, Epic 1** — same underlying function/gap as row 6, one combined feature (VaR and CVaR are reported and budgeted together, not two separate mechanisms) |
+| 8 | Maximum Drawdown (MDD) Control | **Implemented (pre-existing)**, per-portfolio + account-wide circuit breakers, see "Drawdown Circuit Breaker" above |
+| 9 | Dynamic Correlation Risk Overlay | **Implemented (pre-existing)**, `use_correlation_penalty`/`use_correlation_spike_regime`, see "Correlation Monitor" above |
+| 10 | Liquidity-Adjusted Position Sizing | **Planned, Epic 1** — the existing `use_liquidity_filter` is a binary in/out rank filter and `max_pct_of_adv`/`check_capacity()` is advisory-only (runs after order sizing, never mutates a size); this adds a genuinely continuous, ADV-scaled, active sizing path, see "Liquidity-Adjusted Position Sizing (Active)" below |
+| 11 | Factor Risk Exposure Caps | **Planned, Epic 3** — a manually-declared factor-loadings cap (no vendor factor-return data source exists in this project, same honest caveat `ticker_sectors` already carries) |
+| 12 | Trailing Drawdown High-Water-Mark Limits | **Implemented (pre-existing)** — the circuit breaker's peak-equity tracking (`risk/circuit_breaker.py`'s `_peak_equity_path()`) already measures drawdown from a running high-water mark, portfolio-level and account-wide |
+| 13 | Bid-Ask Spread and Transaction Cost Hurdle Filters | **Partially implemented; upgrade planned, Epic 4** — `max_bid_ask_spread_pct` (row in "Liquidity/Slippage Monitor" above) is a real, shipped absolute spread ceiling; a relative cost-vs-expected-edge hurdle is new, see Epic 4 |
+| 14 | Cross-Asset Hedging with Liquid Proxies | **Not Applicable** — no derivatives/short capability exists to hedge with; this system is long-only |
+| 15 | Margin Utilization and Leverage Caps | **Not Applicable** — this system is unlevered and cash-only by design, no margin usage exists to monitor |
+| 16 | Shrinkage Estimator Covariance Matrix Regularization | **Planned, Epic 1** — the existing correlation-penalty/spike-detection math uses raw `pandas.DataFrame.corr()`, no regularization; a Ledoit-Wolf-style shrinkage estimator is added as a shared utility, see "Shrinkage Covariance Estimator" below |
+| 17 | Turnover and Rebalancing Frequency Constraints | **Implemented (pre-existing)**, `max_turnover_pct`, see "Turnover Limit" above |
+| 18 | Stress Testing and Historical Scenario Analysis | **Implemented (pre-existing)**, `core/functions_quant_extensions.py`'s `scenario_shock()` plus the real 2008/2020/2022 crash-replay notebook (Epic 13, see `README.md`'s Known Gaps) |
+| 19 | Counterparty Credit Risk Limits | **Not Applicable** — single broker (IBKR), no OTC/multi-counterparty exposure exists to limit |
+| 20 | Sector Concentration Hard Caps | **Implemented (pre-existing)**, same mechanism as row 4's practical substitute, `max_sector_weight`/`ticker_sectors`, see "Sector / Asset-Class Concentration Cap" (this file, referenced from `CLAUDE.md`) |
+| 21 | Maximum Asset-Level Concentration Limits | **Implemented (pre-existing)**, `max_position_weight`, see "Position Size Hard-Cap" above |
+| 22 | Algorithmic Execution Participation Rate Limits | **Planned, Epic 4** — `place_orders_ibkr()` submits exactly one order per ticker today, no participation-rate/slicing logic exists; planned via IBKR's native `PctVol` algo order type, not local TWAP scheduling (this app is a stateless once-daily cron job, no intraday scheduling loop exists to build real slicing against) |
+
+(This audit lists 22 distinct practices; two pairs from the original 24-item request collapsed
+into one row each: rows 6/7 share one mechanism, VaR and CVaR are computed and budgeted
+together, and rows 4/20 both point to the same `max_sector_weight`/`ticker_sectors` cap, since
+Sector Concentration Hard Caps and the practical substitute for Sector/Industry Neutralization
+are, honestly, the same shipped feature under two different names.)
+
+## Opt-in overlay strategies (`enabled_risk_strategies`)
+
+Epics 1-4 introduce a second, deliberate config-enabling mechanism alongside this file's many
+existing `use_X: true/false` toggles (`use_liquidity_filter`, `use_trailing_stop`, etc., each
+still completely untouched). `BacktestConfig.enabled_risk_strategies: list[str]` (default `[]`,
+byte-identical to before this field existed) is reserved specifically for features that are
+genuinely independent, stackable overlays, not a mutually-exclusive dispatch choice.
+Equal Risk Contribution (row 5 above) is deliberately **not** here: `sizing_method` already IS
+this codebase's own "pick by name" mechanism for a mutually-exclusive sizing choice (the same way
+`"risk_based"` is selected today, with no separate `use_risk_based_sizing: bool`), so ERC becomes
+`sizing_method`'s 5th legal value instead of a second, potentially-disagreeing toggle.
+
+`RISK_STRATEGY_ALIASES` (`backtest/momentum_backtest.py`) is the single source of truth mapping
+each canonical overlay name to every accepted alias string; `risk_strategy_enabled(cfg,
+canonical)` is the one helper every gated call site uses, never an ad-hoc `in` check.
+`__post_init__` validates every string in `enabled_risk_strategies` resolves to a known
+canonical/alias, failing loud on an unrecognized name (a typo'd alias silently doing nothing
+would be a worse failure mode than a config error, matching `sizing_method`'s own unknown-value
+handling).
+
+| Canonical name | Aliases | What it does | Config fields |
+|---|---|---|---|
+| `var_cvar_budget` | `var_budget`, `value_at_risk_budget` | Active VaR/CVaR pre-trade gross-exposure throttle, see "VaR/CVaR Budget (Active Pre-Trade Constraint)" below | `var_budget_pct`, `var_cvar_confidence`, `var_cvar_lookback_days` |
+| `liquidity_adjusted_sizing` | `adv_scaled_sizing` | Active, continuous ADV-based position-size scaling, see "Liquidity-Adjusted Position Sizing (Active)" below | `max_pct_of_adv` (reused), `liquidity_lookback_days` (reused) |
+
+```yaml
+risk_overrides:
+  enabled_risk_strategies:
+    - var_cvar_budget
+    - liquidity_adjusted_sizing
+```
+
+**Epic 1 real verification (run 2026-08-05), honestly reported, not just "implemented"**: all
+three Epic 1 features (`sizing_method: equal_risk_contribution`, `var_cvar_budget`,
+`liquidity_adjusted_sizing`), individually and combined, were verified against a real IBKR paper
+account (port 7497), both natively and inside the rebuilt Docker container. Real BUY orders
+placed and filled (confirmed via `execDetails`/`commissionReport`, real prices/commissions, not
+simulated) for a throwaway 10-mega-cap-ticker test portfolio in each of four configurations. The
+VaR/CVaR scalar computed a real CVaR (2.83%-3.07% across runs) against the configured 5% budget
+and correctly stayed at `scalar=1.00` (not binding, budget not exceeded at this position size);
+ERC sizing produced genuinely non-uniform, risk-balanced weights (e.g. AAPL ~35%, AMD ~8%,
+reflecting their real relative volatility) distinct from both equal-weight and inverse-vol
+shapes. The pre-existing `OVERLAPPING_TICKER_SCOPED`/ticker-overlap safety mechanisms fired
+correctly against the new features with zero interaction bugs. Full pytest suite: 994 passed
+(up from 939 before Epic 1, +55 new tests), zero regressions, both natively and confirmed via
+the same source tree rebuilt into the Docker image. See `CLAUDE.md`'s `backtest/
+momentum_backtest.py` bullet for the full per-story implementation writeup.
+
 ## Advisory constraints (non-blocking WARNING, logged and emailed)
 
 These three compare `lookback_period` and `holding_period` directly. Both are normalized to the
@@ -1128,6 +1219,162 @@ cycle, can still trigger it, that's intentional (a genuinely diversifying-in-nam
 is worth flagging even before you hold the correlated names), but distinct from a literal
 "only my open positions" reading of the tier description.
 
+## Shrinkage Covariance Estimator [New, Epic 1, LIVE + BACKTEST, opt-in]
+
+`use_shrinkage_covariance` (default `false`, only meaningful when `use_correlation_penalty` is
+also `true`): the Correlation Monitor above and `_correlation_penalty_weights()`'s own sizing-time
+correlation penalty both, confirmed by reading the code directly, compute their correlation
+matrix via raw `pandas.DataFrame.corr()`, with no regularization at all. A raw sample covariance
+(and the correlation matrix implied by it) is poorly conditioned exactly when the number of
+return observations (`correlation_lookback_days`, default `63`) is small relative to the number
+of tickers being compared, the textbook motivating case for shrinkage estimation, and exactly the
+condition Equal Risk Contribution sizing (below) needs a well-behaved matrix for.
+
+`core/covariance.py`'s `shrinkage_covariance(returns, shrinkage=None)` shrinks the raw sample
+covariance toward a constant-correlation target (Ledoit & Wolf 2004's target choice); an explicit
+`shrinkage=0.0` degenerates to the raw sample covariance exactly (the regression anchor proving
+this can reduce to today's pre-existing behavior). `shrinkage=None` (the default the correlation
+penalty uses) computes a practical analytic shrinkage intensity, a simplified variant of Ledoit &
+Wolf's original formula, honestly documented as such in the function's own docstring, not
+presented as a research-grade replication of the paper, sufficient for conditioning a covariance
+matrix for portfolio construction. `_correlation_penalty_weights()` converts the shrunk covariance
+back to a correlation matrix before applying the exact same downweighting formula it already
+used, this feature changes HOW the correlation matrix is estimated, not WHAT the penalty does
+with it.
+
+```yaml
+risk_overrides:
+  use_correlation_penalty: true
+  use_shrinkage_covariance: true    # opt-in, requires use_correlation_penalty above
+```
+
+New, focused module (`core/covariance.py`), not folded into `core/functions_quant_extensions.py`,
+matching this project's existing precedent of giving a new pure-numerical domain its own file
+(`core/technical_indicators.py`). Reused directly by Equal Risk Contribution sizing below (the
+covariance input a risk-parity solve needs), not duplicated.
+
+## Equal Risk Contribution (ERC) Sizing [New, Epic 1, LIVE + BACKTEST]
+
+`sizing_method: "equal_risk_contribution"`, a 5th legal value alongside the pre-existing
+`inverse_vol`/`score_proportional`/`equal_weight`/`risk_based`: sizes each position so every
+pick contributes an EQUAL share of total portfolio risk (the standard risk-parity construction),
+rather than an equal dollar amount (`equal_weight`) or a size inversely proportional to a
+position's OWN volatility alone (`inverse_vol`, which ignores cross-asset correlation entirely).
+Uses `shrinkage_covariance()` above as its covariance input directly (not raw sample covariance),
+the textbook motivating case for shrinkage: a risk-parity solve is sensitive to a poorly
+conditioned covariance matrix in exactly the few-observations/many-tickers regime this project's
+typical `correlation_lookback_days`/portfolio-size combination produces.
+
+Selected purely by `sizing_method`'s own existing "pick by name" mechanism, the same way
+`"risk_based"` needs no separate `use_risk_based_sizing: bool` today, deliberately NOT gated via
+`enabled_risk_strategies` (see that section above for why). When `use_correlation_penalty` is
+also enabled, the correlation penalty still applies on top of ERC's own risk-balanced weights,
+same as every other `sizing_method`, consistent rather than special-cased. A degenerate case (1-2
+picks, an ill-posed covariance solve) falls back to `inverse_vol` sizing for that rebalance, same
+"graceful fallback for an ill-posed case" precedent `score_proportional`'s own missing-scores
+fallback already establishes.
+
+```yaml
+risk_overrides:
+  sizing_method: equal_risk_contribution
+```
+
+Shared by both engines through `resolve_target_weights()`, the same single-source-of-truth
+function every other `sizing_method` already goes through, live and backtest cannot diverge on
+ERC's weights by construction.
+
+## VaR/CVaR Budget (Active Pre-Trade Constraint) [New, Epic 1, LIVE + BACKTEST, opt-in]
+
+`enabled_risk_strategies: [var_cvar_budget]` (see "Opt-in overlay strategies" above) plus
+`var_budget_pct` (required when enabled): closes a real, confirmed gap found during this epic's
+own audit, `core/functions_quant_extensions.py`'s `historical_var_cvar()` (historical/
+non-parametric Value-at-Risk and Conditional VaR / Expected Shortfall) existed, fully coded,
+before this epic, but was wired into nothing, its only 2 callers in the entire repository were
+`tests/test_governance.py`, confirmed by grep, zero references in `execution/live_signal.py`,
+`backtest/momentum_backtest.py`, or `daily_runner.py`. This is the exact "scaffold exists, never
+wired in" pattern this project has closed before (Epic 15's `run_walk_forward_lookback_search()`,
+Epic 6's `absolute_momentum_overlay()`).
+
+Implemented as a new multiplicative gross-exposure scalar, `compute_var_cvar_scalar(cvar_pct,
+var_budget_pct, min_gross_exposure, max_gross_exposure)` (`backtest/momentum_backtest.py`,
+co-located with `compute_vol_scalar()`, exact same shape: `clip(var_budget_pct / cvar_pct, min,
+max)`, falling back to `max_gross_exposure` when there isn't enough return history yet to compute
+a real CVaR), composed alongside `vol_scalar`/`momentum_crash_scalar`, NOT as a step inside
+`resolve_target_weights()`. That function operates purely in weight-space and has no concept of a
+realized portfolio-returns series to compute VaR/CVaR from, unlike `target_portfolio_vol`'s
+`vol_scalar`, which each engine already sources independently:
+
+- **Backtest**: sourced from the simulated `portfolio_history` equity curve's trailing
+  `var_cvar_lookback_days` (default `252`, ~1 year) returns, the same source
+  `_realized_portfolio_vol()` already uses for `vol_scalar` -- the real thing that happened in
+  the simulation.
+- **Live**: sourced from a weighted-returns series built from trailing `daily_prices` at the
+  just-resolved target weights (no simulated equity curve exists live), via a new shared
+  `_weighted_portfolio_returns_series()` helper extracted from `_realized_weighted_portfolio_vol()`'s
+  existing body, so the two live-side scalars can never silently disagree on "what counts as the
+  portfolio's returns."
+
+This preserves the existing, deliberate backtest/live realized-vol sourcing asymmetry
+`target_portfolio_vol` already documents, rather than forcing a false equivalence between a real
+simulated ledger and a live proxy. `gross_exposure = min(max_gross_exposure, regime_scalar *
+vol_scalar * momentum_crash_scalar * var_cvar_scalar)` in each engine's OWN existing composition
+order (backtest and live compute their scalars in a different literal sequence today, a real
+parity trap this project has hit before with other scalars, see `CLAUDE.md`'s
+`compute_target_weights()` bullet). A new `VAR_CVAR_BUDGET_EXCEEDED` `WARNING` (`log_alert()`)
+fires when the scalar meaningfully throttles exposure, same pattern as
+`MARKET_VOLATILITY_REGIME_DEFENSIVE`.
+
+```yaml
+risk_overrides:
+  enabled_risk_strategies:
+    - var_cvar_budget
+  var_budget_pct: 0.05          # required when enabled, e.g. 0.05 = throttle exposure once
+                                 # 95%-confidence CVaR would risk more than 5% of capital
+  var_cvar_confidence: 0.95     # default
+  var_cvar_lookback_days: 252   # default, ~1 year
+```
+
+## Liquidity-Adjusted Position Sizing (Active) [New, Epic 1, LIVE + BACKTEST, opt-in]
+
+`enabled_risk_strategies: [liquidity_adjusted_sizing]` (see "Opt-in overlay strategies" above):
+distinct from, and additive to, TWO pre-existing liquidity mechanisms, neither of which this
+feature replaces or changes:
+- `use_liquidity_filter` is a binary in/out RANK filter (a ticker below
+  `min_avg_dollar_volume` can't be selected into `top_n` at all).
+- `max_pct_of_adv`/`check_capacity()` is purely ADVISORY, confirmed by reading the code: it runs
+  strictly AFTER `generate_orders()` has already computed final share counts, and only logs a
+  `CAPACITY WARNING`, it never mutates an order's size. This advisory check is left completely
+  unchanged; a portfolio not opting into this new feature sees zero behavior change.
+
+This feature adds a genuinely ACTIVE, continuous scaling path: `core/functions_quant_extensions.py`'s
+new `scale_dollar_targets_for_capacity()` reuses `check_capacity()`'s own ADV-dollar-volume
+formula internally (not a second, divergent formula), and scales down any ticker's target dollar
+allocation that would exceed `max_pct_of_adv * adv_dollar` to exactly that ceiling; a ticker under
+the cap is unchanged. Freed capacity is left as unallocated cash, not redistributed to other
+picks, the same "reduce exposure rather than silently violate a cap" precedent
+`_apply_sector_caps()` already established.
+
+Applied downstream of `resolve_target_weights()`, in each caller's own dollar-space code (right
+where `target_dollar = total_value * gross_exposure * weight` is already computed), not inside
+the shared weight-space sizing function, which has no concept of total deployable capital by
+design. A future maintainer should NOT "simplify" this by pushing it into
+`resolve_target_weights()`, doing so would require widening that single-source-of-truth
+function's signature for every existing caller across both engines.
+
+```yaml
+risk_overrides:
+  enabled_risk_strategies:
+    - liquidity_adjusted_sizing
+  max_pct_of_adv: 0.05             # reused from the pre-existing advisory check, now ALSO the
+                                    # active scaling ceiling once this overlay is enabled
+  liquidity_lookback_days: 63      # reused, ~3 months
+  ticker_risk_overrides:
+    XLE:
+      max_pct_of_adv: 0.10         # per-ticker override, same dict-of-optional-keys mechanism
+                                    # as stop_loss_pct/enabled above, a ticker absent from this
+                                    # dict uses the portfolio-wide max_pct_of_adv unchanged
+```
+
 ## Liquidity/Slippage Monitor [Nice-to-Have tier]
 
 `max_bid_ask_spread_pct` (default `None`, disabled): a PRE-trade real-time bid-ask spread
@@ -1313,3 +1560,9 @@ segregation principle `CLAUDE.md` already documents for P&L computation, `risk_m
 only job is independently re-derived realized-loss monitoring against `total_value`, not
 strategy-configuration review. No conflict is possible today because there's no shared surface
 between them.
+
+**Still true after Epics 1-4's institutional risk-practice audit above**: none of the new
+`enabled_risk_strategies` overlays, the new `sizing_method: equal_risk_contribution`, the
+shrinkage covariance estimator, or any other feature from that audit adds any dependency into
+`risk/risk_monitor.py`. Every one of them lives entirely in the `daily_runner.py`/
+`execution/live_signal.py`/`backtest/momentum_backtest.py` path, same as every constraint above.

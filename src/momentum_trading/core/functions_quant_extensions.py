@@ -256,6 +256,55 @@ def check_capacity(
     return result
 
 
+def scale_dollar_targets_for_capacity(
+    target_dollar: dict, df_volume: pd.DataFrame, df_prices: pd.DataFrame,
+    as_of: pd.Timestamp, max_pct_of_adv: float, lookback_days: int = 21,
+) -> dict:
+    """
+    Liquidity-Adjusted Position Sizing (Epic 1, "Institutional Risk-Management Features" plan,
+    Story 1.5): an ACTIVE counterpart to check_capacity() above, which is purely advisory
+    (returns flags, never mutates a size). This scales down any ticker's target dollar
+    allocation that would exceed max_pct_of_adv of its own average daily dollar volume to
+    EXACTLY that ceiling; a ticker already under the cap is returned unchanged.
+
+    Reuses check_capacity()'s own ADV-dollar-volume computation internally (not a second,
+    divergent formula), so the two functions can never disagree on what "average daily dollar
+    volume" means for a given ticker/date.
+
+    The freed capacity (the difference between the original and scaled target) is left as
+    unallocated cash, NOT redistributed to other tickers, the same "reduce exposure rather than
+    silently violate a cap" precedent backtest/momentum_backtest.py's _apply_sector_caps()
+    already establishes. A ticker check_capacity() couldn't evaluate (missing volume/price data,
+    e.g. df_volume is None/empty) is left at its original target, mirroring check_capacity()'s
+    own "can't check, treat as fine" precedent, this is a scaling safeguard, not a data-quality
+    gate.
+
+    Parameters
+    ----------
+    target_dollar : dict {ticker: target $ notional}, the SAME dict shape
+        execution/live_signal.py's run() and backtest/momentum_backtest.py's day-loop already
+        compute (total_value * gross_exposure * weight per ticker).
+
+    Returns
+    -------
+    dict {ticker: scaled target $ notional}, same keys as target_dollar.
+    """
+    capacity = check_capacity(target_dollar, df_volume, df_prices, as_of, max_pct_of_adv, lookback_days)
+    scaled = {}
+    for ticker, target in target_dollar.items():
+        info = capacity.get(ticker, {})
+        adv = info.get("adv_dollar")
+        if adv is None or adv <= 0 or not info.get("flagged"):
+            scaled[ticker] = target
+            continue
+        cap_dollar = max_pct_of_adv * adv
+        # preserve sign (a negative target_dollar would only occur for a short, not applicable
+        # to this strictly long-only project, but abs()/sign() keeps the formula correct either way)
+        sign = 1.0 if target >= 0 else -1.0
+        scaled[ticker] = sign * min(abs(target), cap_dollar)
+    return scaled
+
+
 # --------------------------------------------------------------------------- #
 # 2. WALK-FORWARD PARAMETER SELECTION
 # --------------------------------------------------------------------------- #

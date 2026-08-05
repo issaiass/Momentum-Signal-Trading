@@ -216,6 +216,63 @@ that tests enforce, don't casually violate these when editing:
   window across every opted-in portfolio, since a shared file can't have two different windows)
   wire this in, once per run, firing a new `LOG_ROTATED` INFO alert whenever a rotation actually
   moves rows. See `docs/LOG_RETENTION.md`.
+  `run_walk_forward_lookback_search(daily_prices, tickers, cfg, lookback_candidates, train_years,
+  test_years, step_years, metric="Sharpe")` (`core/functions_quant_extensions.py`, Epic 15, "Real
+  Out-of-Sample Strategy Validation" plan) is a real-engine walk-forward parameter-robustness
+  search, backing `notebooks/research/out_of_sample_validation.ipynb`. This module already had
+  `pre_registered_split()`/`walk_forward_lookback_holding()`/`bootstrap_sharpe_ci()`, fully
+  coded and wired into `DHI0016_notebook1_research_and_EDA_IMPROVED.ipynb`'s cells 49-57, but
+  confirmed by reading those cells directly, never actually executed against real data before
+  this, the exact same "scaffold exists, never run" pattern already found and fixed for other
+  tooling in Epic 12/13. A real design gap was found in that existing scaffold while wiring this
+  up, not previously known: cell 52's `_quick_backtest()` helper is a simplified mean-monthly-
+  return approximation (no regime filter, no volatility targeting, no stop-loss, no
+  slippage/commission) and reimplements picks selection via `df_ranks.apply(lambda x:
+  x.nsmallest(top_n)...)` with no `.dropna()` first, the exact real bug `get_top_etfs()`'s own
+  docstring documents and fixes elsewhere in this codebase (`nsmallest()` backfills with
+  NaN-ranked entries when fewer than `top_n` valid ranks exist). `run_walk_forward_lookback_
+  search()` deliberately does NOT extend or reuse `_quick_backtest()`; it wires through the REAL
+  `core/strategy_signals.py`'s `generate_strategy_monthly_picks()` + `backtest/
+  momentum_backtest.py`'s `run_custom_backtest()` (the same real pipeline Epic 13/14's own
+  crash-stress notebooks already use), matching this codebase's repeated "single source of
+  truth, live and backtest must never diverge" principle, and gets the `.dropna()`-before-
+  `.nsmallest()` fix for free since it goes through `generate_strategy_monthly_picks()`'s already-
+  fixed selection path. Uses lazy (function-local) imports for `run_custom_backtest`/
+  `generate_strategy_monthly_picks`, same precedent as `execution/live_signal.py`'s own lazy
+  imports, since `core/strategy_signals.py` already imports FROM this file
+  (`resolve_momentum_scores()`-adjacent helpers indirectly, see that file's own bullet), a
+  direct top-level import back would be circular. Reuses the SAME rolling fold-slicing logic
+  `walk_forward_lookback_holding()` already has (train/test windows advancing by `step_years`),
+  applied to the real pipeline instead of injected generic callables, returns the same per-fold
+  DataFrame shape (`fold_start`/`train_end`/`test_end`/`chosen_lookback`/`train_{metric}`/
+  `test_{metric}`/`test_CAGR`). Reapplies Epic 14's own "bound only at the end, not the start"
+  lesson (see `backtest/momentum_backtest.py`'s bullet below): each fold's price panel passed to
+  `generate_strategy_monthly_picks()`/`run_custom_backtest()` is bounded only by `< train_end` or
+  `< test_end`, never re-truncated at the fold's own start, so regime/vol/lookback calculations
+  inside the real pipeline always see as much real pre-fold history as the full `daily_prices`
+  panel actually has, avoiding a repeat of the bug class Epic 14 found and fixed.
+  **Run for real for the first time 2026-08-04** against Epic 13's cached 17-ticker long-history
+  ETF proxy-universe panel (`notebooks/research/crash_test_daily_prices.pkl`, 2005-01-03 through
+  present, same documented ticker-availability scope boundary as Epic 13, `portfolio1`'s real
+  `default_risk` config applied to the proxy universe, not portfolio1's exact current tickers),
+  `pre_registered_split(split_date="2015-01-01")`, `LOOKBACK_CANDIDATES = [6, 9, 12, 15, 18]`
+  months, `train_years=4, test_years=1, step_years=1` (5 real folds fit inside the ~10-year train
+  window). Real result, honestly reported, not oversold: chosen lookback per fold was
+  `[9, 9, 12, 12, 12]` (converging toward the shipped `lookback_period: 12` default, not away
+  from it), train Sharpe `[1.14, 0.86, 0.82, 0.70, 0.67]` vs. test Sharpe
+  `[1.58, 0.51, 0.03, 0.41, 2.21]`, mean train Sharpe 0.84 vs. mean test Sharpe 0.95, i.e. test
+  performance was NOT systematically degraded relative to train across folds, the overfitting
+  signature the methodology exists to catch did not show up here. The most frequently chosen
+  lookback (`12`, matching 3 of 5 folds) was then evaluated on the `2015-01-01` to present
+  holdout **exactly once**: CAGR 3.49%, AnnVol 10.26%, Sharpe 0.39, Sortino 0.50, MaxDrawdown
+  -20.08%, WinRate 60.1%, Beta 0.47, **Alpha -2.63%** (annualized, vs. SPY). A block-bootstrap
+  90% confidence interval on the holdout Sharpe (`bootstrap_sharpe_ci()`, `n_bootstrap=2000,
+  block_size=6`) came back `[-0.11, 0.95]`, spanning zero. **Honest read**: the shipped
+  `lookback_period` is a genuinely robust parameter choice, not an artifact of overfitting to
+  one historical sample, but the single pre-registered holdout itself does not show a
+  statistically confident positive edge over a passive SPY benchmark on this proxy universe,
+  mixed, not oversold, not a confirmed edge and not a refutation either. See `README.md`'s
+  Project Maturity & Safety section and Known Gaps entry for the full numbers and caveats.
 - **`core/strategy_signals.py`** (NEW module, selectable-momentum-strategy plan), dispatches on
   `BacktestConfig.strategy_type` (`config.yaml`'s per-portfolio `default_risk`/`risk_overrides`,
   one of 11 allowed values, `ALLOWED_STRATEGY_TYPES` in `backtest/momentum_backtest.py`, see

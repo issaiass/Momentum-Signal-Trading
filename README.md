@@ -270,9 +270,12 @@ momentum-trading/
 │   │   │                           liquidity filter
 │   │   ├── DHI0016_notebook3_full_backtest_IMPROVED.ipynb       full backtest, factor
 │   │   │                           decomposition, regime breakdown, dual momentum overlay
-│   │   └── crash_period_stress_test.ipynb   real 2008/2020/2022 crash replay on a
-│   │                               long-history ETF proxy universe, risk-managed vs. naive
-│   │                               baseline (Epic 13, see README's Known Gaps)
+│   │   ├── crash_period_stress_test.ipynb   real 2008/2020/2022 crash replay on a
+│   │   │                           long-history ETF proxy universe, risk-managed vs. naive
+│   │   │                           baseline (Epic 13, see README's Known Gaps)
+│   │   └── out_of_sample_validation.ipynb   real pre-registered walk-forward +
+│   │                               holdout validation via the real signal/execution pipeline
+│   │                               (Epic 15, see README's Known Gaps)
 │   └── operational/               interactive validation & run walkthroughs (safe, dry-run only)
 │       ├── live_signal_walkthrough.ipynb
 │       ├── daily_runner_walkthrough.ipynb
@@ -391,7 +394,7 @@ not been answered at all yet**:
 | Question | Status |
 |---|---|
 | Does the code have circuit breakers, idempotency, alerting, audit logging? | ✅ Yes, tested |
-| Has the strategy shown a positive out-of-sample (holdout) return on real data? | ❌ Never run on real data |
+| Has the strategy shown a positive out-of-sample (holdout) return on real data? | ⚠️ Run for real for the first time (2026-08-04, see Known Gaps below): walk-forward validation shows the shipped `lookback_period: 12` is genuinely robust (independently re-derived from 5 real historical folds, test-period Sharpe *not* degraded vs. train), but the single pre-registered 2015-2026 holdout shows only a modest Sharpe (0.39) with a **negative annualized alpha** (-2.63%) vs. SPY, and a 90% bootstrap confidence interval that includes zero. Positive on parameter robustness, inconclusive on whether there's a real edge beyond market-beta exposure. |
 | Has it been validated against real 2008/2020/2022 history? | ⚠️ The risk-control *mechanism* has, using a long-history ETF proxy universe (see Known Gaps below), not the exact currently-configured portfolios (most of their tickers didn't exist in 2008). Real result: the risk-managed variant beat a naive-momentum baseline on max drawdown in all 6 head-to-head runs (both a monthly and weekly cadence, across 2008/2020/2022), most dramatically in 2008 (weekly regime: -11.5% vs. -26.0% max drawdown), at a real cost to upside capture during 2020's fast V-shaped recovery, and was actually worse than baseline on both metrics for 2022's monthly regime specifically, an honest, mixed result, not a uniform win. |
 | Has it connected to a real broker even once? | ✅ Yes, paper (port 7497) connection, account summary, position fetch, and **confirmed real BUY and SELL order fills** (verified directly in TWS's own execution log across two portfolios, real prices, matching quantities). Getting here surfaced and fixed three real bugs (every order silently rejected while the run logged success; a misleadingly-short fill-confirmation poll window; an informational per-order notice mistaken for a rejection, causing an already-filled order to be logged as failed) and one hard IBKR platform limitation worked around (no fractional equity orders via API, ever, floored to whole shares). The live/real-money port (7496) is still unexercised |
 | Has real live-vs-backtest divergence been measured? | ⚠️ Attempted for real (2026-08-03) against all three real portfolios' actual `dry_run=False` trade history; the notebook's methodology bugs are fixed and verified (real config load, `dry_run=False` filtering, `strategy_type`-aware signal reproduction, `custom_weights` sizing parity), and real Live P&L was computed successfully for all three. The head-to-head Backtest number itself is still blocked, not by a code defect but by real trading history simply being too young: `_build_report()`'s monthly-return diffing needs at least two completed calendar-month buckets to produce a non-NaN return, and the real history (~1-2 weeks old as of this writing, entirely inside one still-open month) can't supply that yet. See the Known Gaps entry below and `notebooks/operational/live_vs_backtest_reconciliation.ipynb`; rerun once real trading has spanned at least one full month-end. |
@@ -759,6 +762,54 @@ answer whether the strategy actually works.
   2008/2020 monthly/weekly scenarios (0 times in 2022's slower decline), modestly improving max
   drawdown at a modest cost to return when it fired, an honest, mixed result, not a clean win,
   left disabled by default in both `docs/RISK_CONSTRAINTS.md` presets for that reason.
+- **Real out-of-sample walk-forward + pre-registered holdout validation, Epic 15**: the same
+  "scaffold exists, never executed" pattern as Epic 12/13: `core/functions_quant_extensions.py`
+  already had `pre_registered_split()`/`walk_forward_lookback_holding()`/`bootstrap_sharpe_ci()`,
+  fully coded and wired into `notebooks/research/DHI0016_notebook1_research_and_EDA_
+  IMPROVED.ipynb`'s cells 49-57, but never actually run against real data. A real design gap was
+  found in that scaffold before running it: its `_quick_backtest()` helper was a simplified
+  mean-monthly-return approximation (no regime filter, no volatility targeting, no stop-loss, no
+  slippage/commission), and it reimplemented picks selection without `.dropna()` before
+  `.nsmallest()`, the exact real bug `get_top_etfs()`'s own docstring documents and fixes
+  elsewhere in this codebase. `notebooks/research/out_of_sample_validation.ipynb` (new) instead
+  uses a new `run_walk_forward_lookback_search()` (`core/functions_quant_extensions.py`), which
+  wires the walk-forward search through the REAL `generate_strategy_monthly_picks()` +
+  `run_custom_backtest()` pipeline, `portfolio1`'s real config, on Epic 13's already-cached
+  17-ticker long-history proxy universe (no new fetch), same documented ticker-availability
+  scope boundary as Epic 13/14 (most of `portfolio1`'s real tickers didn't exist in 2005).
+
+  **Real results** (run 2026-08-04): pre-registered split at `2015-01-01` (`train` 2005-2014,
+  `holdout` 2015-2026, committed to before any tuning). Walk-forward search across 5 real,
+  independent folds within `train` (`lookback_candidates=[6,9,12,15,18]`):
+
+  | Fold (train → test) | Chosen lookback | Train Sharpe | Test Sharpe | Test CAGR |
+  |---|---|---|---|---|
+  | 2005-2009 → 2009-2010 | 9 | 1.14 | 1.58 | 12.2% |
+  | 2006-2010 → 2010-2011 | 9 | 0.86 | 0.51 | 6.8% |
+  | 2007-2011 → 2011-2012 | 12 | 0.82 | 0.03 | -0.0% |
+  | 2008-2012 → 2012-2013 | 12 | 0.70 | 0.41 | 1.9% |
+  | 2009-2013 → 2013-2014 | 12 | 0.67 | 2.21 | 23.5% |
+
+  Mean train Sharpe 0.84, mean test Sharpe **0.95**, test *not* degraded relative to train (the
+  overfitting signature the methodology explicitly warns about never showed up, if anything the
+  reverse), and the walk-forward search independently converged on `lookback_period=12` (3 of 5
+  folds) — the exact value `portfolio1` already ships with, not picked in advance to match.
+
+  The single, pre-registered `holdout` evaluation (2015-01-02 to 2026-08-04, reported exactly
+  once, `lookback_period=12`): CAGR 3.49%, Annualized Vol 10.26%, **Sharpe 0.39**, Sortino 0.50,
+  Max Drawdown -20.08%, Win Rate 60.1%, Beta vs. SPY 0.47, **Annualized Alpha -2.63%**.
+  Block-bootstrap 90% confidence interval on the holdout Sharpe: **[-0.11, 0.95]** (90% of
+  resamples positive, but the interval itself includes zero).
+
+  Honest reading, not oversold: this is genuinely mixed, not a clean answer either way. The
+  walk-forward evidence is real and positive — the shipped parameter is independently robust
+  across historical folds, not overfit to one lucky sample. But the pre-registered holdout's
+  **negative alpha** means the strategy's real-world outperformance over 2015-2026 is not
+  clearly distinguishable from its ~0.47 market-beta exposure alone, and the bootstrap CI
+  spanning zero means a real, non-zero edge cannot be confidently claimed at 90% confidence from
+  this one holdout window. This is the project's first genuine out-of-sample evidence on this
+  question, not a final verdict, and it argues for caution, not confidence, before allocating
+  real capital.
 
 ### Who should allocate capital here
 

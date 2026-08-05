@@ -15,8 +15,9 @@ import pytest
 
 from momentum_trading.core.functions_quant_extensions import (
     since_inception_performance, daily_window_comparison, monthly_window_comparison,
-    compute_drawdown_episodes,
+    compute_drawdown_episodes, run_walk_forward_lookback_search,
 )
+from momentum_trading.backtest.momentum_backtest import BacktestConfig
 
 
 def _write_snapshot_csv(tmp_path, name, dates, port_returns, bench_returns):
@@ -218,3 +219,80 @@ class TestComputeDrawdownEpisodes:
         s = pd.Series([], dtype=float)
         result = compute_drawdown_episodes(s)
         assert result.empty
+
+
+class TestRunWalkForwardLookbackSearch:
+    """
+    run_walk_forward_lookback_search() (Epic 15, "Real Out-of-Sample Strategy Validation"
+    plan): the real-engine counterpart to walk_forward_lookback_holding() above, wired through
+    generate_strategy_monthly_picks()/run_custom_backtest() (this project's actual signal +
+    execution pipeline) instead of injected generic callables.
+    """
+
+    def _trending_prices(self, years=7, seed=41):
+        rng = np.random.default_rng(seed)
+        dates = pd.bdate_range("2015-01-01", periods=int(years * 252))
+        n = len(dates)
+        a = 100 * np.cumprod(1 + rng.normal(0.0006, 0.008, n))  # strong, consistent up-trend
+        b = 100 * np.cumprod(1 + rng.normal(0.0002, 0.008, n))  # modest up-trend
+        c = 100 * np.cumprod(1 + rng.normal(0.0000, 0.008, n))  # flat/noisy
+        return pd.DataFrame({"A": a, "B": b, "C": c}, index=dates)
+
+    def _cfg(self):
+        # use_regime_filter=False avoids needing a separate benchmark ticker; vol targeting
+        # pinned at 100% so the test isolates the walk-forward SELECTION mechanics, matching
+        # Epic 14's own "target_portfolio_vol=10.0 to effectively disable throttling" precedent.
+        return BacktestConfig(
+            use_regime_filter=False,
+            top_n=1,
+            holding_period=1,
+            initial_capital=1000.0,
+            commission=0.0,
+            target_portfolio_vol=10.0,
+            min_gross_exposure=1.0,
+            max_gross_exposure=1.0,
+            stop_loss_pct=0.95,
+        )
+
+    def test_produces_multiple_folds_with_correct_columns(self):
+        prices = self._trending_prices()
+        result = run_walk_forward_lookback_search(
+            prices, ["A", "B", "C"], self._cfg(),
+            lookback_candidates=[3, 6, 12],
+            train_years=3, test_years=1, step_years=1,
+        )
+        assert len(result) >= 2
+        assert list(result.columns) == [
+            "fold_start", "train_end", "test_end", "chosen_lookback",
+            "train_Sharpe", "test_Sharpe", "test_CAGR",
+        ]
+        assert result["chosen_lookback"].isin([3, 6, 12]).all()
+
+    def test_empty_for_insufficient_history(self):
+        dates = pd.bdate_range("2020-01-01", periods=100)
+        prices = pd.DataFrame({"A": 100 * np.cumprod(1 + np.full(100, 0.001))}, index=dates)
+        result = run_walk_forward_lookback_search(
+            prices, ["A"], self._cfg(), lookback_candidates=[3, 6],
+            train_years=3, test_years=1, step_years=1,
+        )
+        assert result.empty
+        assert list(result.columns) == [
+            "fold_start", "train_end", "test_end", "chosen_lookback",
+            "train_Sharpe", "test_Sharpe", "test_CAGR",
+        ]
+
+    def test_strongly_trending_ticker_produces_sensible_real_results(self):
+        # A's drift dominates B/C's at every reasonable lookback, so the real pipeline
+        # (regime filter off, vol targeting disabled) should consistently select it and
+        # produce real, finite Sharpe values, not silently NaN/empty folds throughout, a
+        # smoke test that the real generate_strategy_monthly_picks()/run_custom_backtest()
+        # wiring is actually driving the result.
+        prices = self._trending_prices()
+        result = run_walk_forward_lookback_search(
+            prices, ["A", "B", "C"], self._cfg(),
+            lookback_candidates=[3, 6, 12],
+            train_years=3, test_years=1, step_years=1,
+        )
+        assert not result.empty
+        assert result["train_Sharpe"].notna().all()
+        assert result["test_Sharpe"].notna().any()

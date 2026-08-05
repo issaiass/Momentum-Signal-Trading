@@ -61,9 +61,14 @@ test's purpose isn't obvious from its name.
 **Important scope note:** these fixtures test *code mechanics*, does the sizing math work,
 does validation catch bad input, does the audit log survive tampering. They do **not** test
 *strategy validity*, nothing here tells you whether momentum as a strategy makes money. That
-question requires running the actual walk-forward/holdout tooling (Notebook 1) against real
-market data, which is a separate, not-yet-completed step (see `../README.md`'s "Project
-Maturity & Safety" section).
+question was answered for the first time by Epic 15's real walk-forward/pre-registered-holdout
+run (`notebooks/research/out_of_sample_validation.ipynb`, `core/functions_quant_extensions.py`'s
+`run_walk_forward_lookback_search()`, real engine, real proxy-universe price history, not
+synthetic), reported once, honestly, with a real result: robust `lookback_period` selection
+across folds, but a modest, negative-alpha holdout with a bootstrap confidence interval spanning
+zero, see `../README.md`'s "Project Maturity & Safety" section for the full numbers. That result
+does not itself get re-verified by this pytest suite, it's a one-time research finding, not a
+regression-tested invariant, don't confuse the two.
 
 ## How to interpret a failure
 

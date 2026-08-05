@@ -357,6 +357,139 @@ def walk_forward_lookback_holding(
 
 
 # --------------------------------------------------------------------------- #
+# 2b. WALK-FORWARD PARAMETER SELECTION, REAL ENGINE (Epic 15)
+# --------------------------------------------------------------------------- #
+def run_walk_forward_lookback_search(
+    daily_prices: pd.DataFrame,
+    tickers: list[str],
+    cfg,
+    lookback_candidates: list[float],
+    train_years: float = 4,
+    test_years: float = 1,
+    step_years: float = 1,
+    metric: str = "Sharpe",
+) -> pd.DataFrame:
+    """
+    Real-engine counterpart to walk_forward_lookback_holding() above (Epic 15, "Real
+    Out-of-Sample Strategy Validation" plan): same rolling train/test fold walk-forward
+    intent (pick the best lookback_period on the training slice ONLY, evaluate that
+    choice on the immediately following unseen test slice), but wired through THIS
+    project's own real pipeline instead of injected generic callables:
+    core/strategy_signals.py's generate_strategy_monthly_picks() for signal generation and
+    backtest/momentum_backtest.py's run_custom_backtest() for execution, the exact same
+    functions execution/live_signal.py's run() and every other real backtest in this codebase
+    use. This means regime filter, volatility targeting, stop-loss, slippage/commission, and
+    every other cfg field this project's strategy actually depends on are ALL active during
+    the walk-forward search, not a simplified mean-monthly-return approximation. Only
+    lookback_period is varied across lookback_candidates, every other cfg field is held fixed
+    at whatever the caller's cfg already has (e.g. a real portfolio's loaded config).
+
+    Parameters
+    ----------
+    daily_prices : pd.DataFrame
+        Daily close prices, columns must include every ticker in `tickers` (and
+        cfg.regime_benchmark if cfg.use_regime_filter).
+    tickers : list[str]
+        The selection universe.
+    cfg : BacktestConfig
+        Real config (e.g. loaded via daily_runner.load_config()). holding_period/top_n/regime
+        filter/vol targeting/stop-loss etc. all applied unchanged across every fold; only
+        lookback_period is swapped per candidate via dataclasses.replace().
+    lookback_candidates : list[float]
+        Grid of lookback_period values (same units cfg.lookback_period already uses).
+    train_years, test_years, step_years : float
+        Rolling window sizing, in years.
+    metric : str
+        Which tearsheet key (from run_custom_backtest()'s own backtest_df.attrs["tearsheet"])
+        to optimize for on the training slice.
+
+    Returns
+    -------
+    pd.DataFrame, one row per walk-forward fold: fold_start, train_end, test_end,
+    chosen_lookback, train_{metric}, test_{metric}, test_CAGR. Empty (same columns) if
+    daily_prices doesn't span enough history for even one fold.
+
+    Each fold's price panel passed to generate_strategy_monthly_picks()/run_custom_backtest()
+    is bounded ONLY at the fold's own end date, never at fold_start (a real, confirmed
+    methodology lesson from Epic 14: bounding a price panel at BOTH ends starves the regime/
+    vol/lookback calculations of real history that exists before the fold, silently NaN'ing
+    conditions that would otherwise fire correctly), the PICKS series (not the price panel) is
+    what actually gets filtered down to the fold's own [fold_start, boundary) window.
+    """
+    from dataclasses import replace as _replace
+
+    from ..backtest.momentum_backtest import run_custom_backtest
+    from .strategy_signals import generate_strategy_monthly_picks
+
+    columns = ["fold_start", "train_end", "test_end", "chosen_lookback",
+               f"train_{metric}", f"test_{metric}", "test_CAGR"]
+
+    dates = daily_prices.index
+    start, end = dates.min(), dates.max()
+
+    fold_start = start
+    records = []
+
+    while True:
+        train_end = fold_start + pd.DateOffset(years=train_years)
+        test_end = train_end + pd.DateOffset(years=test_years)
+        if test_end > end:
+            break
+
+        prices_to_train_end = daily_prices[dates < train_end]
+        prices_to_test_end = daily_prices[dates < test_end]
+
+        best_lookback, best_train_metric = None, -np.inf
+        for lb in lookback_candidates:
+            fold_cfg = _replace(cfg, lookback_period=lb)
+            picks_full = generate_strategy_monthly_picks(
+                prices_to_train_end, tickers, fold_cfg, lb, fold_cfg.top_n
+            )
+            picks_in_fold = picks_full[(picks_full.index >= fold_start) & (picks_full.index < train_end)]
+            if picks_in_fold.empty:
+                continue
+            bt = run_custom_backtest(picks_in_fold, prices_to_train_end, **fold_cfg.__dict__)
+            if bt.empty:
+                continue
+            train_metric = bt.attrs.get("tearsheet", {}).get(metric)
+            if train_metric is not None and not np.isnan(train_metric) and train_metric > best_train_metric:
+                best_train_metric = train_metric
+                best_lookback = lb
+
+        if best_lookback is None:
+            fold_start += pd.DateOffset(years=step_years)
+            continue
+
+        fold_cfg = _replace(cfg, lookback_period=best_lookback)
+        picks_test_full = generate_strategy_monthly_picks(
+            prices_to_test_end, tickers, fold_cfg, best_lookback, fold_cfg.top_n
+        )
+        picks_test = picks_test_full[(picks_test_full.index >= train_end) & (picks_test_full.index < test_end)]
+
+        test_metric_val, test_cagr = np.nan, np.nan
+        if not picks_test.empty:
+            test_bt = run_custom_backtest(picks_test, prices_to_test_end, **fold_cfg.__dict__)
+            if not test_bt.empty:
+                test_tearsheet = test_bt.attrs.get("tearsheet", {})
+                test_metric_val = test_tearsheet.get(metric, np.nan)
+                test_cagr = test_tearsheet.get("CAGR", np.nan)
+
+        records.append({
+            "fold_start": fold_start,
+            "train_end": train_end,
+            "test_end": test_end,
+            "chosen_lookback": best_lookback,
+            f"train_{metric}": best_train_metric,
+            f"test_{metric}": test_metric_val,
+            "test_CAGR": test_cagr,
+        })
+
+        fold_start += pd.DateOffset(years=step_years)
+
+    return pd.DataFrame(records, columns=columns)
+
+
+# --------------------------------------------------------------------------- #
 # 3. BLOCK BOOTSTRAP CONFIDENCE INTERVAL ON SHARPE
 # --------------------------------------------------------------------------- #
 def bootstrap_sharpe_ci(

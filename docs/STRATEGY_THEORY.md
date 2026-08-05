@@ -27,9 +27,16 @@ broad cross-asset confirmation).
 **Why it's NOT free money**: transaction costs, the crash risk above, and (critically) the
 fact that momentum is now one of the most widely traded, well-known factors means much of its
 historical edge may already be arbitraged away relative to the original 1990s studies. This
-project's own validation tooling (walk-forward/holdout testing in Notebook 1) exists
-specifically to check whether a meaningful edge remains after realistic costs, not to assume
-the academic literature guarantees it.
+project's own validation tooling (walk-forward/pre-registered holdout testing,
+`notebooks/research/out_of_sample_validation.ipynb`, Epic 15) exists specifically to check
+whether a meaningful edge remains after realistic costs, not to assume the academic literature
+guarantees it. **Run for real for the first time 2026-08-04** (monthly regime, `portfolio1`'s
+config, on a long-history ETF proxy universe): the walk-forward search shows the shipped
+`lookback_period: 12` is genuinely robust across 5 real historical folds (test-period Sharpe not
+degraded relative to train), but the single pre-registered 2015-2026 holdout shows a modest
+Sharpe (0.39) with **negative alpha** (-2.63% annualized) relative to SPY and a 90% bootstrap
+confidence interval that includes zero, a real, honest, mixed result, not a confirmed edge, see
+`README.md`'s Known Gaps entry for the full numbers.
 
 ## How this specific implementation works
 

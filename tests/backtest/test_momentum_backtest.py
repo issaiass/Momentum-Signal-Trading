@@ -102,6 +102,38 @@ class TestBacktestConfigValidation:
         with pytest.raises(ValueError, match="ticker_sectors"):
             BacktestConfig(ticker_sectors=["XLK"])
 
+    def test_max_factor_exposure_none_default_is_accepted(self):
+        assert BacktestConfig().max_factor_exposure is None  # should not raise
+
+    def test_valid_factor_config_constructs_cleanly(self):
+        BacktestConfig(
+            ticker_factor_loadings={"XLK": {"tech_beta": 1.2, "growth": -0.3}},
+            max_factor_exposure={"tech_beta": 0.5},
+        )  # should not raise
+
+    def test_ticker_factor_loadings_non_dict_raises(self):
+        with pytest.raises(ValueError, match="ticker_factor_loadings"):
+            BacktestConfig(ticker_factor_loadings=["XLK"])
+
+    def test_ticker_factor_loadings_non_numeric_value_raises(self):
+        with pytest.raises(ValueError, match="ticker_factor_loadings"):
+            BacktestConfig(ticker_factor_loadings={"XLK": {"tech_beta": "high"}})
+
+    def test_max_factor_exposure_non_dict_raises(self):
+        with pytest.raises(ValueError, match="max_factor_exposure"):
+            BacktestConfig(max_factor_exposure=["tech_beta"])
+
+    def test_max_factor_exposure_non_positive_value_raises(self):
+        with pytest.raises(ValueError, match="max_factor_exposure"):
+            BacktestConfig(max_factor_exposure={"tech_beta": 0.0})
+        with pytest.raises(ValueError, match="max_factor_exposure"):
+            BacktestConfig(max_factor_exposure={"tech_beta": -0.5})
+
+    def test_max_factor_exposure_above_one_is_accepted(self):
+        # Unlike max_sector_weight's (0, 1.0] range, factor exposure has no natural weight-sum
+        # ceiling (a loading itself can exceed 1.0), so a cap above 1.0 must be accepted.
+        BacktestConfig(max_factor_exposure={"leveraged_style": 1.5})  # should not raise
+
     def test_invalid_top_n_raises(self):
         # top_n selects how many top-momentum names actually get held each
         # rebalance, 0 or negative is meaningless (an empty or undefined
@@ -437,6 +469,22 @@ class TestBacktestRuns:
                                   holding_period=1, commission=0, initial_capital=1000.0,
                                   enabled_risk_strategies=["liquidity_adjusted_sizing"],
                                   max_pct_of_adv=0.05, daily_volume=daily_volume)
+        assert not df.empty
+        assert "tearsheet" in df.attrs
+
+    def test_factor_risk_exposure_caps_runs_end_to_end(
+        self, synthetic_monthly_picks, synthetic_daily_prices,
+    ):
+        # Epic 3, "Institutional Risk-Management Features" plan. synthetic_daily_prices'
+        # tickers: SPY, QQQ, XLK, XLF, XLE (see conftest.py).
+        df = run_custom_backtest(synthetic_monthly_picks, synthetic_daily_prices,
+                                  holding_period=1, commission=0, initial_capital=1000.0,
+                                  ticker_factor_loadings={
+                                      "SPY": {"broad_beta": 1.0}, "QQQ": {"broad_beta": 1.0},
+                                      "XLK": {"broad_beta": 1.0}, "XLF": {"broad_beta": 1.0},
+                                      "XLE": {"broad_beta": 1.0},
+                                  },
+                                  max_factor_exposure={"broad_beta": 0.3})
         assert not df.empty
         assert "tearsheet" in df.attrs
 
@@ -1370,6 +1418,109 @@ class TestApplySectorCaps:
                               use_correlation_penalty=False)
         as_of = synthetic_daily_prices.index[100]
         weights = resolve_target_weights(["SPY", "QQQ"], synthetic_daily_prices, as_of, cfg)
+        assert weights["SPY"] + weights["QQQ"] == pytest.approx(0.3)
+
+
+class TestApplyFactorCaps:
+    """
+    _apply_factor_caps() (Epic 3, "Institutional Risk-Management Features" plan, "Factor Risk
+    Exposure Caps"): structurally identical to _apply_sector_caps() above (same proportional
+    scaling, no redistribution), weighted-sum (weight * loading) instead of binary sector
+    membership.
+    """
+
+    def test_over_cap_factor_scaled_down_to_exactly_the_cap(self):
+        from momentum_trading.backtest.momentum_backtest import _apply_factor_caps
+        # A and B each load 1.0 on "tech", weights 0.35 each -> exposure 0.7, over the 0.4 cap:
+        # scaled down proportionally (already equal, so each ends at 0.2, summing to exactly 0.4).
+        weights = {"A": 0.35, "B": 0.35, "C": 0.3}
+        loadings = {"A": {"tech": 1.0}, "B": {"tech": 1.0}, "C": {"energy": 1.0}}
+        result = _apply_factor_caps(weights, loadings, max_factor_exposure={"tech": 0.4})
+        assert result["A"] + result["B"] == pytest.approx(0.4)
+        assert result["A"] == pytest.approx(result["B"])  # proportional scaling preserves ratio
+
+    def test_excess_is_not_redistributed_elsewhere(self):
+        from momentum_trading.backtest.momentum_backtest import _apply_factor_caps
+        weights = {"A": 0.35, "B": 0.35, "C": 0.3}
+        loadings = {"A": {"tech": 1.0}, "B": {"tech": 1.0}, "C": {"energy": 1.0}}
+        result = _apply_factor_caps(weights, loadings, max_factor_exposure={"tech": 0.4})
+        assert result["C"] == pytest.approx(0.3)  # completely untouched
+        assert sum(result.values()) == pytest.approx(0.7)  # 0.4 (capped tech) + 0.3 (energy)
+
+    def test_unmapped_ticker_is_never_touched(self):
+        from momentum_trading.backtest.momentum_backtest import _apply_factor_caps
+        weights = {"A": 0.9, "B": 0.1}
+        loadings = {"B": {"energy": 1.0}}  # "A" deliberately unmapped
+        result = _apply_factor_caps(weights, loadings, max_factor_exposure={"energy": 0.4})
+        assert result["A"] == pytest.approx(0.9)
+        assert result["B"] == pytest.approx(0.1)  # energy alone already under cap
+
+    def test_explicit_zero_loading_is_never_touched(self):
+        # A real, confirmed edge case found during implementation: a ticker with an EXPLICIT
+        # {"tech": 0.0} entry must be treated identically to one absent from the mapping
+        # entirely, not scaled just because the factor KEY is present.
+        from momentum_trading.backtest.momentum_backtest import _apply_factor_caps
+        weights = {"A": 0.4, "B": 0.4, "C": 0.2}
+        loadings = {"A": {"tech": 1.0}, "B": {"tech": 1.0}, "C": {"tech": 0.0}}
+        result = _apply_factor_caps(weights, loadings, max_factor_exposure={"tech": 0.5})
+        assert result["C"] == pytest.approx(0.2)  # untouched despite the explicit zero entry
+
+    def test_negative_loading_ticker_is_also_scaled_documented_simplification(self):
+        # Design Decision 3's documented simplification, pinned explicitly: a ticker with a
+        # NEGATIVE loading for an over-cap factor is scaled down too, not left alone as a
+        # more sophisticated constrained solve would treat an offsetting/hedging position.
+        from momentum_trading.backtest.momentum_backtest import _apply_factor_caps
+        weights = {"A": 0.5, "B": 0.3}
+        loadings = {"A": {"tech": 1.0}, "B": {"tech": -0.5}}
+        # net exposure = 0.5*1.0 + 0.3*(-0.5) = 0.35, under a 0.4 cap: no-op sanity check first.
+        result_under_cap = _apply_factor_caps(weights, loadings, max_factor_exposure={"tech": 0.4})
+        assert result_under_cap == weights
+        # now push the cap below the NET exposure but the scaling loop only fires per the
+        # positive-total check; assert B (negative loading) DOES get scaled once triggered.
+        result = _apply_factor_caps(weights, loadings, max_factor_exposure={"tech": 0.2})
+        assert result["A"] != pytest.approx(weights["A"])
+        assert result["B"] != pytest.approx(weights["B"])  # negative-loading ticker also scaled
+
+    def test_multiple_factors_each_under_cap_are_untouched(self):
+        from momentum_trading.backtest.momentum_backtest import _apply_factor_caps
+        weights = {"A": 0.2, "B": 0.2, "C": 0.2, "D": 0.2}
+        loadings = {"A": {"tech": 1.0}, "B": {"tech": 1.0}, "C": {"energy": 1.0}, "D": {"energy": 1.0}}
+        result = _apply_factor_caps(weights, loadings, max_factor_exposure={"tech": 0.5, "energy": 0.5})
+        for t, w in weights.items():
+            assert result[t] == pytest.approx(w)
+
+    def test_resolve_target_weights_none_default_is_byte_identical(self, synthetic_daily_prices):
+        cfg = BacktestConfig(max_factor_exposure=None)
+        as_of = synthetic_daily_prices.index[100]
+        picks = ["SPY", "QQQ"]
+        weights_without = resolve_target_weights(picks, synthetic_daily_prices, as_of, cfg)
+        cfg_explicit_none = BacktestConfig(max_factor_exposure=None,
+                                            ticker_factor_loadings={"SPY": {"beta": 1.0}})
+        weights_with_mapping_but_no_cap = resolve_target_weights(
+            picks, synthetic_daily_prices, as_of, cfg_explicit_none
+        )
+        assert weights_without == weights_with_mapping_but_no_cap
+
+    def test_resolve_target_weights_applies_factor_cap_end_to_end(self, synthetic_daily_prices):
+        cfg = BacktestConfig(max_position_weight=1.0, max_factor_exposure={"beta": 0.3},
+                              ticker_factor_loadings={"SPY": {"beta": 1.0}, "QQQ": {"beta": 1.0}},
+                              use_correlation_penalty=False)
+        as_of = synthetic_daily_prices.index[100]
+        weights = resolve_target_weights(["SPY", "QQQ"], synthetic_daily_prices, as_of, cfg)
+        assert weights["SPY"] + weights["QQQ"] == pytest.approx(0.3)
+
+    def test_applied_after_sector_caps_both_active(self, synthetic_daily_prices):
+        # Confirms the documented pipeline order: factor caps constrain the ALREADY
+        # sector-capped weights, not raw pre-sector-cap values.
+        cfg = BacktestConfig(max_position_weight=1.0, max_sector_weight=0.6,
+                              ticker_sectors={"SPY": "Broad", "QQQ": "Broad"},
+                              max_factor_exposure={"beta": 0.3},
+                              ticker_factor_loadings={"SPY": {"beta": 1.0}, "QQQ": {"beta": 1.0}},
+                              use_correlation_penalty=False)
+        as_of = synthetic_daily_prices.index[100]
+        weights = resolve_target_weights(["SPY", "QQQ"], synthetic_daily_prices, as_of, cfg)
+        # factor cap (0.3) is tighter than sector cap (0.6), so the final result reflects the
+        # factor cap, not the looser sector cap alone.
         assert weights["SPY"] + weights["QQQ"] == pytest.approx(0.3)
 
 

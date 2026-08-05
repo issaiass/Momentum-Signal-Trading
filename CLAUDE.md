@@ -1012,6 +1012,54 @@ that tests enforce, don't casually violate these when editing:
   broker-native ATR version would only ever be "ATR distance as of order placement, held fixed
   thereafter," a materially weaker and potentially misleading claim of "ATR-based" protection.
   See `docs/RISK_CONSTRAINTS.md`'s "ATR-Based Trailing Stop" section.
+  `ticker_factor_loadings`/`max_factor_exposure` (Epic 3, "Institutional Risk-Management
+  Features" plan, "Factor Risk Exposure Caps") generalizes `ticker_sectors`/`max_sector_weight`'s
+  binary sector-membership cap to a continuous, per-ticker WEIGHTED contribution:
+  `exposure = sum(weight[t] * loading[t][factor])` across every ticker with a declared loading
+  for that factor, so two tickers with different degrees of exposure to the same factor (e.g.
+  `1.2` vs. `0.5` "tech_beta") contribute proportionally, not as all-or-nothing group membership.
+  Same "manually-declared, no vendor data source" honesty `ticker_sectors` already establishes
+  (no factor-return data source exists anywhere in this project). New `_apply_factor_caps()`
+  (co-located with `_apply_sector_caps()`, structurally identical algorithm: proportional
+  scaling of every contributing ticker, no redistribution, freed weight left as unallocated
+  cash), wired into `resolve_target_weights()` as the NEW final step, after `_apply_sector_caps()`
+  (the most aggregate/composite constraint runs last). Deliberately **NOT** gated via
+  `enabled_risk_strategies`, mirroring `max_sector_weight`'s own exact gating precedent (a plain
+  `cfg.max_factor_exposure is not None` presence check, confirmed by reading the code, not the
+  alias registry, which per Epic 1's own design is reserved for genuinely independent, stackable
+  *overlay* toggles, not a data-presence-gated portfolio-construction constraint like this one).
+  `max_factor_exposure` cap values are validated `> 0` only, no upper bound of `1.0` (unlike
+  `max_sector_weight`'s `(0, 1.0]`): a sector weight is a portfolio-weight SUM, naturally bounded
+  by `1.0`; factor exposure has no such natural ceiling since a loading itself can exceed `1.0`
+  (e.g. a leveraged-style factor proxy). **A real, confirmed bug found via manual testing before
+  the formal test suite was even written, not caught by design review alone**: the first
+  implementation checked factor-KEY membership (`factor in ticker_factor_loadings.get(t, {})`)
+  to decide which tickers to scale, which incorrectly scaled a ticker with an EXPLICIT
+  `{"factor": 0.0}` entry (a declared-but-zero loading) even though it contributes nothing to
+  the exposure sum; fixed to check the loading VALUE is genuinely nonzero
+  (`.get(factor, 0.0) != 0`), confirmed via a real hand-run reproduction before the fix, then
+  pinned by a dedicated regression test. **A second, deliberately kept, honestly documented
+  simplification** (not a bug): a ticker with a NEGATIVE loading for an over-cap factor (i.e.
+  already reducing net exposure, a hedge/offsetting proxy) is scaled down too, the exact same
+  simple, predictable proportional-scaling algorithm `_apply_sector_caps()` already uses, rather
+  than a more sophisticated constrained solve that would leave it untouched; pinned by its own
+  dedicated test so a future change to this is a deliberate decision, not an accidental
+  regression. See `docs/RISK_CONSTRAINTS.md`'s "Factor Risk Exposure Caps" section. Closes the
+  Concentration/Factor Caps pair from the original 24-item institutional-practice audit: Sector
+  and Industry Neutralization (the other half of that pair) was already resolved in Epic 1 as
+  "Not Applicable (today)", true benchmark-relative neutralization needs a real
+  constituent-weights data feed this project doesn't integrate, the existing
+  `max_sector_weight`/`ticker_sectors` hard cap is the documented practical substitute.
+  **Epic 3 real verification, run 2026-08-05**: full pytest suite 1032 passed (up from 1014
+  pre-Epic-3, +18 new tests), zero regressions. Real end-to-end paper-account confirmation (port
+  7497), both natively and inside Docker: a throwaway 3-ticker test portfolio
+  (`JPM`/`BAC`/`WFC`, ticker-disjoint from this project's real portfolios per the Epic 2
+  incident's established discipline) with all three loaded `1.0` on a `bank_beta` factor capped
+  at `0.3` produced real post-cap weights summing to exactly `0.30`, then real BUY fills
+  confirmed via `execDetails` (`5 BAC @ $63.35`, `2 WFC @ $89.50`, `JPM` correctly held at 0
+  shares). Docker reproduced the identical capped weights and, running after the native position
+  already existed, correctly read back real broker state and HELD rather than duplicate-buying,
+  an unplanned bonus confirmation of position-aware idempotency working correctly end-to-end.
 - **`execution/live_signal.py`**, live signal/order generation, IBKR integration (`ibapi`
   `EClient`/`EWrapper`, not a third-party wrapper), multi-portfolio orchestration, FIFO P&L,
   hash-chained audit log. `fetch_ohlcv_for_tickers()` is distinct from `fetch_live_prices()`,

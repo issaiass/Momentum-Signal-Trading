@@ -337,6 +337,33 @@ default_risk:
                                    # position_vol_budget above, the final portfolio-construction
                                    # constraint layer. See docs/RISK_CONSTRAINTS.md's "Sector /
                                    # Asset-Class Concentration Cap".
+  ticker_factor_loadings: {}       # Epic 3, "Institutional Risk-Management Features" plan.
+                                   # {ticker: {factor_name: loading}}, e.g. {XLK: {tech_beta:
+                                   # 1.2}}. Manual mapping, same "no vendor data integration"
+                                   # honesty as ticker_sectors above (no factor-return data
+                                   # source exists in this project). {} (default) means no
+                                   # ticker is grouped/capped for any factor. Only meaningful
+                                   # together with max_factor_exposure below.
+                                   #   ticker_factor_loadings:
+                                   #     XLK: {tech_beta: 1.2}
+                                   #     QQQ: {tech_beta: 1.0}
+                                   #     XLE: {energy_beta: 1.0}
+  max_factor_exposure: null       # the "Factor Risk Exposure Caps" constraint. null (default) =
+                                   # disabled, byte-identical to before this field existed. When
+                                   # set, e.g. {tech_beta: 0.5}, any factor's SUMMED EXPOSURE
+                                   # (sum of weight * loading, per ticker_factor_loadings above)
+                                   # exceeding its cap is scaled down to exactly the cap; the
+                                   # freed weight is left as unallocated exposure (cash), NOT
+                                   # redistributed, same precedent as max_sector_weight. Unlike
+                                   # max_sector_weight's (0, 1.0] range, cap values here are
+                                   # validated > 0 only, no upper bound of 1.0 (a loading can
+                                   # itself exceed 1.0). Applied LAST, after max_sector_weight
+                                   # above, the most aggregate constraint runs last. See
+                                   # docs/RISK_CONSTRAINTS.md's "Factor Risk Exposure Caps",
+                                   # including a documented simplification: a ticker with a
+                                   # NEGATIVE loading for an over-cap factor is scaled down too,
+                                   # not left alone as a hedge/offset would be in a more
+                                   # sophisticated constrained solve.
   stop_loss_pct: 0.12             # per-position stop-loss, as a fraction below entry price.
                                    # FIXED from entry, not trailing (never ratchets up as the
                                    # position gains, see docs/RISK_CONSTRAINTS.md's "Stop-Loss

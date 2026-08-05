@@ -62,7 +62,7 @@ lands (not written speculatively in advance).
 | 8 | Maximum Drawdown (MDD) Control | **Implemented (pre-existing)**, per-portfolio + account-wide circuit breakers, see "Drawdown Circuit Breaker" above |
 | 9 | Dynamic Correlation Risk Overlay | **Implemented (pre-existing)**, `use_correlation_penalty`/`use_correlation_spike_regime`, see "Correlation Monitor" above |
 | 10 | Liquidity-Adjusted Position Sizing | **Planned, Epic 1** — the existing `use_liquidity_filter` is a binary in/out rank filter and `max_pct_of_adv`/`check_capacity()` is advisory-only (runs after order sizing, never mutates a size); this adds a genuinely continuous, ADV-scaled, active sizing path, see "Liquidity-Adjusted Position Sizing (Active)" below |
-| 11 | Factor Risk Exposure Caps | **Planned, Epic 3** — a manually-declared factor-loadings cap (no vendor factor-return data source exists in this project, same honest caveat `ticker_sectors` already carries) |
+| 11 | Factor Risk Exposure Caps | **Implemented (Epic 3)** — a manually-declared factor-loadings cap (no vendor factor-return data source exists in this project, same honest caveat `ticker_sectors` already carries), see "Factor Risk Exposure Caps" below |
 | 12 | Trailing Drawdown High-Water-Mark Limits | **Implemented (pre-existing)** — the circuit breaker's peak-equity tracking (`risk/circuit_breaker.py`'s `_peak_equity_path()`) already measures drawdown from a running high-water mark, portfolio-level and account-wide |
 | 13 | Bid-Ask Spread and Transaction Cost Hurdle Filters | **Partially implemented; upgrade planned, Epic 4** — `max_bid_ask_spread_pct` (row in "Liquidity/Slippage Monitor" above) is a real, shipped absolute spread ceiling; a relative cost-vs-expected-edge hurdle is new, see Epic 4 |
 | 14 | Cross-Asset Hedging with Liquid Proxies | **Not Applicable** — no derivatives/short capability exists to hedge with; this system is long-only |
@@ -1254,6 +1254,85 @@ Technology's combined weight is scaled from `0.70` down to exactly `0.30` (each 
 since they started equal), `GLD` (no `ticker_sectors` entry) is completely unaffected, and the
 freed `0.40` is left unallocated, the portfolio's total invested weight drops from `1.00` to
 `0.60` for this rebalance, by design.
+
+## Factor Risk Exposure Caps [New, Epic 3, LIVE + BACKTEST, opt-in]
+
+`ticker_factor_loadings` (`{}` default, e.g. `{"XLK": {"tech_beta": 1.2, "growth": 0.8}}`) +
+`max_factor_exposure` (`None` default, e.g. `{"tech_beta": 0.5}`) cap the SUMMED EXPOSURE (not
+just summed weight, see below) of every ticker with a declared loading for the same factor. The
+Sector / Asset-Class Concentration Cap above only ever groups tickers by binary membership (a
+ticker either IS in a sector or isn't); factor caps generalize this to a continuous, per-ticker
+WEIGHTED contribution, `exposure = sum(weight[t] * loading[t][factor])` across every ticker with
+a declared loading for that factor, so two tickers with different degrees of exposure to the same
+factor (e.g. `1.2` vs. `0.5` "tech_beta") contribute proportionally, not as an all-or-nothing
+group membership.
+
+**Manually-declared loadings only, same honest precedent as `ticker_sectors`**: no factor model,
+no vendor beta/style-factor return data source exists anywhere in this project
+(`core/fundamentals.py` covers P/E, PEG, ROE, Debt-to-Equity, Current Ratio, not factor
+loadings), and adding a regression-based factor model is out of scope here. A ticker absent from
+`ticker_factor_loadings`, or one without a loading for a particular factor, is never
+grouped/capped for that factor at all, an incomplete mapping is a safe no-op, not a silent error,
+matching `ticker_sectors`'s own documented convention exactly.
+
+Implemented by `_apply_factor_caps()` (`backtest/momentum_backtest.py`, structurally identical to
+`_apply_sector_caps()`), wired into `resolve_target_weights()` as the NEW LAST step, after
+`_apply_sector_caps()`: the most aggregate/composite constraint runs last, constraining the
+FINAL, fully-capped weights (position caps → vol-budget caps → sector caps → factor caps). Same
+"reduce exposure rather than silently violate a cap" precedent: the freed weight from capping an
+over-limit factor is left as unallocated gross exposure (cash), NOT redistributed.
+
+```yaml
+risk_overrides:
+  ticker_factor_loadings:
+    XLK: {tech_beta: 1.2}
+    QQQ: {tech_beta: 1.0}
+    XLE: {energy_beta: 1.0}
+  max_factor_exposure:
+    tech_beta: 0.5    # e.g. throttle combined tech-factor exposure to 50% of the book
+```
+
+**No upper bound of `1.0` on `max_factor_exposure`'s cap values, unlike `max_sector_weight`'s
+`(0, 1.0]` range**: a sector weight is a portfolio-weight SUM, naturally bounded by `1.0`; factor
+EXPOSURE is `sum(weight * loading)`, and a loading itself can exceed `1.0` (e.g. a leveraged-style
+factor proxy), so exposure has no natural weight-sum ceiling the way a sector-membership sum does.
+Validated `> 0` only.
+
+**A real, honestly documented simplification, found and decided during implementation, not
+glossed over**: the proportional-scaling algorithm treats every ticker with a NONZERO loading for
+an over-cap factor uniformly, INCLUDING one with a NEGATIVE loading (i.e. already reducing net
+exposure to that factor, e.g. a hedge/offsetting proxy). A more sophisticated constrained solve
+could leave a negative-loading position untouched and only trim positive contributors, but
+`_apply_factor_caps()` deliberately keeps the exact same simple, predictable algorithm
+`_apply_sector_caps()` already uses (and this codebase's users already understand from that
+feature) rather than introducing a second, more complex capping algorithm for one feature. Pinned
+explicitly by a dedicated test
+(`TestApplyFactorCaps::test_negative_loading_ticker_is_also_scaled_documented_simplification`) so
+a future change to this behavior is a deliberate decision, not an accidental regression.
+
+A separate, real edge case confirmed during implementation (caught by manual testing before the
+formal test suite was even written): a ticker with an EXPLICIT `{"factor": 0.0}` entry must be
+treated identically to one absent from the mapping entirely, not scaled just because the factor
+KEY is present in its loadings dict. The implementation checks the loading VALUE is nonzero, not
+just key membership (`ticker_factor_loadings.get(t, {}).get(factor, 0.0) != 0`), pinned by
+`TestApplyFactorCaps::test_explicit_zero_loading_is_never_touched`.
+
+**Epic 3 real verification (run 2026-08-05), honestly reported**: full pytest suite 1032 passed
+(up from 1014 pre-Epic-3, +18 new tests), zero regressions. Real end-to-end paper-account
+confirmation (port 7497), both natively and inside a Docker container rebuilt with this epic's
+code: a throwaway 3-ticker test portfolio (`JPM`/`BAC`/`WFC`, deliberately disjoint from this
+project's real `config.yaml` portfolios, per the discipline established after Epic 2's real
+cross-config ticker-overlap incident) with all three tickers loaded `1.0` on a `bank_beta`
+factor capped at `0.3`. Confirmed real: the natural inverse-vol target weights summed well above
+`0.3`, and the ACTUAL post-cap weights summed to exactly `0.30` (`BAC 0.1134 + JPM 0.0985 + WFC
+0.0882`), then real BUY fills confirmed via `execDetails` (`5 BAC @ $63.35`, `2 WFC @ $89.50`,
+`JPM` correctly held at 0 shares, its capped allocation floored below 1 share). Docker reproduced
+the identical capped weights (`0.1133/0.0985/0.0882`, matching to within real-time price-fetch
+noise) and, since the container run happened after the native run had already established the
+real position, correctly read back real broker state and HELD rather than duplicate-buying
+(`WFC HOLD ... within drift_threshold (2.9%)`), a real, unplanned bonus confirmation that
+position-aware idempotency works correctly end-to-end, not just in the common "fresh portfolio"
+case Epic 1/2's own verifications exercised.
 
 ## Drawdown Circuit Breaker [Recommended tier]
 

@@ -303,6 +303,41 @@ class BacktestConfig:
                                              # backtest/momentum_backtest.py's
                                              # _apply_sector_caps() and docs/RISK_CONSTRAINTS.md's
                                              # "Sector / Asset-Class Concentration Cap".
+    ticker_factor_loadings: dict = field(default_factory=dict)  # Epic 3, "Institutional
+                                             # Risk-Management Features" plan. {ticker:
+                                             # {factor_name: loading}}, e.g. {"XLK": {"tech_beta":
+                                             # 1.2, "growth": 0.8}}. Manual mapping, same "no
+                                             # vendor data integration exists" honesty as
+                                             # ticker_sectors above (no factor-return data source
+                                             # exists in this project), not a regression-based
+                                             # factor model. {} default (a ticker with no entry is
+                                             # never grouped/capped for any factor) is
+                                             # byte-identical to before this field existed. Only
+                                             # meaningful together with max_factor_exposure below.
+    max_factor_exposure: dict | None = None  # {factor_name: cap}, e.g. {"tech_beta": 0.50}.
+                                             # None (default) disables entirely, byte-identical to
+                                             # before. When set, any factor (per
+                                             # ticker_factor_loadings above) whose SUMMED exposure
+                                             # (sum of weight * loading over every ticker with a
+                                             # declared loading for that factor) exceeds its cap is
+                                             # scaled down to exactly the cap; the freed weight is
+                                             # left as unallocated cash, NOT redistributed, same
+                                             # precedent as max_sector_weight. Unlike
+                                             # max_sector_weight's (0, 1.0] range, cap values here
+                                             # are validated > 0 only, no upper bound of 1.0: a
+                                             # loading can itself exceed 1.0 (e.g. a leveraged-style
+                                             # factor proxy), so exposure has no natural weight-sum
+                                             # ceiling. Applied LAST in resolve_target_weights()'s
+                                             # pipeline, after max_sector_weight above, the most
+                                             # aggregate constraint runs last. A real, documented
+                                             # simplification: a ticker with a NEGATIVE loading for
+                                             # an over-cap factor is scaled down too (not left
+                                             # alone as a hedge/offset would be in a more
+                                             # sophisticated constrained solve), same simple,
+                                             # predictable algorithm _apply_sector_caps() already
+                                             # uses. See backtest/momentum_backtest.py's
+                                             # _apply_factor_caps() and docs/RISK_CONSTRAINTS.md's
+                                             # "Factor Risk Exposure Caps".
     stop_loss_pct: float = 0.12             # per-position stop from entry price
     ticker_risk_overrides: dict = field(default_factory=dict)  # {ticker: {'enabled': bool,
         # 'stop_loss_pct': float}}, per-ticker override of the portfolio-wide stop_loss_pct
@@ -700,6 +735,31 @@ class BacktestConfig:
             errors.append(f"max_sector_weight ({self.max_sector_weight}) should be in (0, 1.0] or None")
         if not isinstance(self.ticker_sectors, dict):
             errors.append(f"ticker_sectors ({self.ticker_sectors!r}) must be a dict")
+        if not isinstance(self.ticker_factor_loadings, dict):
+            errors.append(f"ticker_factor_loadings ({self.ticker_factor_loadings!r}) must be a dict")
+        else:
+            for ticker, loadings in self.ticker_factor_loadings.items():
+                if not isinstance(ticker, str) or not isinstance(loadings, dict):
+                    errors.append(
+                        f"ticker_factor_loadings[{ticker!r}] must be a {{factor_name: loading}} "
+                        f"dict keyed by ticker string"
+                    )
+                    continue
+                for factor, loading in loadings.items():
+                    if not isinstance(factor, str) or isinstance(loading, bool) or not isinstance(loading, (int, float)):
+                        errors.append(
+                            f"ticker_factor_loadings[{ticker!r}][{factor!r}] ({loading!r}) "
+                            f"must be a real number"
+                        )
+        if self.max_factor_exposure is not None:
+            if not isinstance(self.max_factor_exposure, dict):
+                errors.append(f"max_factor_exposure ({self.max_factor_exposure!r}) must be a dict or None")
+            else:
+                for factor, cap in self.max_factor_exposure.items():
+                    if not isinstance(factor, str) or isinstance(cap, bool) or not isinstance(cap, (int, float)) or cap <= 0:
+                        errors.append(
+                            f"max_factor_exposure[{factor!r}] ({cap!r}) must be a positive real number"
+                        )
         if not (0 < self.stop_loss_pct < 1.0):
             errors.append(f"stop_loss_pct ({self.stop_loss_pct}) should be in (0, 1.0)")
         if (self.use_trailing_stop or self.attach_broker_trailing_stop) and self.trailing_stop_pct is None:
@@ -1262,6 +1322,8 @@ def resolve_target_weights(
         )
     if cfg.max_sector_weight is not None:
         weights = _apply_sector_caps(weights, cfg.ticker_sectors, cfg.max_sector_weight)
+    if cfg.max_factor_exposure is not None:
+        weights = _apply_factor_caps(weights, cfg.ticker_factor_loadings, cfg.max_factor_exposure)
     return weights
 
 
@@ -1511,6 +1573,46 @@ def _apply_sector_caps(weights: dict, ticker_sectors: dict, max_sector_weight: f
         scale = max_sector_weight / total
         for t in weights:
             if ticker_sectors.get(t) == sector:
+                weights[t] *= scale
+
+    return weights
+
+
+def _apply_factor_caps(weights: dict, ticker_factor_loadings: dict, max_factor_exposure: dict) -> dict:
+    """
+    Factor Risk Exposure Caps (Epic 3, "Institutional Risk-Management Features" plan): caps the
+    SUMMED exposure (sum of weight * loading) of every ticker with a declared loading for the
+    same factor (cfg.ticker_factor_loadings) at that factor's cap (cfg.max_factor_exposure). A
+    ticker absent from ticker_factor_loadings, or one without a loading for a particular factor,
+    is NOT grouped/capped for that factor at all, an incomplete mapping is a safe no-op, not a
+    silent error, same convention _apply_sector_caps() already establishes.
+
+    Structurally identical to _apply_sector_caps() above (same proportional-scaling algorithm, no
+    redistribution, freed weight left as unallocated cash), weighted-sum instead of
+    binary-membership. A real, documented simplification: any ticker with a NONZERO loading for
+    an over-cap factor is scaled down proportionally, INCLUDING one with a NEGATIVE loading (i.e.
+    already reducing net exposure to that factor). A more sophisticated constrained solve could
+    leave a hedging/offsetting position untouched and only trim positive contributors, but this
+    function deliberately keeps the same simple, predictable algorithm _apply_sector_caps()
+    already uses rather than introducing a second, more complex capping algorithm for one
+    feature.
+
+    Called LAST in resolve_target_weights()'s pipeline, after _apply_sector_caps(), the most
+    aggregate/composite constraint runs last, constraining the FINAL, fully-capped weights.
+    """
+    weights = dict(weights)
+    factor_totals: dict[str, float] = {}
+    for t, w in weights.items():
+        for factor, loading in ticker_factor_loadings.get(t, {}).items():
+            factor_totals[factor] = factor_totals.get(factor, 0.0) + w * loading
+
+    for factor, cap in max_factor_exposure.items():
+        total = factor_totals.get(factor, 0.0)
+        if total <= cap:
+            continue
+        scale = cap / total
+        for t in weights:
+            if ticker_factor_loadings.get(t, {}).get(factor, 0.0) != 0:
                 weights[t] *= scale
 
     return weights

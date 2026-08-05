@@ -3337,6 +3337,30 @@ class TestLivePositionCap:
 
         assert live_weights == backtest_weights
 
+    def test_factor_risk_exposure_caps_match_backtest_exactly(self, tmp_path):
+        # Epic 3, "Institutional Risk-Management Features" plan: live/backtest parity test for
+        # ticker_factor_loadings/max_factor_exposure, same rationale as the ERC test above.
+        from momentum_trading.backtest.momentum_backtest import resolve_target_weights
+
+        rng = np.random.default_rng(9)
+        dates = pd.bdate_range("2024-01-01", periods=120)
+        n = len(dates)
+        a = 100 * np.cumprod(1 + rng.normal(0.0002, 0.01, n))
+        b = 100 * np.cumprod(1 + rng.normal(0.0002, 0.01, n))
+        prices = pd.DataFrame({"A": a, "B": b}, index=dates)
+
+        cfg = BacktestConfig(use_regime_filter=False, use_correlation_spike_regime=False,
+                              max_position_weight=1.0,
+                              ticker_factor_loadings={"A": {"beta": 1.0}, "B": {"beta": 1.0}},
+                              max_factor_exposure={"beta": 0.3})
+        alerts_path = str(tmp_path / "alerts_log.csv")
+        live_weights, _ = compute_target_weights(["A", "B"], prices, cfg,
+                                                   portfolio="p1", alerts_log_path=alerts_path)
+        backtest_weights = resolve_target_weights(["A", "B"], prices, prices.index[-1], cfg)
+
+        assert live_weights == backtest_weights
+        assert live_weights["A"] + live_weights["B"] == pytest.approx(0.3)
+
 
 class TestRealizedWeightedPortfolioVol:
     """

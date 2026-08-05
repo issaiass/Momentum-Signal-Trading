@@ -307,21 +307,38 @@ one-line rationale. `strategy_type` itself is never part of either base preset (
 selecting which row below applies), add it alongside whichever preset you start from.
 
 **Same caveat as `docs/RISK_CONSTRAINTS.md`'s own presets**: warning-free is not the same as
-performance-validated. **Updated by Epic 17** ("Real Out-of-Sample Validation for the Other
-Selectable Momentum Strategies"): a real walk-forward + pre-registered holdout run now exists
-for 6 of these strategies (`dual_momentum`, `correlation_weighted_momentum`,
-`rank_sign_momentum`, `absolute_momentum`, `residual_momentum`, `path_dependent_momentum`) plus
-a holdout-only run for `multi_timeframe_composite` (its own scoring ignores `lookback_period`,
-a grid search over it is a no-op, see its own section above), monthly regime only,
-`portfolio1`'s config, same cached proxy universe as Epic 13-16. `hybrid_multi_factor` still
-cannot be backtested at all (see its own section above). Real, honest headline: `residual_momentum`
-produced the strongest result of any out-of-sample run in this project so far (holdout Sharpe
-0.46, alpha -0.17%, 90% bootstrap CI `[0.08, 0.96]`, entirely above zero); `dual_momentum`'s
-backtest results are byte-identical to plain `momentum` (`use_absolute_momentum` is
-LIVE-ONLY, and `use_regime_filter` was already on, nothing left to differ at the backtest
-level); the rest cluster close to plain `momentum`'s own already-published result. See
-`README.md`'s Known Gaps entry for the full per-strategy table and numbers, weekly-regime
-coverage for these strategies remains a separate, un-closed gap.
+performance-validated. **Updated by Epic 17 and Epic 18** ("Real Out-of-Sample Validation for
+the Other Selectable Momentum Strategies", monthly and weekly regimes): a real walk-forward +
+pre-registered holdout run now exists for 6 of these strategies (`dual_momentum`,
+`correlation_weighted_momentum`, `rank_sign_momentum`, `absolute_momentum`, `residual_momentum`,
+`path_dependent_momentum`) in BOTH regimes, plus a holdout-only run for
+`multi_timeframe_composite` in both (its own scoring ignores `lookback_period`, a grid search
+over it is a no-op, see its own section above), `portfolio1`/`portfolio2`'s real configs, same
+cached proxy universe as Epic 13-16. `hybrid_multi_factor` still cannot be backtested at all
+(see its own section above). Real, honest headline: `residual_momentum` is the standout in BOTH
+regimes, the strongest monthly out-of-sample result in the project (holdout Sharpe 0.46, alpha
+-0.17%, 90% bootstrap CI `[0.08, 0.96]`) and the closest-to-zero alpha of any weekly variant too
+(-0.09%, CI `[0.12, 1.14]`), a repeated pattern, not a one-off. `dual_momentum`'s backtest
+results are byte-identical to plain `momentum` in both regimes (`use_absolute_momentum` is
+LIVE-ONLY, and `use_regime_filter` was already on in both configs, nothing left to differ at the
+backtest level). A SECOND no-op, weekly-only: `correlation_weighted_momentum` is also
+byte-identical to `portfolio2`'s own weekly `momentum` baseline there, because `portfolio2`'s
+own `risk_overrides` already sets `use_correlation_penalty: true` directly, confirmed and
+anticipated before running, not a surprise, see this file's own "How presets compose" section
+above. `rank_sign_momentum` produced the best full-search weekly holdout Sharpe (0.63) of the
+batch. See `README.md`'s Known Gaps entries for the full per-strategy tables and numbers, both
+regimes are now covered for these 6 strategies.
+
+**A real documentation correction, found while confirming `multi_timeframe_composite`'s
+mechanics for Epic 18, not previously caught**: the Short-Term (Weekly) column below previously
+recommended `multi_timeframe_lookbacks: [1, 2, 4]` described as "weeks". This was wrong, and has
+been corrected: `resolve_strategy_scores()`'s dispatch for `multi_timeframe_composite` resamples
+its price panel to monthly (`scoped_prices.resample("ME").last()`) UNCONDITIONALLY, regardless
+of `holding_period`, confirmed by reading the code directly. `multi_timeframe_lookbacks` values
+are always interpreted as a count of MONTHLY bars, never weeks, even under a weekly base preset;
+a portfolio selecting `multi_timeframe_composite` under a weekly `holding_period` gets a
+monthly-timeframe-blended signal rebalanced weekly, not a weekly signal, worth knowing before
+selecting it for a genuinely short-term book.
 
 | `strategy_type` | Long-Term (Monthly) additions | Short-Term (Weekly) additions | Rationale |
 |---|---|---|---|
@@ -330,7 +347,7 @@ coverage for these strategies remains a separate, un-closed gap.
 | `volatility_scaled_momentum` | `sizing_method: inverse_vol` | `sizing_method: inverse_vol` | Already the base preset's default in both regimes, setting it explicitly is purely self-documenting |
 | `correlation_weighted_momentum` | `use_correlation_penalty: true`, `correlation_penalty_strength: 0.5` (default), `correlation_lookback_days: 63` (default, ~3 months) | `use_correlation_penalty: true`, `correlation_penalty_strength: 0.5`, `correlation_lookback_days: 21` (~1 month, matches the weekly regime's own faster timescale, same reasoning as `portfolio_vol_lookback` below) | Downweights mutually-correlated picks at sizing time |
 | `rank_sign_momentum` | `sizing_method: equal_weight` | `sizing_method: equal_weight`, `top_n: 3` (tighter than the base weekly preset's `5`, equal-weighting a noisier weekly signal across too many names dilutes conviction further than inverse-vol sizing would) | Non-parametric sizing, ignores score magnitude entirely |
-| `multi_timeframe_composite` | `multi_timeframe_lookbacks: [3, 6, 12]` (default, matches the monthly base preset's own `lookback_period: 12` scale), `multi_timeframe_weights: null` (equal-weighted) | `multi_timeframe_lookbacks: [1, 2, 4]` (weeks, matches the weekly base preset's `lookback_period: 1.0` = 4-week scale), `multi_timeframe_weights: null` | Blends multiple horizons instead of relying on one `lookback_period` |
+| `multi_timeframe_composite` | `multi_timeframe_lookbacks: [3, 6, 12]` (default, matches the monthly base preset's own `lookback_period: 12` scale), `multi_timeframe_weights: null` (equal-weighted) | `multi_timeframe_lookbacks: [3, 6, 12]` (same as monthly, ALWAYS months, confirmed by reading `resolve_strategy_scores()`'s dispatch, its price panel is unconditionally resampled to monthly regardless of `holding_period`; there is no weekly-scale variant of this field), `multi_timeframe_weights: null` | Blends multiple monthly-scale horizons instead of relying on one `lookback_period`; under a weekly base preset this rebalances weekly on a signal that itself never updates faster than monthly, see the note above |
 | `absolute_momentum` | `defensive_ticker: BIL` (already in the base preset) | `defensive_ticker: BIL` | No cross-sectional `top_n` cutoff at all, `top_n` is set but not enforced for this strategy_type, see its section above |
 | `residual_momentum` | `regime_benchmark: SPY` (already in the base preset, must be priced in the portfolio's own `tickers:`) | `regime_benchmark: SPY` | Beta estimated from trailing DAILY returns regardless of regime, no extra tuning needed beyond ensuring the benchmark is priced |
 | `path_dependent_momentum` | *(none beyond the base preset)* | *(none beyond the base preset)* | Purely a function of `lookback_period`/`holding_period`, already tuned by the base preset |

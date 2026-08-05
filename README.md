@@ -278,9 +278,11 @@ momentum-trading/
 │   │   │                           monthly regime (Epic 15, see README's Known Gaps)
 │   │   ├── out_of_sample_validation_weekly.ipynb   same methodology, weekly regime
 │   │   │                           (Epic 16, see README's Known Gaps)
-│   │   └── out_of_sample_validation_strategy_types.ipynb   same methodology, the other
-│   │                               10 selectable strategy_type variants (Epic 17, see
-│   │                               README's Known Gaps)
+│   │   ├── out_of_sample_validation_strategy_types.ipynb   same methodology, the other
+│   │   │                           10 selectable strategy_type variants, monthly regime
+│   │   │                           (Epic 17, see README's Known Gaps)
+│   │   └── out_of_sample_validation_strategy_types_weekly.ipynb   same methodology,
+│   │                               weekly regime (Epic 18, see README's Known Gaps)
 │   └── operational/               interactive validation & run walkthroughs (safe, dry-run only)
 │       ├── live_signal_walkthrough.ipynb
 │       ├── daily_runner_walkthrough.ipynb
@@ -399,7 +401,7 @@ not been answered at all yet**:
 | Question | Status |
 |---|---|
 | Does the code have circuit breakers, idempotency, alerting, audit logging? | ✅ Yes, tested |
-| Has the strategy shown a positive out-of-sample (holdout) return on real data? | ⚠️ Run for real for both regimes (2026-08-04, see Known Gaps below). **Monthly** (`portfolio1`, Epic 15): walk-forward validation shows the shipped `lookback_period: 12` is genuinely robust (5 real historical folds, test-period Sharpe *not* degraded vs. train), but the single pre-registered 2015-2026 holdout shows only a modest Sharpe (0.39) with a **negative annualized alpha** (-2.63%) vs. SPY, and a 90% bootstrap CI that includes zero. **Weekly** (`portfolio2`, Epic 16): also robust on walk-forward (mean test Sharpe 1.34 vs. train 0.76, not degraded), but the search converged to a *longer* lookback (8 weeks) than the shipped default (4 weeks), a real, honest divergence from the monthly regime's result. The weekly holdout Sharpe (0.53) is modest but its 90% bootstrap CI is entirely positive (`[0.08, 1.05]`), a stronger statistical result than the monthly regime's, though its annualized alpha is still slightly negative (-0.70%). Positive on parameter robustness in both regimes, mixed on whether either shows a real edge beyond market-beta exposure. **The other 6 backtestable strategy variants** (Epic 17, monthly regime): mostly cluster close to plain `momentum`'s own result, `residual_momentum` stands out with the strongest out-of-sample result in the project so far (holdout Sharpe 0.46, alpha -0.17%, 90% CI `[0.08, 0.96]` entirely positive). |
+| Has the strategy shown a positive out-of-sample (holdout) return on real data? | ⚠️ Run for real for both regimes (2026-08-04, see Known Gaps below). **Monthly** (`portfolio1`, Epic 15): walk-forward validation shows the shipped `lookback_period: 12` is genuinely robust (5 real historical folds, test-period Sharpe *not* degraded vs. train), but the single pre-registered 2015-2026 holdout shows only a modest Sharpe (0.39) with a **negative annualized alpha** (-2.63%) vs. SPY, and a 90% bootstrap CI that includes zero. **Weekly** (`portfolio2`, Epic 16): also robust on walk-forward (mean test Sharpe 1.34 vs. train 0.76, not degraded), but the search converged to a *longer* lookback (8 weeks) than the shipped default (4 weeks), a real, honest divergence from the monthly regime's result. The weekly holdout Sharpe (0.53) is modest but its 90% bootstrap CI is entirely positive (`[0.08, 1.05]`), a stronger statistical result than the monthly regime's, though its annualized alpha is still slightly negative (-0.70%). Positive on parameter robustness in both regimes, mixed on whether either shows a real edge beyond market-beta exposure. **The other 6 backtestable strategy variants, both regimes** (Epic 17 monthly, Epic 18 weekly): mostly cluster close to plain `momentum`'s own result in each regime (with 2-3 confirmed no-ops where a preset had nothing left to change). `residual_momentum` is the standout, consistently: strongest monthly result in the project (holdout Sharpe 0.46, alpha -0.17%, CI `[0.08, 0.96]`) and the closest-to-zero alpha of any weekly variant too (-0.09%, CI `[0.12, 1.14]`), a repeated pattern across regimes, not a one-off. `rank_sign_momentum` produced the best weekly holdout Sharpe (0.63) of the full-search batch. |
 | Has it been validated against real 2008/2020/2022 history? | ⚠️ The risk-control *mechanism* has, using a long-history ETF proxy universe (see Known Gaps below), not the exact currently-configured portfolios (most of their tickers didn't exist in 2008). Real result: the risk-managed variant beat a naive-momentum baseline on max drawdown in all 6 head-to-head runs (both a monthly and weekly cadence, across 2008/2020/2022), most dramatically in 2008 (weekly regime: -11.5% vs. -26.0% max drawdown), at a real cost to upside capture during 2020's fast V-shaped recovery, and was actually worse than baseline on both metrics for 2022's monthly regime specifically, an honest, mixed result, not a uniform win. |
 | Has it connected to a real broker even once? | ✅ Yes, paper (port 7497) connection, account summary, position fetch, and **confirmed real BUY and SELL order fills** (verified directly in TWS's own execution log across two portfolios, real prices, matching quantities). Getting here surfaced and fixed three real bugs (every order silently rejected while the run logged success; a misleadingly-short fill-confirmation poll window; an informational per-order notice mistaken for a rejection, causing an already-filled order to be logged as failed) and one hard IBKR platform limitation worked around (no fractional equity orders via API, ever, floored to whole shares). The live/real-money port (7496) is still unexercised |
 | Has real live-vs-backtest divergence been measured? | ⚠️ Attempted for real (2026-08-03) against all three real portfolios' actual `dry_run=False` trade history; the notebook's methodology bugs are fixed and verified (real config load, `dry_run=False` filtering, `strategy_type`-aware signal reproduction, `custom_weights` sizing parity), and real Live P&L was computed successfully for all three. The head-to-head Backtest number itself is still blocked, not by a code defect but by real trading history simply being too young: `_build_report()`'s monthly-return diffing needs at least two completed calendar-month buckets to produce a non-NaN return, and the real history (~1-2 weeks old as of this writing, entirely inside one still-open month) can't supply that yet. See the Known Gaps entry below and `notebooks/operational/live_vs_backtest_reconciliation.ipynb`; rerun once real trading has spanned at least one full month-end. |
@@ -934,8 +936,56 @@ answer whether the strategy actually works.
   only, no walk-forward robustness check applies to it. None of this changes the shipped
   `strategy_type: momentum` default; it's real, additional evidence for anyone considering one of
   these alternatives, not a recommendation to switch. Same proxy-universe scope caveat as every
-  prior validation epic, and weekly-regime coverage for these 6 strategies remains a separate,
-  un-closed gap.
+  prior validation epic. **Weekly-regime coverage for these 6 strategies, previously flagged
+  here as a separate, un-closed gap, is now closed, see Epic 18 below.**
+
+- **Real out-of-sample validation for the other selectable momentum strategies, weekly regime,
+  Epic 18**: closes the gap Epic 17 above explicitly flagged, mirroring Epic 16's own
+  monthly-to-weekly extension of Epic 15, applied here to Epic 17 instead. Same 6 full-search
+  variants + `multi_timeframe_composite` holdout-only, `portfolio2`'s real weekly config
+  (`holding_period: 0.25`), week-quarter `lookback_candidates` (`0.5`/`0.75`/`1.0`/`1.5`/`2.0` ->
+  2/3/4/6/8 weeks), same cached proxy universe, same `SHY` defensive-ticker substitution. Two
+  real mechanical facts confirmed by reading the code directly before running anything: (1)
+  `resolve_path_dependent_momentum_scores()` already correctly branches on `holding_period < 1`,
+  no special handling needed; (2) `multi_timeframe_composite`'s scoring ALWAYS resamples to
+  monthly regardless of `holding_period`, so this variant's weekly-regime run tests "a
+  monthly-timeframe-blended signal, rebalanced weekly," not a weekly signal, a real, distinct
+  scenario from Epic 17's monthly-rebalance version. **A real no-op case anticipated in advance,
+  not stumbled into**: `portfolio2`'s own `risk_overrides` already sets `use_correlation_penalty:
+  true` directly, so `correlation_weighted_momentum`'s preset has zero effect vs. `portfolio2`'s
+  own already-published Epic 16 weekly `momentum` baseline, confirmed by the real run (`dual_
+  momentum` and `correlation_weighted_momentum` both came back byte-identical to each other AND
+  to Epic 16's own baseline).
+
+  **Real results** (run 2026-08-05), 5-fold walk-forward within `train`, `lookback_candidates=
+  [0.5, 0.75, 1.0, 1.5, 2.0]` week-quarters, same `pre_registered_split(split_date="2015-01-01")`:
+
+  | `strategy_type` | Chosen lookback (wks) | Mean train Sharpe | Mean test Sharpe | Holdout Sharpe | Holdout CAGR | Holdout Alpha | 90% Bootstrap CI |
+  |---|---|---|---|---|---|---|---|
+  | `dual_momentum` | 8 | 0.76 | 1.34 | 0.52 | 3.71% | -0.72% | [0.08, 1.04] |
+  | `correlation_weighted_momentum` | 8 | 0.76 | 1.34 | 0.52 | 3.71% | -0.72% | [0.08, 1.04] |
+  | `rank_sign_momentum` | 8 | 0.72 | 1.39 | **0.63** | **5.27%** | -0.50% | [0.19, 1.13] |
+  | `absolute_momentum` | 3 | 0.96 | 1.14 | 0.29 | 1.93% | -1.76% | [-0.16, 0.75] |
+  | `residual_momentum` | 8 | 1.08 | 1.34 | 0.59 | 3.28% | **-0.09%** | [0.12, 1.14] |
+  | `path_dependent_momentum` | 6 | 0.81 | 0.98 | 0.41 | 2.85% | -1.73% | [-0.06, 0.91] |
+  | `multi_timeframe_composite` (holdout-only) | n/a | n/a | n/a | 0.61 | 5.07% | -0.63% | [0.11, 1.15] |
+
+  Honest reading, not oversold: `dual_momentum` and `correlation_weighted_momentum` are both
+  byte-identical to Epic 16's own weekly `momentum` baseline, the anticipated no-op, correct and
+  expected, not a bug. `rank_sign_momentum` (equal-weight sizing) produced the best full-search
+  holdout Sharpe (0.63) and CAGR (5.27%) of the batch, with a solidly positive CI.
+  `residual_momentum` again shows the closest-to-zero alpha (-0.09%) of any variant tested across
+  Epic 15-18 combined, consistent with its monthly-regime result (Epic 17), a genuinely repeated
+  pattern, not a one-off. `absolute_momentum` and `path_dependent_momentum` are the weakest of
+  the batch, both with CIs spanning (or nearly spanning) zero, echoing the monthly regime's own
+  weaker showing for `absolute_momentum`. `multi_timeframe_composite`'s holdout (Sharpe 0.61, CI
+  entirely positive) is again strong, but still rests on a single holdout only, no walk-forward
+  robustness check applies to it, and its signal here is monthly, not weekly, despite the weekly
+  rebalance cadence, see the mechanical fact above. Same proxy-universe scope caveat as every
+  prior validation epic. This closes the out-of-sample validation program for the 6 real
+  non-alias `strategy_type` variants across both regimes; `hybrid_multi_factor` remains
+  permanently un-backtestable (see Epic 17's own entry), and `momentum`/`relative_momentum`/
+  `volatility_scaled_momentum` were covered or ruled out earlier (Epic 15/16/17).
 
 ### Who should allocate capital here
 

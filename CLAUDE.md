@@ -456,8 +456,42 @@ that tests enforce, don't casually violate these when editing:
   evidence, no walk-forward robustness check applies to it. None of this changes the shipped
   `strategy_type: momentum` default, it's additional evidence for anyone considering an
   alternative, not a recommendation to switch. See `README.md`'s Known Gaps entry for the full
-  per-strategy table; weekly-regime coverage for these 6 strategies remains a separate, un-closed
-  gap.
+  per-strategy table.
+  **Extended to the WEEKLY regime, Epic 18, "Real Out-of-Sample Validation for the Other
+  Selectable Momentum Strategies, Weekly Regime" plan**: closes the gap Epic 17 above explicitly
+  flagged, mirroring Epic 16's own monthly-to-weekly extension of Epic 15. Same 6 variants +
+  `multi_timeframe_composite` holdout-only, `portfolio2`'s real weekly config, week-quarter
+  `lookback_candidates=[0.5, 0.75, 1.0, 1.5, 2.0]`. Two real mechanical facts confirmed by
+  reading the code directly before running anything: `resolve_path_dependent_momentum_scores()`
+  already correctly branches on `holding_period < 1` (no special handling needed), and
+  `multi_timeframe_composite`'s `resolve_strategy_scores()` dispatch ALWAYS resamples to monthly
+  regardless of `holding_period`, confirmed directly, so its weekly-regime run tests "a
+  monthly-timeframe-blended signal, rebalanced weekly," not a weekly signal, a real, distinct
+  scenario from Epic 17's monthly-rebalance version. **This ALSO surfaced a real, pre-existing
+  documentation bug, fixed alongside this epic**: `docs/MOMENTUM_STRATEGIES.md`'s own "Best
+  Parameters" table previously recommended `multi_timeframe_lookbacks: [1, 2, 4]` described as
+  "weeks" for the weekly preset, wrong given the always-monthly resample just confirmed, those
+  values would actually be interpreted as MONTHS; corrected to `[3, 6, 12]` (same as monthly,
+  there is no weekly-scale variant of this field) with an explanatory note.
+  **A real no-op case anticipated in advance, not stumbled into**: `portfolio2`'s own
+  `risk_overrides` already sets `use_correlation_penalty: true` directly, so `correlation_
+  weighted_momentum`'s preset has zero effect vs. `portfolio2`'s own already-published Epic 16
+  weekly `momentum` baseline, confirmed by the real run (`dual_momentum` and `correlation_
+  weighted_momentum` both came back byte-identical to each other AND to Epic 16's own baseline:
+  chosen_lookback 8wk, holdout Sharpe 0.52, CAGR 3.71%, alpha -0.72%, CI `[0.08, 1.04]`).
+  **Real results** (run 2026-08-05): `rank_sign_momentum` (equal-weight sizing, chosen lookback
+  8wk, mean train/test Sharpe 0.72/1.39, holdout Sharpe **0.63**, CAGR **5.27%**, alpha -0.50%,
+  CI `[0.19, 1.13]`) produced the best full-search weekly holdout of the batch.
+  `residual_momentum` (1.08/1.34, holdout Sharpe 0.59, alpha **-0.09%**, CI `[0.12, 1.14]`) again
+  shows the closest-to-zero alpha of any variant tested across Epic 15-18 combined, the same
+  standout pattern as its monthly result (Epic 17), not a one-off. `absolute_momentum` (chosen
+  lookback only 3wk, holdout Sharpe 0.29, alpha -1.76%, CI `[-0.16, 0.75]`) and `path_dependent_
+  momentum` (6wk, holdout Sharpe 0.41, alpha -1.73%, CI `[-0.06, 0.91]`) are the weakest of the
+  batch, echoing their weaker monthly-regime showing too. `multi_timeframe_composite`'s
+  holdout-only result (Sharpe 0.61, alpha -0.63%, CI `[0.11, 1.15]`) is again strong despite its
+  underlying signal staying monthly. This closes the out-of-sample validation program for the 6
+  real non-alias `strategy_type` variants across both regimes. See `README.md`'s Known Gaps
+  entry for the full per-strategy table.
 - **`backtest/momentum_backtest.py`**, `BacktestConfig` (validated on construction) and
   `resolve_target_weights()`, the sizing logic shared by *both* the backtest engine and live
   execution, specifically so the two paths can't silently diverge. `lookback_period` is LIVE-ONLY

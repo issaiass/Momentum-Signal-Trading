@@ -970,6 +970,48 @@ that tests enforce, don't casually violate these when editing:
   `UNRECOGNIZED_POSITION`, the Turnover Limit warning) all fired correctly against the new
   features with zero interaction bugs. See `docs/RISK_CONSTRAINTS.md`'s own matching
   verification note under "Opt-in overlay strategies" for the full writeup.
+  `use_atr_trailing_stop`/`atr_trailing_stop_multiplier`/`atr_period` (Epic 2, "Institutional
+  Risk-Management Features" plan) is a volatility-ADAPTIVE trailing-stop distance (Wilder's ATR,
+  `core/technical_indicators.py`'s `atr()`, previously only ever consumed by the email report's
+  technical-indicator section, now wired into a real exit decision for the first time), an
+  alternative to `use_trailing_stop`'s FIXED percentage distance. Comparison shape is
+  DELIBERATELY different, not an inconsistency: the percentage trail compares `(price - high) /
+  high <= -trailing_stop_pct` (a fraction); the ATR trail compares `(high - price) >=
+  atr_trailing_stop_multiplier * ATR` (an absolute price/dollar distance), since ATR is quoted
+  in the ticker's own price units, not a percentage. Shares the SAME `running_high` dict the
+  percentage-trail block already maintains ("highest price since entry" is the identical
+  quantity regardless of distance formula), a new independent block in
+  `run_risk_managed_backtest()`'s day-loop, structurally parallel to the existing
+  `use_trailing_stop` block (same fill/slippage/commission/cleanup mechanics, only the trigger
+  condition and log message differ), checked AFTER it against `list(holdings.keys())`, so a
+  ticker already exited by the percentage trail is naturally skipped, "whichever triggers first
+  wins" by construction. A real, confirmed OHLC-plumbing gap was found and closed, the largest
+  real cost in this epic: `daily_prices` throughout this function is close-only, confirmed by
+  reading `_split_price_panel()` directly (it extracts only `close`/`open` from a MultiIndex
+  panel, silently discarding `high`/`low` even when present), so ATR (needing high/low/close)
+  cannot be computed from `daily_prices` alone. `run_risk_managed_backtest()`/
+  `run_custom_backtest()` gained new optional `daily_highs`/`daily_lows` DataFrame params (same
+  column shape as `daily_prices`), REQUIRED (loud `ValueError`, not a silent skip) when
+  `use_atr_trailing_stop` is `True`, same "opt-in extra data the caller must supply" precedent
+  `use_liquidity_filter`'s `daily_volume` requirement already established. `atr_by_ticker: dict`
+  is precomputed ONCE per ticker before the day-loop starts (a pure function of the already-
+  available OHLC panels, not recomputed incrementally inside the loop, matching this function's
+  existing `regime_bullish`/`regime_high_vol`/`momentum_crash_bear` precomputation precedent),
+  sourced from `close_full`/the full `daily_highs`/`daily_lows` (not the already-window-masked
+  `prices`), the same "bound only at the end, not the start" lesson Epic 14's
+  `momentum_crash_lookback_days` fix already applied, so a short simulation window doesn't
+  starve ATR's own lookback. New `resolve_ticker_atr_multiplier(ticker, cfg)` resolver (same
+  shape/placement as `resolve_ticker_stop_loss_pct()`/`resolve_ticker_max_pct_of_adv()`), a 4th
+  allowed `ticker_risk_overrides` key (`atr_trailing_stop_multiplier`); unlike
+  `resolve_ticker_max_pct_of_adv()`, this DOES honor `'enabled': false` (returns `None`), ATR
+  trail is a stop-loss-family exit mechanism, one consistent "enabled" meaning per ticker across
+  every exit check, not a second, divergent one. **Deliberately has NO broker-native
+  (`attach_broker_trailing_stop`-style) IBKR `TRAIL` counterpart**, a considered scope decision,
+  not an oversight: IBKR's `TRAIL` order only fixes its distance ONCE at submission time (either
+  a percent or a fixed-dollar trail amount, confirmed, never dynamically recomputed), so a
+  broker-native ATR version would only ever be "ATR distance as of order placement, held fixed
+  thereafter," a materially weaker and potentially misleading claim of "ATR-based" protection.
+  See `docs/RISK_CONSTRAINTS.md`'s "ATR-Based Trailing Stop" section.
 - **`execution/live_signal.py`**, live signal/order generation, IBKR integration (`ibapi`
   `EClient`/`EWrapper`, not a third-party wrapper), multi-portfolio orchestration, FIFO P&L,
   hash-chained audit log. `fetch_ohlcv_for_tickers()` is distinct from `fetch_live_prices()`,
@@ -1998,6 +2040,50 @@ that tests enforce, don't casually violate these when editing:
   production impact once `.env`'s `FMP_API_KEY`/`EODHD_API_KEY` are valid and not already
   exhausted: every real portfolio's live price feed genuinely starts sourcing from FMP first
   instead of always falling through to `yfinance`.
+  `check_and_handle_trailing_stops()`'s ATR-Based Trailing Stop extension (Epic 2, "Institutional
+  Risk-Management Features" plan, `cfg.use_atr_trailing_stop`) shares the SAME `stored_hwm`
+  dict/file the percentage trail above already persists, no schema change: a second per-ticker
+  pass, gated separately (`if cfg.use_atr_trailing_stop and held_tickers:`), skipping any ticker
+  already in `flagged` (from the percentage trail) or `already_flagged` (from an earlier check
+  this run), so a position breaching BOTH trail types in one run generates exactly one exit
+  order. Fetches OHLC for CURRENTLY-HELD tickers only via the EXISTING
+  `fetch_ohlcv_for_tickers()` (already imported/used elsewhere in this file for the email
+  report's technical indicators, no new fetch mechanism), a much smaller live-side cost than the
+  backtest's full-panel plumbing (see `backtest/momentum_backtest.py`'s own bullet for that
+  side). A ticker missing from the OHLCV fetch result (vendor gap) skips the ATR check for that
+  ticker only, not the whole run. Exit condition mirrors the backtest's own dollar-distance
+  comparison exactly: `(hwm - latest_price) >= multiplier * atr_latest`, gated by
+  `resolve_ticker_atr_multiplier()`'s own `None`-means-disabled contract. New
+  `ATR_TRAILING_STOP_TRIGGERED` `CRITICAL` alert (`log_alert()`), same severity as the existing
+  `TRAILING_STOP_TRIGGERED`, distinguishable in the alerts log. The function's early-return guard
+  changed from `if not cfg.use_trailing_stop: return []` to `if not cfg.use_trailing_stop and not
+  cfg.use_atr_trailing_stop: return []`, so the function now correctly runs (and persists the HWM
+  file) when EITHER trail type alone is enabled, not just the percentage one. See
+  `docs/RISK_CONSTRAINTS.md`'s "ATR-Based Trailing Stop" section for the full mechanism and the
+  backtest-side OHLC-plumbing gap this epic closed.
+  **Epic 2 real verification, run 2026-08-05**: full pytest suite 1014 passed (up from 994
+  pre-Epic-2, +20 new tests), zero regressions. Real end-to-end paper-account confirmation (port
+  7497), both natively and inside a Docker container rebuilt with this epic's code: a real BUY
+  into a throwaway single-ticker test position, then a second invocation with a deliberately
+  tiny `atr_trailing_stop_multiplier` (`0.01`) to force a near-certain trigger from ordinary
+  bid/ask tick noise, confirmed a REAL computed ATR from real fetched OHLCV (e.g. `$8.17` for
+  INTC, not simulated), a real `ATR_TRAILING_STOP_TRIGGERED` alert, and a real auto-executed
+  SELL closing the position (`execDetails`/`commissionReport` confirmed). Repeated with two
+  different tickers for confidence, then confirmed identically inside Docker (same real ATR
+  value, alert email sent successfully there too). Both the regular-trading-hours order-queuing
+  path (informational `error 399`, order correctly queued for next session, not a crash) and the
+  `allow_extended_hours` real-fill path were exercised for real.
+  **A real, confirmed cross-CONFIG-FILE ticker-overlap incident was found during this
+  verification, NOT fixed, still open**: `scope_overlapping_holdings()` only protects against
+  ticker overlap BETWEEN PORTFOLIOS WITHIN ONE LOADED `config.yaml` (confirmed by reading
+  `check_ticker_overlap()`, it inspects only the currently-loaded file's own portfolios), not
+  overlap between the currently-loaded config and ANY OTHER config file that has traded the same
+  real account. A throwaway single-ticker test config sharing a ticker (`NVDA`) with this
+  project's own real `portfolio1` saw the REAL whole-account position and generated a real
+  (paper, no financial loss) full-liquidation SELL of it. See `docs/RISK_CONSTRAINTS.md`'s "ATR-
+  Based Trailing Stop" section and `README.md`'s Known Gaps for the full incident writeup; the
+  practical mitigation until a real fix exists is procedural (never point `--config` at a file
+  whose tickers overlap another config trading the same account).
 
 **Config flow**: `config.yaml` (gitignored; copy from `config.example.yaml`) →
 `daily_runner.load_config()` builds one `BacktestConfig` per portfolio from

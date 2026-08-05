@@ -1284,6 +1284,172 @@ class TestTrailingStopCheck:
         assert logged.iloc[0]["reason"] == "trailing-stop auto-exit"
 
 
+class TestAtrTrailingStopCheck:
+    """
+    Epic 2, "Institutional Risk-Management Features" plan: check_and_handle_trailing_stops()'s
+    ATR-Based Trailing Stop extension, sharing the SAME trailing_stop_hwm_<portfolio>.json file
+    as the percentage trail above (TestTrailingStopCheck), only the exit-condition comparison
+    differs (an absolute price/dollar distance, multiplier x ATR, not a percentage fraction).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolate_alerts_log(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(daily_runner, "LOCK_DIR", tmp_path / "data")
+        monkeypatch.setattr(daily_runner, "data_dir", lambda: tmp_path / "data")
+        monkeypatch.setattr(daily_runner, "ALERTS_LOG_PATH", str(tmp_path / "data" / "alerts_log.csv"))
+
+    def _fake_ohlcv(self, ticker, n=60, level=100.0):
+        dates = pd.bdate_range("2024-01-01", periods=n)
+        close = pd.Series(level, index=dates)
+        high, low = close + 0.5, close - 0.5
+        return pd.DataFrame({"open": close, "high": high, "low": low, "close": close,
+                              "volume": 1000}, index=dates)
+
+    def _install_ohlcv(self, monkeypatch, level=100.0):
+        monkeypatch.setattr(daily_runner, "fetch_ohlcv_for_tickers",
+                             lambda tickers, **k: {t: self._fake_ohlcv(t, level=level) for t in tickers})
+
+    def _expected_atr(self, atr_period=14, level=100.0):
+        from momentum_trading.core.technical_indicators import atr as atr_fn
+        ohlcv = self._fake_ohlcv("XLK", level=level)
+        return atr_fn(ohlcv["high"], ohlcv["low"], ohlcv["close"], period=atr_period).iloc[-1]
+
+    def test_disabled_when_use_atr_trailing_stop_is_false(self, tmp_path, monkeypatch):
+        self._install_ohlcv(monkeypatch)
+        cfg = BacktestConfig(use_atr_trailing_stop=False)
+        flagged = check_and_handle_trailing_stops(
+            tickers=["XLK"], current_positions={"XLK": {"shares": 10, "avg_entry_price": 100.0}},
+            latest_prices={"XLK": 50.0}, cfg=cfg, dry_run=True, ibkr_port=7497,
+            log_path=str(tmp_path / "out.csv"), portfolio="p1",
+        )
+        assert flagged == []
+
+    def test_triggers_when_drawdown_exceeds_independently_computed_multiplier_times_atr(self, tmp_path, monkeypatch):
+        self._install_ohlcv(monkeypatch)
+        multiplier = 2.0
+        expected_atr = self._expected_atr()
+        cfg = BacktestConfig(use_atr_trailing_stop=True, atr_trailing_stop_multiplier=multiplier)
+        positions = {"XLK": {"shares": 10, "avg_entry_price": 100.0}}
+        # first run: establishes the HWM at 150, must not trigger (no drawdown yet)
+        flagged = check_and_handle_trailing_stops(
+            tickers=["XLK"], current_positions=positions, latest_prices={"XLK": 150.0},
+            cfg=cfg, dry_run=True, ibkr_port=7497,
+            log_path=str(tmp_path / "out.csv"), portfolio="p1",
+        )
+        assert flagged == []
+        # second run: price falls just PAST multiplier x ATR below the 150 high
+        trigger_price = 150.0 - (multiplier * expected_atr) - 0.01
+        flagged = check_and_handle_trailing_stops(
+            tickers=["XLK"], current_positions=positions, latest_prices={"XLK": trigger_price},
+            cfg=cfg, dry_run=True, ibkr_port=7497,
+            log_path=str(tmp_path / "out.csv"), portfolio="p1",
+        )
+        assert flagged == ["XLK"]
+        rows = read_recent_alerts(portfolio="p1", log_path=str(tmp_path / "data" / "alerts_log.csv"))
+        assert rows[-1]["alert_type"] == "ATR_TRAILING_STOP_TRIGGERED"
+
+    def test_does_not_trigger_when_drawdown_is_just_short_of_the_atr_distance(self, tmp_path, monkeypatch):
+        self._install_ohlcv(monkeypatch)
+        multiplier = 2.0
+        expected_atr = self._expected_atr()
+        cfg = BacktestConfig(use_atr_trailing_stop=True, atr_trailing_stop_multiplier=multiplier)
+        positions = {"XLK": {"shares": 10, "avg_entry_price": 100.0}}
+        check_and_handle_trailing_stops(
+            tickers=["XLK"], current_positions=positions, latest_prices={"XLK": 150.0},
+            cfg=cfg, dry_run=True, ibkr_port=7497,
+            log_path=str(tmp_path / "out.csv"), portfolio="p1",
+        )
+        just_short_price = 150.0 - (multiplier * expected_atr) + 0.01
+        flagged = check_and_handle_trailing_stops(
+            tickers=["XLK"], current_positions=positions, latest_prices={"XLK": just_short_price},
+            cfg=cfg, dry_run=True, ibkr_port=7497,
+            log_path=str(tmp_path / "out.csv"), portfolio="p1",
+        )
+        assert flagged == []
+
+    def test_shares_the_same_hwm_file_as_the_percentage_trail(self, tmp_path, monkeypatch):
+        # A position already tracked by the percentage trail's own HWM-establishing call must be
+        # read correctly by the ATR check too, same file, no migration/schema change needed.
+        self._install_ohlcv(monkeypatch)
+        cfg_pct = BacktestConfig(use_trailing_stop=True, trailing_stop_pct=0.50)  # won't trigger
+        positions = {"XLK": {"shares": 10, "avg_entry_price": 100.0}}
+        check_and_handle_trailing_stops(
+            tickers=["XLK"], current_positions=positions, latest_prices={"XLK": 150.0},
+            cfg=cfg_pct, dry_run=True, ibkr_port=7497,
+            log_path=str(tmp_path / "out.csv"), portfolio="p1",
+        )
+        hwm_path = tmp_path / "data" / "trailing_stop_hwm_p1.json"
+        assert json.loads(hwm_path.read_text())["XLK"] == 150.0
+
+        cfg_atr = BacktestConfig(use_atr_trailing_stop=True, atr_trailing_stop_multiplier=2.0)
+        expected_atr = self._expected_atr()
+        trigger_price = 150.0 - (2.0 * expected_atr) - 0.01
+        flagged = check_and_handle_trailing_stops(
+            tickers=["XLK"], current_positions=positions, latest_prices={"XLK": trigger_price},
+            cfg=cfg_atr, dry_run=True, ibkr_port=7497,
+            log_path=str(tmp_path / "out.csv"), portfolio="p1",
+        )
+        assert flagged == ["XLK"]  # correctly read the 150 high the OTHER check persisted
+
+    def test_per_ticker_disabled_override_is_never_flagged(self, tmp_path, monkeypatch):
+        self._install_ohlcv(monkeypatch)
+        cfg = BacktestConfig(use_atr_trailing_stop=True, atr_trailing_stop_multiplier=2.0,
+                              ticker_risk_overrides={"XLK": {"enabled": False}})
+        flagged = check_and_handle_trailing_stops(
+            tickers=["XLK"], current_positions={"XLK": {"shares": 10, "avg_entry_price": 100.0}},
+            latest_prices={"XLK": 50.0}, cfg=cfg, dry_run=True, ibkr_port=7497,
+            log_path=str(tmp_path / "out.csv"), portfolio="p1",
+        )
+        assert flagged == []
+
+    def test_auto_executed_when_enabled(self, tmp_path, monkeypatch):
+        self._install_ohlcv(monkeypatch)
+        multiplier = 2.0
+        expected_atr = self._expected_atr()
+        cfg = BacktestConfig(use_atr_trailing_stop=True, atr_trailing_stop_multiplier=multiplier,
+                              auto_execute_stop_loss=True)
+        out_path = tmp_path / "out.csv"
+        positions = {"XLK": {"shares": 10, "avg_entry_price": 100.0}}
+        check_and_handle_trailing_stops(
+            tickers=["XLK"], current_positions=positions, latest_prices={"XLK": 150.0},
+            cfg=cfg, dry_run=True, ibkr_port=7497, log_path=str(out_path), portfolio="p1",
+        )
+        trigger_price = 150.0 - (multiplier * expected_atr) - 0.01
+        flagged = check_and_handle_trailing_stops(
+            tickers=["XLK"], current_positions=positions, latest_prices={"XLK": trigger_price},
+            cfg=cfg, dry_run=True, ibkr_port=7497, log_path=str(out_path), portfolio="p1",
+        )
+        assert flagged == ["XLK"]
+        logged = pd.read_csv(out_path)
+        assert logged.iloc[0]["action"] == "SELL"
+        assert logged.iloc[0]["reason"] == "trailing-stop auto-exit"
+
+    def test_ticker_breaching_both_trail_types_in_one_call_is_flagged_only_once(self, tmp_path, monkeypatch):
+        # Both use_trailing_stop AND use_atr_trailing_stop enabled together, a drawdown large
+        # enough to breach BOTH thresholds at once: the percentage-trail loop runs first inside
+        # check_and_handle_trailing_stops() and flags XLK, the ATR loop must then skip it
+        # (already in `flagged`), producing exactly one entry, not two.
+        self._install_ohlcv(monkeypatch)
+        multiplier = 2.0
+        expected_atr = self._expected_atr()
+        cfg = BacktestConfig(use_trailing_stop=True, trailing_stop_pct=0.05,  # tight, breaches easily
+                              use_atr_trailing_stop=True, atr_trailing_stop_multiplier=multiplier)
+        positions = {"XLK": {"shares": 10, "avg_entry_price": 100.0}}
+        check_and_handle_trailing_stops(
+            tickers=["XLK"], current_positions=positions, latest_prices={"XLK": 150.0},
+            cfg=cfg, dry_run=True, ibkr_port=7497,
+            log_path=str(tmp_path / "out.csv"), portfolio="p1",
+        )
+        # A big enough drop to breach BOTH the 5% percentage trail and the ATR distance.
+        trigger_price = min(150.0 * 0.90, 150.0 - (multiplier * expected_atr) - 0.01)
+        flagged = check_and_handle_trailing_stops(
+            tickers=["XLK"], current_positions=positions, latest_prices={"XLK": trigger_price},
+            cfg=cfg, dry_run=True, ibkr_port=7497,
+            log_path=str(tmp_path / "out.csv"), portfolio="p1",
+        )
+        assert flagged == ["XLK"]  # exactly one entry, not two
+
+
 class TestStopCheckDedup:
     """
     Epic 1, Story 1.3: check_and_handle_stop_losses()/check_and_handle_time_stops()/

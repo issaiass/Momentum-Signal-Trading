@@ -38,7 +38,7 @@ from .execution.live_signal import (
     place_orders_ibkr, log_orders, write_portfolio_snapshot, get_latest_snapshot,
     derive_entry_date, measure_live_performance, fetch_ohlcv_for_tickers,
     build_position_performance, reconstruct_dry_run_positions, derive_own_live_positions,
-    resolve_ticker_stop_loss_pct,
+    resolve_ticker_stop_loss_pct, resolve_ticker_atr_multiplier,
 )
 from .core.smtp_auth import authenticate as authenticate_smtp, smtp_ready, connect as smtp_connect, send_with_retry
 from .core.audit_log import (
@@ -46,7 +46,7 @@ from .core.audit_log import (
     compute_retention_window_days, rotate_hash_chained_log, rotate_plain_log,
 )
 from .core.paths import data_dir, logs_dir
-from .core.technical_indicators import compute_latest_indicators
+from .core.technical_indicators import compute_latest_indicators, atr
 from .core.fundamentals import get_cached_or_fetch_fundamentals
 from .core.macro_data import get_cached_or_fetch_macro_indicators
 from .backtest.momentum_backtest import BacktestConfig
@@ -645,10 +645,22 @@ def check_and_handle_trailing_stops(
     "stop-checking off for this ticker" semantics check_and_handle_stop_losses() already uses;
     trailing_stop_pct itself is portfolio-wide only, no per-ticker trailing width yet.
 
+    Also runs the ATR-Based Trailing Stop check (opt-in, cfg.use_atr_trailing_stop, Epic 2,
+    "Institutional Risk-Management Features" plan) when enabled, sharing the SAME stored_hwm
+    file/dict as the percentage trail above, only the exit-condition comparison differs (an
+    absolute price/dollar distance, multiplier x ATR, not a percentage-of-high fraction, since
+    ATR is quoted in the ticker's own price units). Fetches OHLC for currently-held tickers only
+    via the existing fetch_ohlcv_for_tickers() (already used elsewhere for the email report's
+    technical indicators, no new fetch mechanism), a vendor gap for one ticker skips the ATR
+    check for that ticker only, not the whole run. Honors resolve_ticker_atr_multiplier()'s own
+    'enabled' kill-switch (same semantics as the percentage trail's). A ticker breaching BOTH
+    trail types in the same run is flagged by whichever check runs first (percentage trail is
+    checked first) and skipped by the other, generating exactly one exit order.
+
     already_flagged : see check_and_handle_stop_losses()'s docstring, same shared-set
         de-duplication contract.
     """
-    if not cfg.use_trailing_stop:
+    if not cfg.use_trailing_stop and not cfg.use_atr_trailing_stop:
         return []
     if already_flagged is None:
         already_flagged = set()
@@ -664,26 +676,70 @@ def check_and_handle_trailing_stops(
     stored_hwm = {t: h for t, h in stored_hwm.items() if t in held_tickers}
 
     flagged = []
-    for ticker, pos in current_positions.items():
-        if ticker in already_flagged:
-            continue
-        entry_price = pos.get("avg_entry_price")
-        shares = pos.get("shares", 0)
-        if not entry_price or shares <= 0 or ticker not in latest_prices:
-            continue
-        if resolve_ticker_stop_loss_pct(ticker, cfg) is None:
-            continue  # stop-loss disabled for this ticker (ticker_risk_overrides), never checked
+    if cfg.use_trailing_stop:
+        for ticker, pos in current_positions.items():
+            if ticker in already_flagged:
+                continue
+            entry_price = pos.get("avg_entry_price")
+            shares = pos.get("shares", 0)
+            if not entry_price or shares <= 0 or ticker not in latest_prices:
+                continue
+            if resolve_ticker_stop_loss_pct(ticker, cfg) is None:
+                continue  # stop-loss disabled for this ticker (ticker_risk_overrides), never checked
 
-        hwm = max(stored_hwm.get(ticker, entry_price), latest_prices[ticker])
-        stored_hwm[ticker] = hwm
-        drawdown_from_high = (latest_prices[ticker] - hwm) / hwm
-        if drawdown_from_high <= -cfg.trailing_stop_pct:
-            logger.warning("TRAILING-STOP TRIGGERED: %s down %.1f%% from high $%.2f (now $%.2f)",
-                            ticker, drawdown_from_high * 100, hwm, latest_prices[ticker])
-            log_alert(portfolio, "TRAILING_STOP_TRIGGERED", "CRITICAL",
-                      f"{ticker} down {drawdown_from_high:.1%} from high (${hwm:.2f} -> ${latest_prices[ticker]:.2f})",
-                      log_path=ALERTS_LOG_PATH)
-            flagged.append(ticker)
+            hwm = max(stored_hwm.get(ticker, entry_price), latest_prices[ticker])
+            stored_hwm[ticker] = hwm
+            drawdown_from_high = (latest_prices[ticker] - hwm) / hwm
+            if drawdown_from_high <= -cfg.trailing_stop_pct:
+                logger.warning("TRAILING-STOP TRIGGERED: %s down %.1f%% from high $%.2f (now $%.2f)",
+                                ticker, drawdown_from_high * 100, hwm, latest_prices[ticker])
+                log_alert(portfolio, "TRAILING_STOP_TRIGGERED", "CRITICAL",
+                          f"{ticker} down {drawdown_from_high:.1%} from high (${hwm:.2f} -> ${latest_prices[ticker]:.2f})",
+                          log_path=ALERTS_LOG_PATH)
+                flagged.append(ticker)
+
+    # --- ATR-Based Trailing Stop (opt-in, cfg.use_atr_trailing_stop), Epic 2, "Institutional
+    #     Risk-Management Features" plan. Shares the SAME stored_hwm dict/file as the
+    #     percentage trail above ("highest price since entry" is the identical quantity
+    #     regardless of distance formula), only the exit-condition COMPARISON differs: an
+    #     absolute price/dollar distance (multiplier x ATR), not a percentage-of-high fraction.
+    #     A ticker already flagged by the percentage trail above is skipped here (already_flagged
+    #     is checked the same way), so a position breaching BOTH in one run generates exactly one
+    #     exit order, not two. ---
+    if cfg.use_atr_trailing_stop and held_tickers:
+        ohlcv = fetch_ohlcv_for_tickers(list(held_tickers))
+        for ticker, pos in current_positions.items():
+            if ticker in already_flagged or ticker in flagged:
+                continue
+            entry_price = pos.get("avg_entry_price")
+            shares = pos.get("shares", 0)
+            if not entry_price or shares <= 0 or ticker not in latest_prices:
+                continue
+            multiplier = resolve_ticker_atr_multiplier(ticker, cfg)
+            if multiplier is None:
+                continue  # ATR trail not configured, or explicitly disabled for this ticker
+            ohlcv_df = ohlcv.get(ticker)
+            if ohlcv_df is None or "high" not in ohlcv_df.columns or "low" not in ohlcv_df.columns:
+                continue  # vendor gap this run, skip the ATR check for this ticker only
+            atr_series = atr(ohlcv_df["high"], ohlcv_df["low"], ohlcv_df["close"], period=cfg.atr_period)
+            atr_latest = atr_series.iloc[-1] if not atr_series.empty else None
+            if atr_latest is None or pd.isna(atr_latest) or atr_latest <= 0:
+                continue  # not enough ATR history yet
+
+            hwm = max(stored_hwm.get(ticker, entry_price), latest_prices[ticker])
+            stored_hwm[ticker] = hwm
+            drawdown_dollars = hwm - latest_prices[ticker]
+            if drawdown_dollars >= multiplier * atr_latest:
+                logger.warning(
+                    "ATR-TRAILING-STOP TRIGGERED: %s down $%.2f from high $%.2f (now $%.2f, "
+                    "%.1fx ATR=$%.2f)", ticker, drawdown_dollars, hwm, latest_prices[ticker],
+                    multiplier, atr_latest,
+                )
+                log_alert(portfolio, "ATR_TRAILING_STOP_TRIGGERED", "CRITICAL",
+                          f"{ticker} down ${drawdown_dollars:.2f} from high (${hwm:.2f} -> "
+                          f"${latest_prices[ticker]:.2f}), {multiplier:.1f}x ATR=${atr_latest:.2f}",
+                          log_path=ALERTS_LOG_PATH)
+                flagged.append(ticker)
 
     hwm_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = hwm_path.with_suffix(hwm_path.suffix + ".tmp")

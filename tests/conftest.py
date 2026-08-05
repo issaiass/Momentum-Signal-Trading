@@ -25,6 +25,24 @@ def synthetic_daily_prices():
 
 
 @pytest.fixture
+def synthetic_daily_highs(synthetic_daily_prices):
+    """
+    Epic 2, "Institutional Risk-Management Features" plan (ATR-Based Trailing Stop): a
+    deterministic high panel matching synthetic_daily_prices' own shape/seed exactly (same
+    tickers/date index), high = close + a small positive offset, sufficient for atr() to
+    compute a real, non-degenerate true-range series without needing a separate synthetic
+    price-generation process.
+    """
+    return synthetic_daily_prices + 0.5
+
+
+@pytest.fixture
+def synthetic_daily_lows(synthetic_daily_prices):
+    """Epic 2 counterpart to synthetic_daily_highs above: low = close - a small positive offset."""
+    return synthetic_daily_prices - 0.5
+
+
+@pytest.fixture
 def synthetic_monthly_picks(synthetic_daily_prices):
     """Simple top-2-by-3-month-momentum picks, matching the pattern used elsewhere in this project."""
     close = synthetic_daily_prices

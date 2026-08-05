@@ -65,6 +65,7 @@ from ..backtest.momentum_backtest import (
     risk_strategy_enabled,
     resolve_ticker_stop_loss_pct,
     resolve_ticker_max_pct_of_adv,
+    resolve_ticker_atr_multiplier,
 )
 from ..core.functions_quant_extensions import (
     absolute_momentum_overlay, liquidity_filter, technical_confirmation_filter, volume_confirmation_filter,

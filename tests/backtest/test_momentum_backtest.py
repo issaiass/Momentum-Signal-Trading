@@ -753,6 +753,166 @@ class TestBacktestTrailingStop:
             assert abs(may_row["Portfolio Monthly Return"].iloc[0]) < 0.02
 
 
+class TestBacktestAtrTrailingStop:
+    """
+    Epic 2, "Institutional Risk-Management Features" plan: use_atr_trailing_stop/
+    atr_trailing_stop_multiplier exits a position once its drawdown from its OWN post-entry
+    high (dollar terms) reaches multiplier x ATR, a volatility-ADAPTIVE distance, distinct from
+    trailing_stop_pct's FIXED percentage (see TestBacktestTrailingStop above). Same
+    rally-then-pullback shape reused for direct comparability.
+    """
+
+    def _picks_always_a(self, prices):
+        month_ends = prices.resample("ME").last().index
+        return pd.Series({d: ["A"] for d in month_ends[:2]})
+
+    def _rally_then_pullback_ohlc(self):
+        # Dec/Jan: flat at 100 (entry, also warms up ATR to a known ~constant value since a
+        # constant high-low spread of 1.0 with no day-to-day close change gives a constant true
+        # range of 1.0). Feb: rallies to a 150 high. Mar: pulls back to 130.
+        dates = pd.bdate_range("2019-12-01", "2020-04-30")
+        close_a = pd.Series(100.0, index=dates)
+        feb_idx = np.where(dates.month == 2)[0]
+        for i, idx in enumerate(feb_idx):
+            close_a.iloc[idx] = 100.0 + 50.0 * i / (len(feb_idx) - 1)
+        mar_idx = np.where(dates.month == 3)[0]
+        peak = close_a.iloc[feb_idx[-1]]
+        for i, idx in enumerate(mar_idx):
+            close_a.iloc[idx] = peak - 20.0 * i / (len(mar_idx) - 1)
+        close_a.iloc[mar_idx[-1]:] = 130.0
+        close_b = pd.Series(100.0, index=dates)
+        close = pd.DataFrame({"A": close_a, "B": close_b})
+        high = close + 0.5
+        low = close - 0.5
+        return close, high, low
+
+    def test_atr_trailing_stop_exits_on_drawdown_from_peak(self, tmp_path):
+        close, high, low = self._rally_then_pullback_ohlc()
+        monthly_picks = self._picks_always_a(close)
+        log_path = tmp_path / "trades_log.txt"
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False, commission=0.0,
+                              min_trade_size=0.0, drift_threshold=0.0, max_position_weight=1.0,
+                              initial_capital=1000.0, stop_loss_pct=0.99, use_trailing_stop=False,
+                              use_atr_trailing_stop=True, atr_trailing_stop_multiplier=2.0,
+                              atr_period=5, log_file_path=str(log_path))
+
+        run_risk_managed_backtest(monthly_picks, close, cfg, daily_highs=high, daily_lows=low)
+
+        log_text = log_path.read_text()
+        assert "ATR-TRAILING-STOP" in log_text
+
+    def test_exit_fires_on_the_exact_day_an_independently_computed_atr_predicts(self, tmp_path):
+        # The real numeric claim: not just "it eventually exits" but "it exits on exactly the
+        # day a DIRECT, independent atr() call on the same OHLC data says it should", per
+        # docs/TESTING.md's convention of asserting actual values, not just "ran without error".
+        from momentum_trading.core.technical_indicators import atr as atr_fn
+
+        close, high, low = self._rally_then_pullback_ohlc()
+        monthly_picks = self._picks_always_a(close)
+        multiplier = 2.0
+        atr_period = 5
+
+        atr_series = atr_fn(high["A"], low["A"], close["A"], period=atr_period)
+        # Independently replay the SAME running-high/drawdown-vs-ATR logic the day-loop uses.
+        running_high = None
+        expected_exit_date = None
+        for date in close.index:
+            price = close.loc[date, "A"]
+            running_high = price if running_high is None else max(running_high, price)
+            atr_today = atr_series.get(date)
+            if atr_today is None or pd.isna(atr_today) or atr_today <= 0:
+                continue
+            if (running_high - price) >= multiplier * atr_today:
+                expected_exit_date = date
+                break
+        assert expected_exit_date is not None, "test setup should produce a real trigger"
+
+        log_path = tmp_path / "trades_log.txt"
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False, commission=0.0,
+                              min_trade_size=0.0, drift_threshold=0.0, max_position_weight=1.0,
+                              initial_capital=1000.0, stop_loss_pct=0.99, use_trailing_stop=False,
+                              use_atr_trailing_stop=True, atr_trailing_stop_multiplier=multiplier,
+                              atr_period=atr_period, log_file_path=str(log_path))
+        run_risk_managed_backtest(monthly_picks, close, cfg, daily_highs=high, daily_lows=low)
+
+        log_text = log_path.read_text()
+        assert f"{expected_exit_date.strftime('%Y-%m-%d')} ATR-TRAILING-STOP" in log_text
+
+    def test_disabled_by_default_same_price_path_never_exits(self, tmp_path):
+        close, high, low = self._rally_then_pullback_ohlc()
+        monthly_picks = self._picks_always_a(close)
+        log_path = tmp_path / "trades_log.txt"
+        cfg = BacktestConfig(holding_period=1, use_regime_filter=False, commission=0.0,
+                              min_trade_size=0.0, drift_threshold=0.0, max_position_weight=1.0,
+                              initial_capital=1000.0, stop_loss_pct=0.99,
+                              log_file_path=str(log_path))
+        run_risk_managed_backtest(monthly_picks, close, cfg)
+        log_text = log_path.read_text()
+        assert "ATR-TRAILING-STOP" not in log_text
+
+    def test_use_atr_trailing_stop_requires_multiplier(self):
+        with pytest.raises(ValueError, match="atr_trailing_stop_multiplier"):
+            BacktestConfig(use_atr_trailing_stop=True)
+
+    def test_use_atr_trailing_stop_requires_daily_highs_lows(self, synthetic_monthly_picks, synthetic_daily_prices):
+        cfg_kwargs = dict(use_atr_trailing_stop=True, atr_trailing_stop_multiplier=2.0)
+        with pytest.raises(ValueError, match="daily_highs"):
+            run_risk_managed_backtest(synthetic_monthly_picks, synthetic_daily_prices,
+                                       BacktestConfig(**cfg_kwargs))
+
+    def test_invalid_atr_trailing_stop_multiplier_raises(self):
+        with pytest.raises(ValueError, match="atr_trailing_stop_multiplier"):
+            BacktestConfig(atr_trailing_stop_multiplier=15.0)
+
+    def test_invalid_atr_period_raises(self):
+        with pytest.raises(ValueError, match="atr_period"):
+            BacktestConfig(atr_period=1)
+
+    def test_run_custom_backtest_with_atr_trailing_stop_runs_end_to_end(
+        self, synthetic_monthly_picks, synthetic_daily_prices, synthetic_daily_highs, synthetic_daily_lows,
+    ):
+        df = run_custom_backtest(synthetic_monthly_picks, synthetic_daily_prices,
+                                  holding_period=1, commission=0, initial_capital=1000.0,
+                                  use_atr_trailing_stop=True, atr_trailing_stop_multiplier=3.0,
+                                  daily_highs=synthetic_daily_highs, daily_lows=synthetic_daily_lows)
+        assert not df.empty
+        assert "tearsheet" in df.attrs
+
+    def test_ticker_risk_overrides_accepts_atr_trailing_stop_multiplier_key(self):
+        BacktestConfig(
+            ticker_risk_overrides={"AAPL": {"atr_trailing_stop_multiplier": 2.5}},
+        )  # should not raise
+
+    def test_ticker_risk_overrides_rejects_out_of_range_atr_multiplier(self):
+        with pytest.raises(ValueError, match="atr_trailing_stop_multiplier"):
+            BacktestConfig(ticker_risk_overrides={"AAPL": {"atr_trailing_stop_multiplier": 15.0}})
+
+
+class TestResolveTickerAtrMultiplier:
+    """resolve_ticker_atr_multiplier(), Epic 2's per-ticker resolver, same shape as
+    resolve_ticker_stop_loss_pct()/resolve_ticker_max_pct_of_adv()."""
+
+    def test_no_override_falls_back_to_portfolio_default(self):
+        from momentum_trading.backtest.momentum_backtest import resolve_ticker_atr_multiplier
+        cfg = BacktestConfig(atr_trailing_stop_multiplier=3.0)
+        assert resolve_ticker_atr_multiplier("AAPL", cfg) == pytest.approx(3.0)
+
+    def test_custom_multiplier_overrides_portfolio_default(self):
+        from momentum_trading.backtest.momentum_backtest import resolve_ticker_atr_multiplier
+        cfg = BacktestConfig(atr_trailing_stop_multiplier=3.0,
+                              ticker_risk_overrides={"AMD": {"atr_trailing_stop_multiplier": 1.5}})
+        assert resolve_ticker_atr_multiplier("AMD", cfg) == pytest.approx(1.5)
+        assert resolve_ticker_atr_multiplier("MSFT", cfg) == pytest.approx(3.0)
+
+    def test_enabled_false_disables_atr_trail_unlike_max_pct_of_adv(self):
+        # Distinct from resolve_ticker_max_pct_of_adv(): ATR trail IS a stop-loss-family exit
+        # mechanism, so it DOES honor 'enabled': false, same as resolve_ticker_stop_loss_pct().
+        from momentum_trading.backtest.momentum_backtest import resolve_ticker_atr_multiplier
+        cfg = BacktestConfig(atr_trailing_stop_multiplier=3.0,
+                              ticker_risk_overrides={"AAPL": {"enabled": False}})
+        assert resolve_ticker_atr_multiplier("AAPL", cfg) is None
+
+
 class TestResolveTargetWeights:
     """
     resolve_target_weights() is the SINGLE shared sizing function called by

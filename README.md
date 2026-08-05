@@ -515,6 +515,25 @@ answer whether the strategy actually works.
   (advisory visibility that two portfolios share exposure to a name), a new
   `OVERLAPPING_TICKER_SCOPED` alert fires specifically when the cap actually activates on a
   given run.
+- **A real, confirmed cross-CONFIG-FILE variant of the same destructive-sell class, found during
+  Epic 2's own live paper-account verification (2026-08-05), NOT fixed, still open**: the fix
+  above (`scope_overlapping_holdings()`) only protects against ticker overlap BETWEEN PORTFOLIOS
+  WITHIN ONE LOADED `config.yaml`, confirmed by reading `check_ticker_overlap()` directly, it
+  inspects only the currently-loaded file's own `portfolios:` dict. It has no way to know about a
+  ticker configured in a DIFFERENT config file/process that has also traded the same real IBKR
+  account. Confirmed directly, not theoretical: a throwaway `--config <test>.yaml` used to verify
+  the new ATR-Based Trailing Stop feature (a single-ticker test portfolio for `NVDA`, a ticker
+  also configured in this project's own real `config.yaml`'s `portfolio1`) saw the REAL,
+  whole-account `NVDA` position (66 shares, from real `portfolio1` activity) as entirely its own
+  via `get_ibkr_positions()`'s whole-account result, and its own small target weight drove a real
+  (paper account, no financial loss) full-liquidation SELL of all 66 shares. Confirmed harmless
+  in this specific instance only because it was a paper account. **No code fix exists yet**: the
+  practical mitigation is procedural, never point `--config` at a file whose tickers overlap any
+  OTHER config file/portfolio trading the same real account, this project's own throwaway
+  verification configs are now built ticker-disjoint from `config.yaml`'s real portfolios for
+  exactly this reason. See `docs/RISK_CONSTRAINTS.md`'s "ATR-Based Trailing Stop" section for the
+  full incident writeup and what a genuine fix would need (a process-external, persisted registry
+  of which config/portfolio owns which ticker, out of scope for the epic that found this).
 - **`config.example.yaml` previously under-documented 20 of `BacktestConfig`'s 58 fields**, now
   closed, confirmed by enumerating the dataclass directly. The 10 LIVE-relevant ones (`exchange`,
   `correlation_lookback_days`/`correlation_penalty_strength`, `correlation_spike_short_window`/

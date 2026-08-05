@@ -324,6 +324,37 @@ class BacktestConfig:
         # docs/RISK_CONSTRAINTS.md's "Trailing Stop-Loss".
     trailing_stop_pct: float | None = None  # required in (0, 1) when use_trailing_stop is True,
         # else ignored. e.g. 0.10 exits once price has fallen 10% from its post-entry high.
+    use_atr_trailing_stop: bool = False     # Epic 2, "Institutional Risk-Management Features"
+        # plan. Opt-in (False byte-identical to before this existed). A volatility-ADAPTIVE
+        # trailing-stop distance (Wilder's ATR, core/technical_indicators.py's atr()) instead of
+        # trailing_stop_pct's FIXED percentage: exits once price has fallen
+        # atr_trailing_stop_multiplier x ATR(atr_period) from its own highest price since entry,
+        # an absolute PRICE/DOLLAR distance comparison, not a percentage-of-high fraction (ATR
+        # is quoted in the ticker's own price units). Shares the SAME high-water-mark tracking
+        # as use_trailing_stop above (running_high in the backtest day-loop, the same
+        # trailing_stop_hwm_<portfolio>.json file live), "highest price since entry" is the
+        # identical quantity regardless of which distance formula reads it. Both trail types may
+        # run simultaneously, whichever triggers first wins, same precedent stop_loss_pct +
+        # trailing_stop_pct already establish. LIVE + BACKTEST, but the backtest engine REQUIRES
+        # daily_highs/daily_lows to be passed to run_risk_managed_backtest()/run_custom_backtest()
+        # when this is True (daily_prices itself is close-only, confirmed by reading
+        # _split_price_panel()), a loud ValueError otherwise, this is genuinely new OHLC data the
+        # caller must supply, unlike most other opt-in features in this file. Honors
+        # ticker_risk_overrides['enabled'] the same kill-switch as stop_loss_pct/use_trailing_stop.
+        # Deliberately does NOT have a broker-native (attach_broker_trailing_stop-style) IBKR
+        # TRAIL counterpart: IBKR's TRAIL order only fixes its distance ONCE, at submission time,
+        # it cannot dynamically recompute as ATR itself changes day to day, so a broker-native
+        # version would only ever be "ATR distance as of order placement, held fixed thereafter,"
+        # a materially weaker and potentially misleading claim of "ATR-based" protection,
+        # deliberately not built. See docs/RISK_CONSTRAINTS.md's "ATR-Based Trailing Stop".
+    atr_trailing_stop_multiplier: float | None = None  # required in (0, 10.0] when
+        # use_atr_trailing_stop is True, else ignored. e.g. 3.0 = exit once price has fallen
+        # 3x ATR below its post-entry high. Per-ticker override via
+        # ticker_risk_overrides[ticker]['atr_trailing_stop_multiplier'], see
+        # resolve_ticker_atr_multiplier().
+    atr_period: int = 14                    # trading days for the ATR calculation itself
+        # (Wilder's smoothing), matches core/technical_indicators.py's atr()'s own default.
+        # Only meaningful when use_atr_trailing_stop is True.
     use_regime_filter: bool = True
     regime_benchmark: str = "SPY"
     regime_sma_window: int = 200
@@ -678,6 +709,18 @@ class BacktestConfig:
             )
         if self.trailing_stop_pct is not None and not (0 < self.trailing_stop_pct < 1.0):
             errors.append(f"trailing_stop_pct ({self.trailing_stop_pct}) should be in (0, 1.0) or None")
+        if self.use_atr_trailing_stop and self.atr_trailing_stop_multiplier is None:
+            errors.append(
+                "use_atr_trailing_stop is True but atr_trailing_stop_multiplier is None, "
+                "set a multiplier"
+            )
+        if self.atr_trailing_stop_multiplier is not None and not (0 < self.atr_trailing_stop_multiplier <= 10.0):
+            errors.append(
+                f"atr_trailing_stop_multiplier ({self.atr_trailing_stop_multiplier}) "
+                f"should be in (0, 10.0] or None"
+            )
+        if self.atr_period < 2:
+            errors.append(f"atr_period ({self.atr_period}) must be >= 2")
         if self.use_technical_confirmation and (
             self.technical_confirmation_min_sma_window is None
             and self.technical_confirmation_max_rsi is None
@@ -715,11 +758,14 @@ class BacktestConfig:
                         f"'stop_loss_pct': float}} dict keyed by ticker string"
                     )
                     continue
-                extra_keys = set(override) - {"enabled", "stop_loss_pct", "max_pct_of_adv"}
+                extra_keys = set(override) - {
+                    "enabled", "stop_loss_pct", "max_pct_of_adv", "atr_trailing_stop_multiplier",
+                }
                 if extra_keys:
                     errors.append(
                         f"ticker_risk_overrides[{ticker!r}] has unknown key(s) {sorted(extra_keys)}, "
-                        f"only 'enabled'/'stop_loss_pct'/'max_pct_of_adv' are allowed"
+                        f"only 'enabled'/'stop_loss_pct'/'max_pct_of_adv'/"
+                        f"'atr_trailing_stop_multiplier' are allowed"
                     )
                 if "enabled" in override and not isinstance(override["enabled"], bool):
                     errors.append(f"ticker_risk_overrides[{ticker!r}]['enabled'] must be a bool")
@@ -732,6 +778,11 @@ class BacktestConfig:
                     errors.append(
                         f"ticker_risk_overrides[{ticker!r}]['max_pct_of_adv'] "
                         f"({override['max_pct_of_adv']}) should be in (0, 1.0]"
+                    )
+                if "atr_trailing_stop_multiplier" in override and not (0 < override["atr_trailing_stop_multiplier"] <= 10.0):
+                    errors.append(
+                        f"ticker_risk_overrides[{ticker!r}]['atr_trailing_stop_multiplier'] "
+                        f"({override['atr_trailing_stop_multiplier']}) should be in (0, 10.0]"
                     )
         if self.drift_threshold < 0:
             errors.append(f"drift_threshold ({self.drift_threshold}) must be >= 0")
@@ -1069,6 +1120,28 @@ def resolve_ticker_max_pct_of_adv(ticker: str, cfg: "BacktestConfig") -> float:
     """
     override = cfg.ticker_risk_overrides.get(ticker, {})
     return override.get("max_pct_of_adv", cfg.max_pct_of_adv)
+
+
+def resolve_ticker_atr_multiplier(ticker: str, cfg: "BacktestConfig") -> float | None:
+    """
+    Resolves the EFFECTIVE ATR-Based Trailing Stop multiplier for one ticker (Epic 2,
+    "Institutional Risk-Management Features" plan, Story 2.2), honoring cfg.ticker_risk_
+    overrides's optional 'atr_trailing_stop_multiplier' key over the portfolio-wide
+    cfg.atr_trailing_stop_multiplier, same resolution shape as resolve_ticker_stop_loss_pct()
+    above: a ticker with no override entry, or one that doesn't set this specific key, resolves
+    to the portfolio-wide value unchanged.
+
+    Unlike resolve_ticker_max_pct_of_adv(), this DOES honor 'enabled': false (returns None,
+    same as resolve_ticker_stop_loss_pct()): ATR trailing stop is a STOP-LOSS-family exit
+    mechanism, the same 'enabled' kill-switch semantics as the fixed and percentage trailing
+    stops apply here too, one consistent "enabled" meaning per ticker across every exit check,
+    not a second, divergent one (liquidity-adjusted sizing's max_pct_of_adv is a genuinely
+    different, non-exit concern, which is why THAT resolver ignores 'enabled').
+    """
+    override = cfg.ticker_risk_overrides.get(ticker, {})
+    if override.get("enabled", True) is False:
+        return None
+    return override.get("atr_trailing_stop_multiplier", cfg.atr_trailing_stop_multiplier)
 
 
 def _risk_based_weights(picks: list[str], cfg: "BacktestConfig") -> dict:
@@ -1531,6 +1604,8 @@ def run_risk_managed_backtest(
     config: BacktestConfig = BacktestConfig(),
     custom_weights_by_date: dict | None = None,
     daily_volume: pd.DataFrame | None = None,
+    daily_highs: pd.DataFrame | None = None,
+    daily_lows: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """
     Risk-managed momentum backtest with volatility targeting, regime filtering,
@@ -1555,6 +1630,14 @@ def run_risk_managed_backtest(
         caller must supply, fail loud if missing rather than silently skip" precedent
         use_liquidity_filter's own daily_volume requirement (core/strategy_signals.py's
         generate_strategy_monthly_picks()) already established.
+    daily_highs, daily_lows : pd.DataFrame, optional (Epic 2, "Institutional Risk-Management
+        Features" plan, Story 2.1): daily high/low prices, columns = tickers, same shape as
+        daily_prices. REQUIRED (raises ValueError) when config.use_atr_trailing_stop is True,
+        None (default) otherwise. `daily_prices` itself is close-only throughout this function
+        (confirmed: _split_price_panel() below only ever extracts close/open, silently
+        discarding high/low even when a MultiIndex daily_prices panel already carries them), so
+        ATR (which needs high/low/close) cannot be computed from daily_prices alone, unlike
+        daily_volume above, this is genuinely new data the caller must supply separately.
 
     Returns
     -------
@@ -1567,6 +1650,12 @@ def run_risk_managed_backtest(
             "config.enabled_risk_strategies includes liquidity_adjusted_sizing but no "
             "daily_volume was supplied to run_risk_managed_backtest(), pass a daily share "
             "volume DataFrame (same column shape as daily_prices)."
+        )
+    if config.use_atr_trailing_stop and (daily_highs is None or daily_lows is None):
+        raise ValueError(
+            "config.use_atr_trailing_stop is True but daily_highs/daily_lows was not supplied "
+            "to run_risk_managed_backtest(), pass daily high/low DataFrames (same column shape "
+            "as daily_prices), daily_prices itself is close-only and cannot compute ATR alone."
         )
     if monthly_picks.empty or daily_prices.empty:
         logger.warning("Empty picks or price data supplied; aborting backtest.")
@@ -1641,6 +1730,30 @@ def run_risk_managed_backtest(
             momentum_crash_bear = (trailing_bench_return < 0).reindex(prices.index).fillna(False)
     else:
         momentum_crash_bear = None
+
+    # --- ATR-Based Trailing Stop (Epic 2, Story 2.1.2): precompute one ATR series per ticker
+    #     up front, a pure function of the already-available OHLC panels, not recomputed
+    #     incrementally inside the day loop (same precomputation precedent as regime_bullish/
+    #     regime_high_vol/momentum_crash_bear above). Sourced from close_full (the FULL
+    #     pre-simulation-mask close history, joined with the full daily_highs/daily_lows), not
+    #     the already-window-masked `prices`, the identical "bound only at the end, not the
+    #     start" lesson Epic 14's momentum_crash_lookback_days fix already applied just above,
+    #     so a short simulation window doesn't starve ATR's own lookback (a 14-period default
+    #     needs real history before sim_start_date to be non-NaN at the window's first days). ---
+    atr_by_ticker: dict[str, pd.Series] = {}
+    if config.use_atr_trailing_stop:
+        from ..core.technical_indicators import atr
+
+        for ticker in close_full.columns:
+            if ticker not in daily_highs.columns or ticker not in daily_lows.columns:
+                continue
+            atr_series = atr(
+                daily_highs[ticker].reindex(close_full.index),
+                daily_lows[ticker].reindex(close_full.index),
+                close_full[ticker],
+                period=config.atr_period,
+            )
+            atr_by_ticker[ticker] = atr_series.reindex(prices.index)
 
     trading_days = _trading_days(prices, config.exchange)
     rebalance_dates = _rebalance_dates(monthly_picks, trading_days)
@@ -1759,6 +1872,49 @@ def run_risk_managed_backtest(
                         log_file.write(
                             f"{today.strftime('%Y-%m-%d')} TRAILING-STOP: sold {shares:,.0f} {ticker} "
                             f"@ ${exec_price:,.2f} (drawdown {dd_from_high:.1%} from high ${high:,.2f})\n"
+                        )
+                        entry_dates.pop(ticker, None)
+
+            # ---------------- ATR-BASED TRAILING STOP (opt-in, use_atr_trailing_stop) ---------
+            # Epic 2, "Institutional Risk-Management Features" plan. Shares running_high with
+            # the percentage trailing stop above ("highest price since entry" is the identical
+            # quantity regardless of distance formula), only the exit-condition COMPARISON
+            # differs: an absolute price/dollar distance (multiplier x ATR) from the high, not a
+            # percentage-of-high fraction, since ATR is quoted in the ticker's own price units.
+            # Independent check against list(holdings.keys()): a ticker already exited by the
+            # percentage-trail block above is no longer in holdings, naturally skipped here,
+            # "whichever triggers first wins" by construction, no extra coordination needed.
+            if config.use_atr_trailing_stop:
+                for ticker in list(holdings.keys()):
+                    if ticker not in prices.columns or pd.isna(today_prices.get(ticker)):
+                        continue
+                    multiplier = resolve_ticker_atr_multiplier(ticker, config)
+                    if multiplier is None:
+                        continue
+                    entry = entry_prices.get(ticker)
+                    if entry is None or entry <= 0:
+                        continue
+                    running_high[ticker] = max(running_high.get(ticker, entry), today_prices[ticker])
+                    high = running_high[ticker]
+                    atr_series = atr_by_ticker.get(ticker)
+                    atr_today = atr_series.get(today) if atr_series is not None else None
+                    if atr_today is None or pd.isna(atr_today) or atr_today <= 0:
+                        continue  # not enough ATR history yet
+                    drawdown_dollars = high - today_prices[ticker]
+                    if drawdown_dollars >= multiplier * atr_today:
+                        shares = holdings[ticker]
+                        fill_ref = today_exec.get(ticker, today_prices[ticker])
+                        exec_price = fill_ref * (1 - config.base_slippage_bps / 10_000)
+                        proceeds = shares * exec_price - config.commission
+                        cash += proceeds
+                        total_commission_paid += config.commission
+                        del holdings[ticker]
+                        del entry_prices[ticker]
+                        running_high.pop(ticker, None)
+                        log_file.write(
+                            f"{today.strftime('%Y-%m-%d')} ATR-TRAILING-STOP: sold {shares:,.0f} "
+                            f"{ticker} @ ${exec_price:,.2f} ({multiplier:.1f}x ATR="
+                            f"${atr_today:,.2f} from high ${high:,.2f})\n"
                         )
                         entry_dates.pop(ticker, None)
 
@@ -2244,6 +2400,8 @@ def run_custom_backtest(
     """
     custom_weights_by_date = risk_overrides.pop("custom_weights_by_date", None)
     daily_volume = risk_overrides.pop("daily_volume", None)
+    daily_highs = risk_overrides.pop("daily_highs", None)
+    daily_lows = risk_overrides.pop("daily_lows", None)
 
     cfg_kwargs = dict(
         holding_period=holding_period,
@@ -2263,7 +2421,8 @@ def run_custom_backtest(
 
     return run_risk_managed_backtest(monthly_picks, daily_prices, cfg,
                                       custom_weights_by_date=custom_weights_by_date,
-                                      daily_volume=daily_volume)
+                                      daily_volume=daily_volume,
+                                      daily_highs=daily_highs, daily_lows=daily_lows)
 
 
 if __name__ == "__main__":

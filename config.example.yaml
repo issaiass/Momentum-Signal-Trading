@@ -357,6 +357,30 @@ default_risk:
   trailing_stop_pct: 0.10         # required (0, 1) when use_trailing_stop is true, else ignored.
                                    # e.g. 0.10 = exit once price has fallen 10% from its post-entry
                                    # high.
+  use_atr_trailing_stop: false    # Epic 2, "Institutional Risk-Management Features" plan.
+                                   # Opt-in, LIVE + BACKTEST, false (default) is byte-identical to
+                                   # before this existed. A volatility-ADAPTIVE trailing-stop
+                                   # distance (Wilder's ATR) instead of use_trailing_stop's FIXED
+                                   # percentage: exits once price has fallen
+                                   # atr_trailing_stop_multiplier x ATR(atr_period) from its own
+                                   # highest price since entry, an absolute PRICE distance, not a
+                                   # percentage-of-high fraction. Shares the SAME high-water-mark
+                                   # tracking as use_trailing_stop above. Can run alongside
+                                   # use_trailing_stop, whichever triggers first wins. BACKTEST
+                                   # REQUIRES daily_highs/daily_lows to be passed to
+                                   # run_risk_managed_backtest()/run_custom_backtest() when this
+                                   # is true (daily_prices itself is close-only), a loud error
+                                   # otherwise. Deliberately has NO broker-native counterpart
+                                   # (IBKR TRAIL orders can't dynamically recompute a distance),
+                                   # see docs/RISK_CONSTRAINTS.md's "ATR-Based Trailing Stop".
+  atr_trailing_stop_multiplier: 3.0   # required (0, 10.0] when use_atr_trailing_stop is true,
+                                   # else ignored. e.g. 3.0 = exit once price has fallen 3x
+                                   # ATR(atr_period) from its post-entry high. Per-ticker override
+                                   # via ticker_risk_overrides[ticker].atr_trailing_stop_multiplier.
+  atr_period: 14                  # trading days for the ATR calculation itself (Wilder's
+                                   # smoothing), matches core/technical_indicators.py's atr()'s
+                                   # own default. Only meaningful when use_atr_trailing_stop is
+                                   # true.
   auto_execute_stop_loss: false   # true = auto-sell on stop-loss trigger; false = flag + email only
   attach_broker_stop_loss: false  # LIVE-ONLY. Belt-and-suspenders alongside
                                    # auto_execute_stop_loss above, NOT a replacement for it:
@@ -379,26 +403,32 @@ default_risk:
                                    # above, both children attach as an IBKR One-Cancels-All (OCA)
                                    # pair, whichever triggers first cancels the other. See
                                    # docs/RISK_CONSTRAINTS.md's "Broker-Native Trailing Stop".
-  ticker_risk_overrides: {}       # per-ticker override of stop_loss_pct/max_pct_of_adv, {}
-                                   # (default) = every ticker uses the portfolio-wide values, no
-                                   # per-ticker behavior change. Keyed by ticker, each entry may
-                                   # set 'enabled' (bool), 'stop_loss_pct' (float in (0, 1.0)),
-                                   # and/or 'max_pct_of_adv' (float in (0, 1.0], Epic 1's
-                                   # Liquidity-Adjusted Position Sizing cap, see
-                                   # enabled_risk_strategies below). 'enabled: false' disables
-                                   # ONLY the stop-loss check for that ticker (never flagged/
-                                   # sold, no broker-side bracket attached even if
-                                   # attach_broker_stop_loss is on for the rest of the
-                                   # portfolio, and NOT liquidity-adjusted sizing, a distinct
-                                   # concern); a 'stop_loss_pct' without 'enabled: false' uses
-                                   # that ticker-specific width instead of the portfolio
-                                   # default. Example:
+  ticker_risk_overrides: {}       # per-ticker override of stop_loss_pct/max_pct_of_adv/
+                                   # atr_trailing_stop_multiplier, {} (default) = every ticker
+                                   # uses the portfolio-wide values, no per-ticker behavior
+                                   # change. Keyed by ticker, each entry may set 'enabled'
+                                   # (bool), 'stop_loss_pct' (float in (0, 1.0)), 'max_pct_of_adv'
+                                   # (float in (0, 1.0], Epic 1's Liquidity-Adjusted Position
+                                   # Sizing cap, see enabled_risk_strategies below), and/or
+                                   # 'atr_trailing_stop_multiplier' (float in (0, 10.0], Epic 2's
+                                   # ATR-Based Trailing Stop). 'enabled: false' disables the
+                                   # stop-loss check AND the ATR trailing stop for that ticker
+                                   # (both are stop-loss-family exit mechanisms, one consistent
+                                   # "enabled" meaning), never flagged/sold, no broker-side
+                                   # bracket attached even if attach_broker_stop_loss is on for
+                                   # the rest of the portfolio; it does NOT affect
+                                   # liquidity-adjusted sizing, a distinct, non-exit concern.
+                                   # A 'stop_loss_pct'/'atr_trailing_stop_multiplier' without
+                                   # 'enabled: false' uses that ticker-specific value instead of
+                                   # the portfolio default. Example:
                                    #   ticker_risk_overrides:
-                                   #     AAPL: {enabled: false}       # never stop-loss-checked
+                                   #     AAPL: {enabled: false}       # never stop-loss/ATR-trail-checked
                                    #     AMD: {stop_loss_pct: 0.08}   # tighter than the portfolio default
                                    #     XLE: {max_pct_of_adv: 0.10}  # looser ADV cap than the portfolio default
+                                   #     MSFT: {atr_trailing_stop_multiplier: 2.0}  # tighter ATR trail
                                    # See docs/RISK_CONSTRAINTS.md's "Per-Ticker Stop-Loss
-                                   # Override" and "Liquidity-Adjusted Position Sizing (Active)".
+                                   # Override", "Liquidity-Adjusted Position Sizing (Active)", and
+                                   # "ATR-Based Trailing Stop".
   use_correlation_penalty: false  # true = downweight sizing for positions correlated with other
                                    # current picks (distinct from use_correlation_spike_regime below)
   correlation_lookback_days: 63   # LIVE + BACKTEST, only meaningful when use_correlation_penalty

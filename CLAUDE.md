@@ -273,6 +273,43 @@ that tests enforce, don't casually violate these when editing:
   statistically confident positive edge over a passive SPY benchmark on this proxy universe,
   mixed, not oversold, not a confirmed edge and not a refutation either. See `README.md`'s
   Project Maturity & Safety section and Known Gaps entry for the full numbers and caveats.
+  **Extended to the SHORT-TERM (weekly) regime, Epic 16, "Real Out-of-Sample Validation -
+  Short-Term (Weekly) Momentum Regime" plan**: Epic 15 above only validated `portfolio1`'s
+  monthly regime; `docs/STRATEGY_THEORY.md` still flagged weekly momentum as untested by this
+  project's own walk-forward tooling, a live gap since `portfolio2`/`portfolio3` both run this
+  exact weekly regime today. `run_walk_forward_lookback_search()` needed ZERO code changes to
+  support this, confirmed before writing the plan, not assumed: `backtest/momentum_backtest.py`'s
+  `_build_report()` (`monthly = daily.resample("ME").last()`) always buckets its report to
+  month-end regardless of `holding_period`, so the function's reused `run_custom_backtest()` call
+  and the notebook's `bootstrap_sharpe_ci()` (`sqrt(12)` annualization) stay valid unchanged
+  against a weekly-rebalanced equity curve, only the `lookback_candidates` grid and the loaded
+  portfolio config differ. A real test gap was found and closed first:
+  `TestRunWalkForwardLookbackSearch` only exercised `holding_period=1` (monthly), the weekly/
+  `round(x * 4)` branch had zero coverage before this epic (`test_weekly_regime_produces_
+  multiple_folds_with_sensible_real_results`, `tests/core/test_functions_quant_extensions.py`).
+  `notebooks/research/out_of_sample_validation_weekly.ipynb` (new) mirrors Epic 15's notebook
+  exactly, loading `portfolio2`'s real config instead of `portfolio1`'s, same cached 17-ticker
+  proxy panel, same `pre_registered_split(split_date="2015-01-01")` for direct comparability,
+  `lookback_candidates=[0.5, 0.75, 1.0, 1.5, 2.0]` (week-quarters, -> 2/3/4/6/8 weeks via the
+  existing `round(x * 4)` formula) in place of Epic 15's month-scale grid.
+  **Run for real 2026-08-04**: chosen lookback per fold was `[1.5, 2.0, 2.0, 2.0, 2.0]` (6/8/8/
+  8/8 weeks, converging to 8 weeks in 4 of 5 folds), train Sharpe `[0.30, 0.60, 0.74, 0.86,
+  1.27]` vs. test Sharpe `[1.61, 2.34, -0.15, 0.91, 1.98]`, mean train Sharpe 0.76 vs. mean test
+  Sharpe **1.34**, again not degraded relative to train, the same non-overfitting signature Epic
+  15 found. **A real, honest divergence from Epic 15's monthly result**: the search converged to
+  a LONGER lookback (8 weeks) than `portfolio2`'s shipped `lookback_period: 1.0` (4 weeks), not
+  toward it, the opposite of the monthly regime's result. Not grounds to change the shipped
+  config off one proxy-universe search, but a real data point, not glossed over. The single
+  pre-registered holdout (`2015-01-02` to `2026-08-04`, `lookback_period=2.0` i.e. 8 weeks):
+  CAGR 3.72%, AnnVol 7.49%, Sharpe 0.53, Sortino 0.77, MaxDrawdown -16.66%, WinRate 59.4%, Beta
+  0.33, Alpha -0.70%. Block-bootstrap 90% CI on the holdout Sharpe: `[0.08, 1.05]` (97.2% of
+  resamples positive), **entirely above zero**, unlike the monthly regime's CI which spanned
+  zero. **Honest read**: statistically the strongest out-of-sample result in the project so far
+  on the Sharpe dimension, real non-zero risk-adjusted return with reasonable confidence, but the
+  still-negative alpha means most of that return traces to market-beta exposure (0.33 beta)
+  rather than a clearly momentum-specific edge, same caution as the monthly result, not a
+  green light. See `README.md`'s Project Maturity & Safety section and Known Gaps entry for the
+  full numbers and caveats.
 - **`core/strategy_signals.py`** (NEW module, selectable-momentum-strategy plan), dispatches on
   `BacktestConfig.strategy_type` (`config.yaml`'s per-portfolio `default_risk`/`risk_overrides`,
   one of 11 allowed values, `ALLOWED_STRATEGY_TYPES` in `backtest/momentum_backtest.py`, see

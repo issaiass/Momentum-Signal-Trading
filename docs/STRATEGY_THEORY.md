@@ -50,9 +50,19 @@ confidence interval that includes zero, a real, honest, mixed result, not a conf
    to week-scale instead, `0.5` = 2 weeks, `0.75` = 3 weeks, `1.0` = 4 weeks, `1.5` = 6 weeks
    ("short-term momentum"). Be aware this week-scale window is a genuine departure from the
    3-12 month range the Jegadeesh and Titman study above actually validated, the classic
-   literature doesn't cover momentum signals this short, this project's own walk-forward
-   tooling hasn't specifically stress-tested it either. Treat short-term momentum as an
-   unvalidated variant, not an academically-backed alternative. Both regimes have several risk
+   literature doesn't cover momentum signals this short. **Run for real 2026-08-04**
+   (`notebooks/research/out_of_sample_validation_weekly.ipynb`, Epic 16, `portfolio2`'s real
+   weekly config on Epic 13's proxy universe): walk-forward search was robust (mean test Sharpe
+   1.34 vs. train 0.76 across 5 folds, not degraded), and the pre-registered 2015-2026 holdout
+   Sharpe (0.53) had a 90% bootstrap CI entirely above zero (`[0.08, 1.05]`), a statistically
+   more confident result than the monthly regime's own holdout. Its annualized alpha vs. SPY was
+   still slightly negative (-0.70%), so most of that return still traces to market-beta exposure
+   rather than a clearly momentum-specific edge, and the walk-forward search converged to a
+   longer lookback (8 weeks) than the shipped 4-week default, a real, honest divergence worth
+   noting, not evidence the shipped default is wrong on its own. Treat short-term momentum as a
+   *tested but not confidently validated* variant, better evidenced than before this epic, still
+   not an academically-backed alternative, see `README.md`'s Known Gaps entry for the full
+   numbers. Both regimes have several risk
    constraints available, non-blocking advisory warnings (Momentum Persistence,
    Lookback-to-Hold Ratio, Turnover Limit) and opt-in config toggles (the Skip-Month Guardrail,
    a per-position Volatility-Adjustment budget), see `docs/RISK_CONSTRAINTS.md` for the full

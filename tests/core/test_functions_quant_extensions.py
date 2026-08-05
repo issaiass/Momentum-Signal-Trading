@@ -296,3 +296,38 @@ class TestRunWalkForwardLookbackSearch:
         assert not result.empty
         assert result["train_Sharpe"].notna().all()
         assert result["test_Sharpe"].notna().any()
+
+    def _cfg_weekly(self):
+        # Same isolation precedent as _cfg(), but holding_period < 1 (Epic 16, "Real
+        # Out-of-Sample Validation - Short-Term (Weekly) Momentum Regime" plan): exercises the
+        # week-quarter lookback_period branch (round(x * 4) in resolve_momentum_scores()),
+        # which run_walk_forward_lookback_search() had zero test coverage for before this.
+        return BacktestConfig(
+            use_regime_filter=False,
+            top_n=1,
+            holding_period=0.25,
+            initial_capital=1000.0,
+            commission=0.0,
+            target_portfolio_vol=10.0,
+            min_gross_exposure=1.0,
+            max_gross_exposure=1.0,
+            stop_loss_pct=0.95,
+        )
+
+    def test_weekly_regime_produces_multiple_folds_with_sensible_real_results(self):
+        # lookback_candidates in week-quarter units (0.5/1.0/1.5 -> round(x*4) = 2/4/6 weeks),
+        # the same convention config.yaml's own portfolio2 risk_overrides documents.
+        prices = self._trending_prices()
+        result = run_walk_forward_lookback_search(
+            prices, ["A", "B", "C"], self._cfg_weekly(),
+            lookback_candidates=[0.5, 1.0, 1.5],
+            train_years=3, test_years=1, step_years=1,
+        )
+        assert len(result) >= 2
+        assert list(result.columns) == [
+            "fold_start", "train_end", "test_end", "chosen_lookback",
+            "train_Sharpe", "test_Sharpe", "test_CAGR",
+        ]
+        assert result["chosen_lookback"].isin([0.5, 1.0, 1.5]).all()
+        assert result["train_Sharpe"].notna().all()
+        assert result["test_Sharpe"].notna().any()

@@ -273,9 +273,11 @@ momentum-trading/
 │   │   ├── crash_period_stress_test.ipynb   real 2008/2020/2022 crash replay on a
 │   │   │                           long-history ETF proxy universe, risk-managed vs. naive
 │   │   │                           baseline (Epic 13, see README's Known Gaps)
-│   │   └── out_of_sample_validation.ipynb   real pre-registered walk-forward +
-│   │                               holdout validation via the real signal/execution pipeline
-│   │                               (Epic 15, see README's Known Gaps)
+│   │   ├── out_of_sample_validation.ipynb   real pre-registered walk-forward +
+│   │   │                           holdout validation via the real signal/execution pipeline,
+│   │   │                           monthly regime (Epic 15, see README's Known Gaps)
+│   │   └── out_of_sample_validation_weekly.ipynb   same methodology, weekly regime
+│   │                               (Epic 16, see README's Known Gaps)
 │   └── operational/               interactive validation & run walkthroughs (safe, dry-run only)
 │       ├── live_signal_walkthrough.ipynb
 │       ├── daily_runner_walkthrough.ipynb
@@ -394,7 +396,7 @@ not been answered at all yet**:
 | Question | Status |
 |---|---|
 | Does the code have circuit breakers, idempotency, alerting, audit logging? | ✅ Yes, tested |
-| Has the strategy shown a positive out-of-sample (holdout) return on real data? | ⚠️ Run for real for the first time (2026-08-04, see Known Gaps below): walk-forward validation shows the shipped `lookback_period: 12` is genuinely robust (independently re-derived from 5 real historical folds, test-period Sharpe *not* degraded vs. train), but the single pre-registered 2015-2026 holdout shows only a modest Sharpe (0.39) with a **negative annualized alpha** (-2.63%) vs. SPY, and a 90% bootstrap confidence interval that includes zero. Positive on parameter robustness, inconclusive on whether there's a real edge beyond market-beta exposure. |
+| Has the strategy shown a positive out-of-sample (holdout) return on real data? | ⚠️ Run for real for both regimes (2026-08-04, see Known Gaps below). **Monthly** (`portfolio1`, Epic 15): walk-forward validation shows the shipped `lookback_period: 12` is genuinely robust (5 real historical folds, test-period Sharpe *not* degraded vs. train), but the single pre-registered 2015-2026 holdout shows only a modest Sharpe (0.39) with a **negative annualized alpha** (-2.63%) vs. SPY, and a 90% bootstrap CI that includes zero. **Weekly** (`portfolio2`, Epic 16): also robust on walk-forward (mean test Sharpe 1.34 vs. train 0.76, not degraded), but the search converged to a *longer* lookback (8 weeks) than the shipped default (4 weeks), a real, honest divergence from the monthly regime's result. The weekly holdout Sharpe (0.53) is modest but its 90% bootstrap CI is entirely positive (`[0.08, 1.05]`), a stronger statistical result than the monthly regime's, though its annualized alpha is still slightly negative (-0.70%). Positive on parameter robustness in both regimes, mixed on whether either shows a real edge beyond market-beta exposure. |
 | Has it been validated against real 2008/2020/2022 history? | ⚠️ The risk-control *mechanism* has, using a long-history ETF proxy universe (see Known Gaps below), not the exact currently-configured portfolios (most of their tickers didn't exist in 2008). Real result: the risk-managed variant beat a naive-momentum baseline on max drawdown in all 6 head-to-head runs (both a monthly and weekly cadence, across 2008/2020/2022), most dramatically in 2008 (weekly regime: -11.5% vs. -26.0% max drawdown), at a real cost to upside capture during 2020's fast V-shaped recovery, and was actually worse than baseline on both metrics for 2022's monthly regime specifically, an honest, mixed result, not a uniform win. |
 | Has it connected to a real broker even once? | ✅ Yes, paper (port 7497) connection, account summary, position fetch, and **confirmed real BUY and SELL order fills** (verified directly in TWS's own execution log across two portfolios, real prices, matching quantities). Getting here surfaced and fixed three real bugs (every order silently rejected while the run logged success; a misleadingly-short fill-confirmation poll window; an informational per-order notice mistaken for a rejection, causing an already-filled order to be logged as failed) and one hard IBKR platform limitation worked around (no fractional equity orders via API, ever, floored to whole shares). The live/real-money port (7496) is still unexercised |
 | Has real live-vs-backtest divergence been measured? | ⚠️ Attempted for real (2026-08-03) against all three real portfolios' actual `dry_run=False` trade history; the notebook's methodology bugs are fixed and verified (real config load, `dry_run=False` filtering, `strategy_type`-aware signal reproduction, `custom_weights` sizing parity), and real Live P&L was computed successfully for all three. The head-to-head Backtest number itself is still blocked, not by a code defect but by real trading history simply being too young: `_build_report()`'s monthly-return diffing needs at least two completed calendar-month buckets to produce a non-NaN return, and the real history (~1-2 weeks old as of this writing, entirely inside one still-open month) can't supply that yet. See the Known Gaps entry below and `notebooks/operational/live_vs_backtest_reconciliation.ipynb`; rerun once real trading has spanned at least one full month-end. |
@@ -810,6 +812,60 @@ answer whether the strategy actually works.
   this one holdout window. This is the project's first genuine out-of-sample evidence on this
   question, not a final verdict, and it argues for caution, not confidence, before allocating
   real capital.
+
+- **Real out-of-sample walk-forward + pre-registered holdout validation, short-term (weekly)
+  regime, Epic 16**: Epic 15 above only validated `portfolio1`'s monthly regime; `docs/
+  STRATEGY_THEORY.md` still flagged short-term/weekly momentum as untested by this project's own
+  walk-forward tooling, a real, live gap since `portfolio2` (58 tickers) and `portfolio3` (11
+  tickers) both run this exact weekly regime (`holding_period: 0.25`, `lookback_period: 1.0`)
+  today. Reuses `run_walk_forward_lookback_search()` (Epic 15) unchanged, since
+  `backtest/momentum_backtest.py`'s `_build_report()` always resamples to month-end for
+  reporting regardless of `holding_period`, confirmed by reading it before writing the plan, not
+  guessed, so the reported Sharpe/CAGR/monthly-return series and its `sqrt(12)` annualization are
+  valid unchanged for a weekly-rebalanced equity curve. `portfolio2`'s real weekly config
+  (`use_correlation_penalty=True`, plus `default_risk`'s `top_n=10`, `stop_loss_pct=0.12`,
+  regime filter, vol targeting) applied to the same cached 17-ticker long-history proxy universe
+  as Epic 13/14/15, same documented scope boundary. `lookback_candidates` in week-quarter units
+  (`0.5`/`0.75`/`1.0`/`1.5`/`2.0` -> 2/3/4/6/8 weeks via the existing `round(x * 4)` formula),
+  same `pre_registered_split(split_date="2015-01-01")` as Epic 15 for direct comparability. A
+  real test gap was found and closed before running this: `TestRunWalkForwardLookbackSearch`
+  only exercised `holding_period=1` (monthly), the weekly/`round(x*4)` branch through
+  `run_walk_forward_lookback_search()` had zero test coverage before this epic.
+
+  **Real results** (run 2026-08-04), same 5-fold structure as Epic 15's monthly search:
+
+  | Fold (train -> test) | Chosen lookback (wks) | Train Sharpe | Test Sharpe | Test CAGR |
+  |---|---|---|---|---|
+  | 2005-2009 -> 2009-2010 | 6 | 0.30 | 1.61 | 11.7% |
+  | 2006-2010 -> 2010-2011 | 8 | 0.60 | 2.34 | 17.7% |
+  | 2007-2011 -> 2011-2012 | 8 | 0.74 | -0.15 | -1.4% |
+  | 2008-2012 -> 2012-2013 | 8 | 0.86 | 0.91 | 5.6% |
+  | 2009-2013 -> 2013-2014 | 8 | 1.27 | 1.98 | 16.0% |
+
+  Mean train Sharpe 0.76, mean test Sharpe **1.34**, test again *not* degraded relative to train
+  (the same non-overfitting signature Epic 15 found for the monthly regime). **A real, honest
+  divergence from Epic 15's monthly result, though**: the walk-forward search converged to an
+  8-week lookback (4 of 5 folds), *longer* than `portfolio2`'s shipped `lookback_period: 1.0`
+  (4 weeks), not toward it, the opposite of the monthly regime's own result, which converged
+  toward its shipped default. Not evidence the shipped weekly default is wrong, a single
+  proxy-universe walk-forward search isn't grounds to change a live config, but a real,
+  worth-noting data point, not glossed over.
+
+  The single, pre-registered `holdout` evaluation (2015-01-02 to 2026-08-04, reported exactly
+  once, `lookback_period=2.0` i.e. 8 weeks): CAGR 3.72%, Annualized Vol 7.49%, **Sharpe 0.53**,
+  Sortino 0.77, Max Drawdown -16.66%, Win Rate 59.4%, Beta vs. SPY 0.33, **Annualized Alpha
+  -0.70%**. Block-bootstrap 90% confidence interval on the holdout Sharpe: **[0.08, 1.05]**
+  (97.2% of resamples positive, the interval itself does NOT include zero).
+
+  Honest reading, not oversold: directionally similar to Epic 15's monthly result (walk-forward
+  robust, holdout alpha slightly negative), but statistically stronger on ONE dimension, the
+  weekly regime's bootstrap CI is entirely positive, unlike the monthly regime's, which spanned
+  zero. That's a real, non-zero risk-adjusted return (Sharpe) with reasonable confidence at 90%,
+  even though the small negative alpha means most of that return still traces to market-beta
+  exposure (0.33 beta) rather than a clearly momentum-specific edge. Same proxy-universe scope
+  caveat as every prior crash/validation epic: this is `portfolio2`'s real risk regime applied to
+  a 17-ticker long-history universe, not its exact 58-ticker live universe. Not a final verdict,
+  argues for the same caution as the monthly result before allocating real capital.
 
 ### Who should allocate capital here
 

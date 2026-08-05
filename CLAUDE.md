@@ -412,6 +412,52 @@ that tests enforce, don't casually violate these when editing:
   `ValueError` (same "fail loud, not a silent wrong number" precedent as
   `hybrid_multi_factor`'s `NotImplementedError`), rather than silently skipping the requested
   constraint. `daily_volume=None` (the default) is byte-identical to before this param existed.
+  **Real out-of-sample validation for the other selectable strategy types, Epic 17, "Real
+  Out-of-Sample Validation for the Other Selectable Momentum Strategies" plan**: Epic 15/16
+  only validated `strategy_type: momentum` (monthly + weekly). Of the other 10,
+  `relative_momentum` (documented alias) and `volatility_scaled_momentum` (preset already
+  matches `portfolio1`'s own default) need no separate run, `hybrid_multi_factor` cannot be
+  backtested at all (see this file's own bullet above), leaving 6 real variants for a full
+  `run_walk_forward_lookback_search()` + holdout run plus `multi_timeframe_composite` on a
+  holdout-only basis (its `resolve_strategy_scores()` dispatch never reads `lookback_period` at
+  all, confirmed by reading it, a grid search over it would be a no-op).
+  `notebooks/research/out_of_sample_validation_strategy_types.ipynb` (new) builds each variant's
+  config from `dataclasses.asdict(portfolio1_cfg)` + `apply_strategy_type_preset()`, same real
+  reuse pattern as Epic 15/16. **A real methodological bug found and fixed while building this,
+  a test-harness issue, not a production code bug**: starting from a fully-materialized
+  dataclass dict (every field present, including defaults) silently defeats
+  `apply_strategy_type_preset()`'s "only fill in fields the user hasn't already set" contract,
+  confirmed directly: the first run produced byte-identical results for `dual_momentum`/
+  `correlation_weighted_momentum`/`rank_sign_momentum` vs. plain `momentum`, traced to
+  `portfolio1`'s own `default_risk` already explicitly pinning every field these 3 presets would
+  otherwise set. This is real, confirmed LIVE-config behavior too, not just a test artifact, see
+  `docs/MOMENTUM_STRATEGIES.md`'s updated "How presets compose" section for the full writeup.
+  Fixed for this validation by setting each preset's own field value directly (matching
+  `daily_runner.STRATEGY_TYPE_PRESETS` exactly), not by changing `apply_strategy_type_preset()`
+  itself, which behaves correctly on the sparse raw YAML dicts `load_config()` actually gives it.
+  `SHY` (already in the cached proxy universe) substitutes for the default `defensive_ticker`
+  (`"BIL"`, not in the cached panel) for `dual_momentum`/`absolute_momentum`, same proxy-universe
+  substitution precedent as prior epics. **Real results** (run 2026-08-05, monthly regime,
+  `portfolio1`'s config, 5-fold walk-forward, `lookback_candidates=[6,9,12,15,18]` months, same
+  `pre_registered_split(split_date="2015-01-01")` as Epic 15): `dual_momentum`'s backtest is
+  byte-identical to plain `momentum` (`use_absolute_momentum` is documented LIVE-ONLY, no
+  backtest effect, `use_regime_filter` was already on, nothing left to differ), a correct,
+  expected result, not a bug. `correlation_weighted_momentum` (mean train/test Sharpe 0.85/1.02,
+  holdout Sharpe 0.38, alpha -2.48%), `rank_sign_momentum` (0.83/0.93, holdout 0.40, alpha
+  -2.70%), and `path_dependent_momentum` (chosen lookback 9mo, 0.84/0.86, holdout 0.37, alpha
+  -2.75%) all cluster close to plain `momentum`'s own already-published result.
+  `absolute_momentum` shows the strongest walk-forward Sharpe of the base-score types
+  (1.31/1.24) but the weakest holdout CAGR (1.79%) and widest, most-negative bootstrap CI
+  (`[-0.20, 0.87]`), a real, honest divergence between train/test robustness and the single
+  holdout outcome. `residual_momentum` (1.22/1.25, holdout Sharpe **0.46**, alpha **-0.17%**,
+  90% CI **`[0.08, 0.96]`**, entirely above zero) produced the strongest out-of-sample result of
+  any epic in this project so far. `multi_timeframe_composite`'s holdout-only result (Sharpe
+  0.55, alpha -0.92%, CI `[0.07, 1.10]`) is the second-strongest number, but rests on weaker
+  evidence, no walk-forward robustness check applies to it. None of this changes the shipped
+  `strategy_type: momentum` default, it's additional evidence for anyone considering an
+  alternative, not a recommendation to switch. See `README.md`'s Known Gaps entry for the full
+  per-strategy table; weekly-regime coverage for these 6 strategies remains a separate, un-closed
+  gap.
 - **`backtest/momentum_backtest.py`**, `BacktestConfig` (validated on construction) and
   `resolve_target_weights()`, the sizing logic shared by *both* the backtest engine and live
   execution, specifically so the two paths can't silently diverge. `lookback_period` is LIVE-ONLY

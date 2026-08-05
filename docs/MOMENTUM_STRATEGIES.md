@@ -54,6 +54,22 @@ risk_overrides:
 resolves to `use_absolute_momentum: false` (your explicit value) and `use_regime_filter: true`
 (the preset, since you didn't set that field yourself).
 
+**A real, confirmed interaction worth knowing before relying on a preset, found while building
+Epic 17's out-of-sample validation**: this project's own shipped `default_risk` block already
+explicitly sets every field the `dual_momentum`/`correlation_weighted_momentum`/
+`rank_sign_momentum` presets would otherwise set (`use_absolute_momentum: false`,
+`use_correlation_penalty: false`, `sizing_method: inverse_vol`). Since "explicit user value
+always wins" applies at the `default_risk` level too, not just a portfolio's own
+`risk_overrides`, selecting one of these 3 `strategy_type` values on a portfolio that relies on
+the shipped `default_risk` block AS-IS has **zero effect** vs. plain `momentum`, silently,
+unless that portfolio's own `risk_overrides` ALSO explicitly re-overrides the differing field
+(`portfolio2`'s `config.yaml` entry does this correctly for `use_correlation_penalty: true`).
+Confirmed directly: building a real `dual_momentum`/`correlation_weighted_momentum`/
+`rank_sign_momentum` backtest from `portfolio1`'s own resolved config initially produced
+byte-identical results to plain `momentum` for all three, traced to exactly this cause, not a
+code bug. If you select one of these 3 strategy types, double check your own `risk_overrides`
+sets the differing field explicitly, don't assume the preset alone is enough.
+
 ## The full strategy list
 
 | `strategy_type` value | Table name | Status |
@@ -291,10 +307,21 @@ one-line rationale. `strategy_type` itself is never part of either base preset (
 selecting which row below applies), add it alongside whichever preset you start from.
 
 **Same caveat as `docs/RISK_CONSTRAINTS.md`'s own presets**: warning-free is not the same as
-performance-validated. None of the 6 strategies new to this plan (everything below
-`correlation_weighted_momentum` in the table) have been run against real historical
-out-of-sample data, only synthetic/mocked tests and live paper-account signal generation, see
-`README.md`'s "Project Maturity & Safety" section.
+performance-validated. **Updated by Epic 17** ("Real Out-of-Sample Validation for the Other
+Selectable Momentum Strategies"): a real walk-forward + pre-registered holdout run now exists
+for 6 of these strategies (`dual_momentum`, `correlation_weighted_momentum`,
+`rank_sign_momentum`, `absolute_momentum`, `residual_momentum`, `path_dependent_momentum`) plus
+a holdout-only run for `multi_timeframe_composite` (its own scoring ignores `lookback_period`,
+a grid search over it is a no-op, see its own section above), monthly regime only,
+`portfolio1`'s config, same cached proxy universe as Epic 13-16. `hybrid_multi_factor` still
+cannot be backtested at all (see its own section above). Real, honest headline: `residual_momentum`
+produced the strongest result of any out-of-sample run in this project so far (holdout Sharpe
+0.46, alpha -0.17%, 90% bootstrap CI `[0.08, 0.96]`, entirely above zero); `dual_momentum`'s
+backtest results are byte-identical to plain `momentum` (`use_absolute_momentum` is
+LIVE-ONLY, and `use_regime_filter` was already on, nothing left to differ at the backtest
+level); the rest cluster close to plain `momentum`'s own already-published result. See
+`README.md`'s Known Gaps entry for the full per-strategy table and numbers, weekly-regime
+coverage for these strategies remains a separate, un-closed gap.
 
 | `strategy_type` | Long-Term (Monthly) additions | Short-Term (Weekly) additions | Rationale |
 |---|---|---|---|

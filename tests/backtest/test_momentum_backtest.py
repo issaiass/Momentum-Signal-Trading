@@ -203,6 +203,42 @@ class TestBacktestConfigValidation:
         with pytest.raises(ValueError, match="max_bid_ask_spread_pct"):
             BacktestConfig(max_bid_ask_spread_pct=1.5)
 
+    def test_cost_edge_hurdle_multiplier_defaults_none(self):
+        assert BacktestConfig().cost_edge_hurdle_multiplier is None
+
+    def test_cost_edge_hurdle_multiplier_accepts_positive_value(self):
+        assert BacktestConfig(cost_edge_hurdle_multiplier=0.5).cost_edge_hurdle_multiplier == 0.5
+
+    def test_cost_edge_hurdle_multiplier_non_positive_raises(self):
+        with pytest.raises(ValueError, match="cost_edge_hurdle_multiplier"):
+            BacktestConfig(cost_edge_hurdle_multiplier=0.0)
+        with pytest.raises(ValueError, match="cost_edge_hurdle_multiplier"):
+            BacktestConfig(cost_edge_hurdle_multiplier=-1.0)
+
+    def test_use_participation_rate_limit_defaults_false(self):
+        assert BacktestConfig().use_participation_rate_limit is False
+
+    def test_max_participation_pct_defaults_none(self):
+        assert BacktestConfig().max_participation_pct is None
+
+    def test_use_participation_rate_limit_without_max_participation_pct_raises(self):
+        with pytest.raises(ValueError, match="max_participation_pct"):
+            BacktestConfig(use_participation_rate_limit=True)
+
+    def test_use_participation_rate_limit_with_max_participation_pct_constructs(self):
+        cfg = BacktestConfig(use_participation_rate_limit=True, max_participation_pct=0.1)
+        assert cfg.use_participation_rate_limit is True
+        assert cfg.max_participation_pct == 0.1
+
+    def test_max_participation_pct_out_of_range_raises(self):
+        with pytest.raises(ValueError, match="max_participation_pct"):
+            BacktestConfig(max_participation_pct=0.0)
+        with pytest.raises(ValueError, match="max_participation_pct"):
+            BacktestConfig(max_participation_pct=1.5)
+
+    def test_max_participation_pct_at_upper_bound_is_accepted(self):
+        assert BacktestConfig(max_participation_pct=1.0).max_participation_pct == 1.0
+
     def test_strategy_type_defaults_to_momentum(self):
         # Default preserves today's exact behavior, the base cross-sectional relative-momentum
         # signal, must never change by accident from an old config.yaml.

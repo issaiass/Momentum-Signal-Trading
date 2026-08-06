@@ -1930,6 +1930,32 @@ def compute_spread_pct(bid: float, ask: float) -> float | None:
     return (ask - bid) / midpoint
 
 
+def should_drop_for_cost_edge_hurdle(
+    spread_pct: float, signal_score: float | None, multiplier: float,
+) -> bool:
+    """
+    Pure decision logic for the "Cost-vs-Edge Hurdle" (Epic 4, "Institutional Risk-Management
+    Features" plan), factored out of place_orders_ibkr() so it's unit-testable without a mocked
+    IBKR connection, the same "pure math separated from I/O" precedent compute_spread_pct()
+    above already established.
+
+    Estimates round-trip transaction cost as 2x the real-time spread (pay the spread once
+    entering, once exiting) and compares it against multiplier x |signal_score|, a
+    momentum-strength proxy, not a guaranteed forward return. signal_score is None (a hand-built
+    exit order, e.g. a stop-loss/time-stop/trailing-stop auto-exit, never carries one, or the
+    ticker genuinely has no signal_context entry) means "can't evaluate the hurdle," returns
+    False (never an automatic drop), the same "couldn't check, treat as fine" precedent
+    fetch_bid_ask_spread()'s own None-quote handling already establishes.
+
+    Uses a strict `>` comparison (matching the spread gate's own `>` convention above): a
+    round-trip cost estimate exactly equal to multiplier x |signal_score| does NOT drop.
+    """
+    if signal_score is None:
+        return False
+    round_trip_cost_estimate = 2 * spread_pct
+    return round_trip_cost_estimate > multiplier * abs(signal_score)
+
+
 def fetch_bid_ask_spread(ticker: str, port: int, client_id: int = 10,
                           host: str = IBKR_HOST, timeout: float = 5.0) -> dict | None:
     """
@@ -2022,10 +2048,13 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
                        host: str = IBKR_HOST, fill_poll_timeout: float = 60.0,
                        allow_extended_hours: bool = False,
                        max_bid_ask_spread_pct: float | None = None,
+                       cost_edge_hurdle_multiplier: float | None = None,
                        attach_broker_stop_loss: bool = False,
                        stop_loss_pct: float | None = None,
                        attach_broker_trailing_stop: bool = False,
-                       trailing_stop_pct: float | None = None) -> dict:
+                       trailing_stop_pct: float | None = None,
+                       use_participation_rate_limit: bool = False,
+                       max_participation_pct: float | None = None) -> dict:
     """
     Requires `ibapi` (pip install ibapi --break-system-packages) and a running
     TWS or IB Gateway instance listening on `port`. Only called when --live
@@ -2072,6 +2101,18 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
         DROPPED_INSUFFICIENT_CASH) instead of submitting it. A None quote (timeout / no usable
         real-time data, see fetch_bid_ask_spread()'s own docstring) does NOT block the order,
         "couldn't check" is treated as "proceed," not as "spread is wide."
+    cost_edge_hurdle_multiplier : float, optional
+        The "Cost-vs-Edge Hurdle" (Epic 4, "Institutional Risk-Management Features" plan). None
+        (default) byte-identical to before this existed. Reuses the SAME real-time quote
+        max_bid_ask_spread_pct above already fetches (one fetch per ticker regardless of how
+        many of the two checks are enabled), checked AFTER the spread check (an order the spread
+        check already dropped never reaches this one). Drops an order (status
+        DROPPED_COST_EXCEEDS_EDGE) when the estimated round-trip cost (2x the real-time spread)
+        exceeds this multiplier times the order's own signal_score, a momentum-strength proxy,
+        not a guaranteed forward return. signal_score missing/None (e.g. every hand-built
+        stop-loss/time-stop/trailing-stop exit order, which never carries one) means "can't
+        evaluate the hurdle," treated as "proceed," same "couldn't check" precedent as the
+        spread gate itself.
     attach_broker_stop_loss : bool
         BacktestConfig.attach_broker_stop_loss, LIVE-ONLY, belt-and-suspenders alongside the
         Python-side auto_execute_stop_loss check (NOT a replacement for it). When True, each
@@ -2120,6 +2161,18 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
     trailing_stop_pct : float, optional
         BacktestConfig.trailing_stop_pct, reused as-is for the TRAIL bracket's trail width, no
         duplicate field. Required (non-None) for attach_broker_trailing_stop to do anything.
+    use_participation_rate_limit : bool
+        "Execution Participation-Rate Limits" (Epic 4, "Institutional Risk-Management Features"
+        plan). LIVE-ONLY, opt-in, False (default) byte-identical to before this existed.
+        Delegates to IBKR's own native `PctVol` execution algo (order.algoStrategy = "PctVol",
+        set directly on the submitted parent order, not a bracket child, no parentId/transmit
+        linkage needed) rather than any local TWAP/multi-run slicing, this app has no intraday
+        scheduling loop to build real slicing against.
+    max_participation_pct : float, optional
+        Required (non-None) for use_participation_rate_limit to do anything, e.g. 0.10 targets
+        no more than 10% participation in real-time market volume while filling the order
+        (IBKR's `pctVol` algo param, confirmed against a real paper-account submission,
+        an earlier `maxPctVol` name raised a real IBKR error 443 "Unknown algo attribute").
     """
     # --- Proactive off-hours notice, before ever connecting. IBKR itself will still queue
     #     the order for the next session rather than reject it (correct broker behavior), this
@@ -2137,6 +2190,7 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
         from ibapi.wrapper import EWrapper
         from ibapi.contract import Contract
         from ibapi.order import Order
+        from ibapi.tag_value import TagValue
     except ImportError:
         logger.error("ibapi not installed. Run: pip install ibapi --break-system-packages")
         return {}
@@ -2243,9 +2297,12 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
         order_id_to_ticker = {}
         oid = start_order_id
         for ticker, order in order_subset.items():
-            if max_bid_ask_spread_pct is not None:
+            # Epic 4, "Institutional Risk-Management Features" plan: one shared real-time quote
+            # fetch, reused by BOTH the spread gate and the cost-vs-edge hurdle below, whenever
+            # EITHER is enabled (previously only the spread gate ever fetched a quote here).
+            if max_bid_ask_spread_pct is not None or cost_edge_hurdle_multiplier is not None:
                 quote = fetch_bid_ask_spread(ticker, port, host=host)
-                if quote is not None and quote["spread_pct"] > max_bid_ask_spread_pct:
+                if quote is not None and max_bid_ask_spread_pct is not None and quote["spread_pct"] > max_bid_ask_spread_pct:
                     logger.warning(
                         "%s: dropping %s order, bid-ask spread %.2f%% exceeds "
                         "max_bid_ask_spread_pct %.2f%%.",
@@ -2258,6 +2315,27 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
                     log_alert(portfolio, "WIDE_BID_ASK_SPREAD", "WARNING",
                               f"{ticker}: spread {quote['spread_pct']:.2%} exceeds "
                               f"max_bid_ask_spread_pct {max_bid_ask_spread_pct:.2%}, order dropped.",
+                              log_path=alerts_log_path)
+                    continue
+                if (quote is not None and cost_edge_hurdle_multiplier is not None
+                        and should_drop_for_cost_edge_hurdle(
+                            quote["spread_pct"], order.get("signal_score"), cost_edge_hurdle_multiplier,
+                        )):
+                    round_trip_cost_estimate = 2 * quote["spread_pct"]
+                    logger.warning(
+                        "%s: dropping %s order, estimated round-trip cost %.2f%% exceeds "
+                        "cost_edge_hurdle_multiplier %.2f x signal_score %.4f.",
+                        ticker, order["action"], round_trip_cost_estimate * 100,
+                        cost_edge_hurdle_multiplier, order.get("signal_score"))
+                    dropped_orders[ticker] = {
+                        "status": "DROPPED_COST_EXCEEDS_EDGE",
+                        "filled": 0.0,
+                        "avg_fill_price": 0.0,
+                    }
+                    log_alert(portfolio, "COST_EXCEEDS_EDGE", "WARNING",
+                              f"{ticker}: estimated round-trip cost {round_trip_cost_estimate:.2%} "
+                              f"exceeds cost_edge_hurdle_multiplier {cost_edge_hurdle_multiplier:.2f} "
+                              f"x signal_score {order.get('signal_score'):.4f}, order dropped.",
                               log_path=alerts_log_path)
                     continue
 
@@ -2318,6 +2396,27 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
             # STP overrides this to "GTC" below, deliberately, see that code for why.
             ib_order.tif = "DAY"
 
+            # Execution Participation-Rate Limits (Epic 4, "Institutional Risk-Management
+            # Features" plan): delegates to IBKR's own native `PctVol` execution algo, set
+            # directly on this PARENT order (not a bracket child, no parentId/transmit linkage
+            # needed, it's an execution-style attribute on the order itself). Minimal viable
+            # parameter set (pctVol only); IBKR's own AvailableAlgoParams.FillPctVolParams()
+            # sample helper also supports optional startTime/endTime/noTakeLiq tags, deliberately
+            # not included here, out of scope for this first version. Deliberately NOT local
+            # TWAP/multi-run slicing, this app is a stateless once-daily cron job with no
+            # intraday scheduling loop to build real slicing against, see
+            # docs/RISK_CONSTRAINTS.md's "Execution Participation-Rate Limits" for real, honestly
+            # reported verification against a real paper account.
+            #
+            # NOTE: the tag name is `pctVol`, confirmed against a real paper-account submission,
+            # NOT `maxPctVol` (the name this project's own field is called), a real, confirmed
+            # bug found during Epic 4's own live verification: a first attempt using `maxPctVol`
+            # as the TagValue's tag was rejected outright by IBKR (error 443, "Unknown algo
+            # attribute:maxPctVol"), don't reintroduce that name here.
+            if use_participation_rate_limit:
+                ib_order.algoStrategy = "PctVol"
+                ib_order.algoParams = [TagValue("pctVol", str(max_participation_pct))]
+
             # IBKR/exchanges reject plain MKT orders outside regular trading hours (error 201,
             # "Exchange is closed") and only accept LMT orders with outsideRth=True instead,
             # MKT does not work outside RTH at all (confirmed against IBKR's own TWS API docs),
@@ -2325,8 +2424,18 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
             # actually getting filled over exact price, extended-hours liquidity is thinner,
             # so a tight limit risks no fill at all. No reference price -> fall back to a
             # regular MKT (RTH-only) order rather than submitting an unpriced limit order.
+            #
+            # A real, confirmed IBKR constraint found during Epic 4's own live paper-account
+            # verification: "Only RTH orders are allowed for IB algorithmic orders" (error 201),
+            # an algoStrategy-bearing order (use_participation_rate_limit above) is REJECTED
+            # outright when combined with outsideRth=True, IBKR's own algos only work an order
+            # during a live intraday session, an extended-hours submission has no session for
+            # the algo to work volume against anyway. So this block is skipped entirely when
+            # use_participation_rate_limit is set, falling through to a plain RTH-only order,
+            # which correctly queues at the broker until the next session opens (same "no
+            # reference price" fallback behavior below, not a new code path).
             extended_hours_note = ""
-            if allow_extended_hours:
+            if allow_extended_hours and not use_participation_rate_limit:
                 ref_price = (expected_prices or {}).get(ticker)
                 if ref_price and ref_price > 0:
                     buffer = 0.005
@@ -2339,6 +2448,13 @@ def place_orders_ibkr(orders: dict, port: int, client_id: int = 7,
                     logger.warning(
                         "%s: allow_extended_hours is set but no reference price is available, "
                         "submitting as a regular MKT order (RTH only) instead.", ticker)
+            elif allow_extended_hours and use_participation_rate_limit:
+                logger.warning(
+                    "%s: allow_extended_hours is set but use_participation_rate_limit is also "
+                    "set, IBKR rejects algo orders (error 201, 'Only RTH orders are allowed for "
+                    "IB algorithmic orders') combined with an extended-hours outsideRth order, "
+                    "submitting as a regular MKT order (RTH only) instead, it will queue at the "
+                    "broker until the next session opens.", ticker)
 
             # Broker-side protective bracket (BacktestConfig.attach_broker_stop_loss,
             # belt-and-suspenders alongside the Python-side auto_execute_stop_loss check, see
@@ -3173,10 +3289,13 @@ def run(
                                           portfolio=portfolio, alerts_log_path=alerts_log_path,
                                           allow_extended_hours=cfg.allow_extended_hours,
                                           max_bid_ask_spread_pct=cfg.max_bid_ask_spread_pct,
+                                          cost_edge_hurdle_multiplier=cfg.cost_edge_hurdle_multiplier,
                                           attach_broker_stop_loss=cfg.attach_broker_stop_loss,
                                           stop_loss_pct=cfg.stop_loss_pct,
                                           attach_broker_trailing_stop=cfg.attach_broker_trailing_stop,
-                                          trailing_stop_pct=cfg.trailing_stop_pct)
+                                          trailing_stop_pct=cfg.trailing_stop_pct,
+                                          use_participation_rate_limit=cfg.use_participation_rate_limit,
+                                          max_participation_pct=cfg.max_participation_pct)
         for ticker, fill in fill_results.items():
             if ticker in orders:
                 orders[ticker]["fill_status"] = fill["status"]

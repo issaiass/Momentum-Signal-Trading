@@ -64,7 +64,7 @@ lands (not written speculatively in advance).
 | 10 | Liquidity-Adjusted Position Sizing | **Planned, Epic 1** — the existing `use_liquidity_filter` is a binary in/out rank filter and `max_pct_of_adv`/`check_capacity()` is advisory-only (runs after order sizing, never mutates a size); this adds a genuinely continuous, ADV-scaled, active sizing path, see "Liquidity-Adjusted Position Sizing (Active)" below |
 | 11 | Factor Risk Exposure Caps | **Implemented (Epic 3)** — a manually-declared factor-loadings cap (no vendor factor-return data source exists in this project, same honest caveat `ticker_sectors` already carries), see "Factor Risk Exposure Caps" below |
 | 12 | Trailing Drawdown High-Water-Mark Limits | **Implemented (pre-existing)** — the circuit breaker's peak-equity tracking (`risk/circuit_breaker.py`'s `_peak_equity_path()`) already measures drawdown from a running high-water mark, portfolio-level and account-wide |
-| 13 | Bid-Ask Spread and Transaction Cost Hurdle Filters | **Partially implemented; upgrade planned, Epic 4** — `max_bid_ask_spread_pct` (row in "Liquidity/Slippage Monitor" above) is a real, shipped absolute spread ceiling; a relative cost-vs-expected-edge hurdle is new, see Epic 4 |
+| 13 | Bid-Ask Spread and Transaction Cost Hurdle Filters | **Implemented (Epic 4)** — `max_bid_ask_spread_pct` (row in "Liquidity/Slippage Monitor" above) remains the shipped absolute spread ceiling; `cost_edge_hurdle_multiplier` adds the relative cost-vs-expected-edge hurdle, see "Cost-vs-Edge Hurdle Filter" below |
 | 14 | Cross-Asset Hedging with Liquid Proxies | **Not Applicable** — no derivatives/short capability exists to hedge with; this system is long-only |
 | 15 | Margin Utilization and Leverage Caps | **Not Applicable** — this system is unlevered and cash-only by design, no margin usage exists to monitor |
 | 16 | Shrinkage Estimator Covariance Matrix Regularization | **Planned, Epic 1** — the existing correlation-penalty/spike-detection math uses raw `pandas.DataFrame.corr()`, no regularization; a Ledoit-Wolf-style shrinkage estimator is added as a shared utility, see "Shrinkage Covariance Estimator" below |
@@ -73,13 +73,17 @@ lands (not written speculatively in advance).
 | 19 | Counterparty Credit Risk Limits | **Not Applicable** — single broker (IBKR), no OTC/multi-counterparty exposure exists to limit |
 | 20 | Sector Concentration Hard Caps | **Implemented (pre-existing)**, same mechanism as row 4's practical substitute, `max_sector_weight`/`ticker_sectors`, see "Sector / Asset-Class Concentration Cap" (this file, referenced from `CLAUDE.md`) |
 | 21 | Maximum Asset-Level Concentration Limits | **Implemented (pre-existing)**, `max_position_weight`, see "Position Size Hard-Cap" above |
-| 22 | Algorithmic Execution Participation Rate Limits | **Planned, Epic 4** — `place_orders_ibkr()` submits exactly one order per ticker today, no participation-rate/slicing logic exists; planned via IBKR's native `PctVol` algo order type, not local TWAP scheduling (this app is a stateless once-daily cron job, no intraday scheduling loop exists to build real slicing against) |
+| 22 | Algorithmic Execution Participation Rate Limits | **Implemented (Epic 4), verification partial** — `use_participation_rate_limit`/`max_participation_pct` wire IBKR's native `PctVol` algo order type onto the parent order (`place_orders_ibkr()`), not local TWAP scheduling (this app is a stateless once-daily cron job, no intraday scheduling loop exists to build real slicing against); a real paper-account submission is confirmed ACCEPTED by IBKR (two real bugs found and fixed to get there, see "Execution Participation-Rate Limits" below), but the actual intraday percentage-of-volume fill behavior and composition with broker-side stop/trail brackets were both untested (outside RTH at test time), disclosed as open gaps, not assumed to work |
 
 (This audit lists 22 distinct practices; two pairs from the original 24-item request collapsed
 into one row each: rows 6/7 share one mechanism, VaR and CVaR are computed and budgeted
 together, and rows 4/20 both point to the same `max_sector_weight`/`ticker_sectors` cap, since
 Sector Concentration Hard Caps and the practical substitute for Sector/Industry Neutralization
 are, honestly, the same shipped feature under two different names.)
+
+**Epic 4 (2026-08-05) closes this audit**: every row above is now either Implemented,
+Implemented with an honestly disclosed partial-verification caveat (row 22), or Not Applicable
+by design. No further epics are planned in this program.
 
 ## Opt-in overlay strategies (`enabled_risk_strategies`)
 
@@ -1604,6 +1608,112 @@ silently blocked by an unrelated data-feed gap, see `docs/DEPLOYMENT.md`'s IBKR 
 section. `None` (the default) makes ZERO new IBKR calls, byte-identical to before this feature
 existed. LIVE-ONLY, dry-run never opens an IBKR connection at all, consistent with every other
 IBKR-dependent check in this codebase.
+
+## Cost-vs-Edge Hurdle Filter [Nice-to-Have tier]
+
+`cost_edge_hurdle_multiplier` (default `None`, disabled, Epic 4 of the "Institutional
+Risk-Management Features" plan) is a SEPARATE, ADDITIVE relative check, gated by plain
+field-presence exactly like `max_bid_ask_spread_pct` (not `enabled_risk_strategies`, the two
+gating conventions this project uses are documented under "Opt-in overlay strategies" below).
+`max_bid_ask_spread_pct` remains an unchanged, independent ABSOLUTE spread ceiling; this field
+instead asks a RELATIVE question: is the estimated round-trip transaction cost worth paying for
+the signal strength behind this specific trade?
+
+`should_drop_for_cost_edge_hurdle(spread_pct, signal_score, multiplier)` (`execution/live_signal.py`,
+pure, unit-tested without a mocked IBKR connection) estimates round-trip cost as `2 * spread_pct`
+(pay the spread once entering, once exiting) and drops the order when that exceeds
+`multiplier * abs(signal_score)`. `signal_score` is a momentum-strength PROXY, not a guaranteed
+forward return, the same honest caveat this project already applies to momentum scores
+elsewhere (see `docs/STRATEGY_THEORY.md`); a stronger score tolerates a wider spread before the
+trade is rejected as not worth its transaction cost. `signal_score is None` (a hand-built
+exit order from one of `daily_runner.py`'s three auto-exit checks, none of which construct that
+key, an existing, pre-Epic-4 scope boundary this epic deliberately does not change, see Design
+Decision 5 in the epic's own plan) means "can't evaluate the hurdle," never an automatic drop,
+the same "couldn't check, treat as fine" precedent `fetch_bid_ask_spread()`'s own `None`-quote
+handling already establishes.
+
+Wired into `place_orders_ibkr()`'s SAME per-ticker real-time quote fetch the spread gate already
+uses (`fetch_bid_ask_spread()`, restructured to fire once whenever EITHER
+`max_bid_ask_spread_pct is not None` OR `cost_edge_hurdle_multiplier is not None`, one quote
+fetch per ticker regardless of how many of the two checks are enabled): the spread gate runs
+first (unchanged behavior/log lines when only it is set), the hurdle check second, only reached
+if the spread gate didn't already drop the order. A hurdle-triggered drop
+(`DROPPED_COST_EXCEEDS_EDGE`, the same `dropped_orders` merge pattern as `DROPPED_WIDE_SPREAD`)
+fires a matching `COST_EXCEEDS_EDGE` `WARNING` alert. Only wired at the rebalance call site
+(`run()`), matching `max_bid_ask_spread_pct`'s own existing real scope, and a real necessity, not
+just consistency: the three `daily_runner.py` auto-exit paths' hand-built order dicts have no
+`signal_score` at all, so the hurdle would always no-op there regardless. `None` (the default)
+is byte-identical to before this feature existed, zero new IBKR calls, same real operational
+dependency (a live, paid real-time market-data subscription) as `max_bid_ask_spread_pct` above.
+
+**Real verification, run 2026-08-05**: a throwaway single-ticker paper portfolio (`JPM`,
+ticker-disjoint from every real `config.yaml` portfolio) with `cost_edge_hurdle_multiplier: 1000`
+(deliberately extreme, to force a drop against even a tiny real spread) generated a real BUY
+signal and reached the quote-fetch gate as designed. The real outcome was honest, not a clean
+"drop confirmed": this paper account has no real-time market-data subscription (confirmed via a
+real IBKR error `10168`, "Requested market data is not subscribed"), so `fetch_bid_ask_spread()`
+correctly returned `None`, both the spread gate and the hurdle check correctly treated that as
+"couldn't check," and the order submitted and filled normally (`execDetails` confirmed, `1 JPM @
+$360.80`). The DROP path itself is verified by the mocked-IBKR test suite
+(`TestCostEdgeHurdleGate`), not by this live run, the same real, pre-existing operational
+dependency `max_bid_ask_spread_pct` above has always had, not a new gap introduced by this
+feature.
+
+## Execution Participation-Rate Limits [Nice-to-Have tier]
+
+`use_participation_rate_limit` (default `False`) + `max_participation_pct` (required, `(0,
+1.0]`, when the toggle is `True`), Epic 4 of the "Institutional Risk-Management Features" plan,
+LIVE-ONLY, plain-bool-gated (same convention as `attach_broker_stop_loss`/
+`attach_broker_trailing_stop`, deliberately NOT `enabled_risk_strategies`).
+
+Delegates entirely to IBKR's own native `PctVol` execution algo, set directly on the PARENT
+order object in `place_orders_ibkr()` (`ib_order.algoStrategy = "PctVol"`, `ib_order.algoParams
+= [TagValue("pctVol", str(max_participation_pct))]`), not a bracket child, no
+`parentId`/`transmit` linkage needed, it's an execution-style attribute on the order itself.
+Minimal viable parameter set (`pctVol` only); IBKR's own `AvailableAlgoParams.
+FillPctVolParams()` sample helper also supports optional `startTime`/`endTime`/`noTakeLiq` tags,
+deliberately not included in this first version, out of scope.
+
+**Deliberately NOT local TWAP/multi-run slicing**: this app is a stateless once-daily cron job
+(`daily_runner.py`, `docker-entrypoint.sh`'s `DAILY_RUNNER_CRON`) with no intraday scheduling
+loop to build real slicing against, IBKR's own algo handles the real-time in-session execution
+instead, a considered choice, not a limitation stumbled into.
+
+**Real verification, run 2026-08-05, TWO real bugs found and fixed via live paper-account
+testing, neither caught by the mocked-IBKR test suite alone**:
+
+1. **Wrong algo param tag name.** The first implementation used `TagValue("maxPctVol", ...)`
+   (matching this project's own field name, `max_participation_pct`), a real, confirmed guess
+   that turned out wrong: a real submission to a real paper account was rejected outright
+   (`IBKR error 443: Order processing failed. Unknown algo attribute:maxPctVol`). IBKR's actual
+   documented tag for this algo is `pctVol`, not `maxPctVol`. Fixed by changing the `TagValue`'s
+   tag string; the project's own field name (`max_participation_pct`) is unchanged, only the
+   internal IBKR wire-protocol tag was wrong.
+2. **RTH/algo-order incompatibility.** After fixing (1), a second real submission (this time with
+   `allow_extended_hours: true` also set, since the test ran after market close) was again
+   rejected (`IBKR error 201: Order rejected - reason:Only RTH orders are allowed for IB
+   algorithmic orders`), a genuine IBKR constraint not documented in this project's own plan in
+   advance: an `algoStrategy`-bearing order cannot be combined with `outsideRth=True`. Fixed in
+   `place_orders_ibkr()`: the extended-hours LMT/`outsideRth` conversion block is now skipped
+   entirely whenever `use_participation_rate_limit` is set, falling through to a plain RTH-only
+   `MKT` order (still carrying the `PctVol` algo), which correctly queues at the broker until the
+   next session opens, the exact same "no reference price" fallback shape this function already
+   had, not a new code path. Pinned by
+   `TestParticipationRateLimit::test_combined_with_extended_hours_falls_back_to_rth_only_order`.
+
+After both fixes, a real resubmission (native AND inside Docker, both port 7497) was **accepted**
+by IBKR with no error (informational code `399`, "will not be placed until the next session,"
+the same pre-existing, already-documented queuing behavior any RTH-only order gets after hours),
+confirming the order object itself (`algoStrategy="PctVol"`, `algoParams=[pctVol=0.1]`) is
+well-formed and accepted by a real broker connection. **Disclosed limitation, stated honestly,
+not glossed over**: both live tests ran after regular trading hours, so the actual INTRADAY
+percentage-of-volume fill behavior (whether IBKR's algo genuinely paces the fill against
+real-time volume as configured) was never observed, only that submission itself succeeds. This
+remains unconfirmed until exercised during a live RTH session, a real, open verification gap for
+future work, not something this epic's testing window could close. Whether this composes cleanly
+with `attach_broker_stop_loss`/`attach_broker_trailing_stop` brackets on the same parent order
+was also not exercised in this test round (only a plain, non-bracket order), a second real,
+disclosed gap, not assumed to work.
 
 ## Hard-to-Borrow (HTB) Sentinel [Nice-to-Have tier]: Not Applicable
 

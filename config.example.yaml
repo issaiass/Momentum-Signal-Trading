@@ -430,6 +430,20 @@ default_risk:
                                    # above, both children attach as an IBKR One-Cancels-All (OCA)
                                    # pair, whichever triggers first cancels the other. See
                                    # docs/RISK_CONSTRAINTS.md's "Broker-Native Trailing Stop".
+  use_participation_rate_limit: false  # "Execution Participation-Rate Limits" (Nice-to-Have
+                                   # tier, docs/RISK_CONSTRAINTS.md), Epic 4. LIVE-ONLY, false
+                                   # (default) is byte-identical to before this field existed.
+                                   # true delegates to IBKR's own native PctVol execution algo,
+                                   # set on the parent order (not a bracket child), requires
+                                   # max_participation_pct to also be set. Deliberately NOT local
+                                   # TWAP/multi-run slicing, this app is a stateless once-daily
+                                   # cron job with no intraday scheduling loop to build real
+                                   # slicing against, IBKR's own algo handles the real-time
+                                   # in-session execution instead.
+  max_participation_pct: null     # required in (0, 1.0] when use_participation_rate_limit is
+                                   # true, else ignored. e.g. 0.1 = IBKR's PctVol algo targets
+                                   # participating in at most ~10% of real-time market volume
+                                   # while working the order.
   ticker_risk_overrides: {}       # per-ticker override of stop_loss_pct/max_pct_of_adv/
                                    # atr_trailing_stop_multiplier, {} (default) = every ticker
                                    # uses the portfolio-wide values, no per-ticker behavior
@@ -648,6 +662,22 @@ default_risk:
                                        # usable quote does NOT block the order, only a
                                        # confirmed-wide spread does. See docs/DEPLOYMENT.md's
                                        # IBKR troubleshooting section.
+
+  cost_edge_hurdle_multiplier: null   # "Cost-vs-Edge Hurdle Filter" (Nice-to-Have tier,
+                                       # docs/RISK_CONSTRAINTS.md), Epic 4. null (default) =
+                                       # disabled, byte-identical to before this field existed.
+                                       # LIVE-ONLY, reuses the SAME real-time quote fetch as
+                                       # max_bid_ask_spread_pct above (no extra IBKR call when
+                                       # both are set). Separate, additive RELATIVE check
+                                       # (vs. max_bid_ask_spread_pct's ABSOLUTE ceiling):
+                                       # estimated round-trip cost (2x the real-time spread) vs.
+                                       # multiplier x |signal_score| (a momentum-strength proxy,
+                                       # not a guaranteed forward return). e.g. 1.0 = drop an
+                                       # order (logged as DROPPED_COST_EXCEEDS_EDGE) whenever the
+                                       # estimated round-trip cost exceeds the signal's own
+                                       # strength. A missing/None signal_score (e.g. a hand-built
+                                       # stop-loss/time-stop/trailing-stop exit order) never
+                                       # drops, "can't evaluate" is treated as "fine."
 
   # Capacity / market-impact check
   max_pct_of_adv: 0.0                 # 0 = disabled (default). LIVE-ONLY in practice (the

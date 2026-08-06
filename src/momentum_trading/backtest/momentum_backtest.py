@@ -672,6 +672,45 @@ class BacktestConfig:
                                              # fetch_bid_ask_spread()). e.g. 0.01 = drop an
                                              # order (DROPPED_WIDE_SPREAD) rather than submit it
                                              # into a real-time bid-ask spread wider than 1%.
+    cost_edge_hurdle_multiplier: float | None = None  # Epic 4, "Institutional Risk-Management
+                                             # Features" plan, "Cost-vs-Edge Hurdle" constraint.
+                                             # None (default) = disabled, byte-identical to
+                                             # before this field existed, LIVE-ONLY, same
+                                             # real-time bid-ask quote requirement as
+                                             # max_bid_ask_spread_pct above (reuses the SAME
+                                             # fetched quote, no extra IBKR call). Distinct from
+                                             # max_bid_ask_spread_pct (an ABSOLUTE spread
+                                             # ceiling): this is a RELATIVE check, drop an order
+                                             # (DROPPED_COST_EXCEEDS_EDGE) when the estimated
+                                             # round-trip cost (2x the real-time spread) exceeds
+                                             # this multiplier times the order's own
+                                             # signal_score (a momentum-strength proxy, not a
+                                             # guaranteed forward return). e.g. 0.5 = require the
+                                             # signal to be at least 2x the estimated cost.
+                                             # signal_score unavailable (e.g. a hand-built
+                                             # stop-loss/time-stop/trailing-stop exit order,
+                                             # which never carries one) means "can't evaluate,
+                                             # proceed", never an automatic drop. See
+                                             # docs/RISK_CONSTRAINTS.md's "Cost-vs-Edge Hurdle".
+    use_participation_rate_limit: bool = False  # Epic 4, "Execution Participation-Rate Limits"
+                                             # constraint. Opt-in, LIVE-ONLY, false (default) is
+                                             # byte-identical to before this field existed.
+                                             # Delegates to IBKR's own native `PctVol` execution
+                                             # algo (order.algoStrategy = "PctVol"), set directly
+                                             # on the submitted order, NOT local TWAP/multi-run
+                                             # slicing (this app is a stateless once-daily cron
+                                             # job with no intraday scheduling loop to build real
+                                             # slicing against). See
+                                             # docs/RISK_CONSTRAINTS.md's "Execution
+                                             # Participation-Rate Limits" for real, honestly
+                                             # reported open risks (account algo permission,
+                                             # broker-bracket composition) verified against a
+                                             # real paper account.
+    max_participation_pct: float | None = None  # required in (0, 1.0] when
+                                             # use_participation_rate_limit is true, else
+                                             # ignored. e.g. 0.10 = IBKR's PctVol algo targets
+                                             # participating in no more than 10% of real-time
+                                             # market volume while filling this order.
 
     # --- Alternative position-sizing method ---
     sizing_method: str = "inverse_vol"   # "inverse_vol" (default), "score_proportional",
@@ -904,6 +943,19 @@ class BacktestConfig:
             errors.append(f"max_slippage_tolerance_pct ({self.max_slippage_tolerance_pct}) should be in (0, 1.0] or None")
         if self.max_bid_ask_spread_pct is not None and not (0 < self.max_bid_ask_spread_pct <= 1.0):
             errors.append(f"max_bid_ask_spread_pct ({self.max_bid_ask_spread_pct}) should be in (0, 1.0] or None")
+        if self.cost_edge_hurdle_multiplier is not None and self.cost_edge_hurdle_multiplier <= 0:
+            errors.append(
+                f"cost_edge_hurdle_multiplier ({self.cost_edge_hurdle_multiplier}) must be > 0 or None"
+            )
+        if self.use_participation_rate_limit and self.max_participation_pct is None:
+            errors.append(
+                "use_participation_rate_limit is True but max_participation_pct is None, "
+                "set a value"
+            )
+        if self.max_participation_pct is not None and not (0 < self.max_participation_pct <= 1.0):
+            errors.append(
+                f"max_participation_pct ({self.max_participation_pct}) should be in (0, 1.0] or None"
+            )
         if self.max_price_staleness_minutes is not None and self.max_price_staleness_minutes <= 0:
             errors.append(f"max_price_staleness_minutes ({self.max_price_staleness_minutes}) must be > 0 or None")
         if self.max_holding_days is not None and self.max_holding_days <= 0:

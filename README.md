@@ -164,7 +164,20 @@ README says so on purpose.
   down to exactly its ADV cap. All three verified end-to-end (2026-08-05) against a real IBKR
   paper account and inside a rebuilt Docker container, real BUY fills confirmed for each feature
   individually and combined, see `docs/RISK_CONSTRAINTS.md`'s "Opt-in overlay strategies"
-  section for the full verification writeup. Restart-safe by
+  section for the full verification writeup. Cost-vs-Edge Hurdle Filter
+  (`cost_edge_hurdle_multiplier`, opt-in, LIVE-ONLY): a relative pre-trade check alongside the
+  existing absolute `max_bid_ask_spread_pct` ceiling, drops an order whose estimated round-trip
+  transaction cost (2x the real-time spread) exceeds a multiplier of the signal's own strength,
+  reusing the same real-time quote fetch, zero extra IBKR calls when both are set. Execution
+  Participation-Rate Limits (`use_participation_rate_limit`/`max_participation_pct`, opt-in,
+  LIVE-ONLY): delegates to IBKR's native `PctVol` execution algo, attached directly to the parent
+  order rather than any local TWAP/multi-run slicing (this app has no intraday scheduling loop to
+  build real slicing against). Both close the full 24-item institutional risk-management audit
+  (Epic 4, the final epic in this program), see `docs/RISK_CONSTRAINTS.md`'s "Cost-vs-Edge Hurdle
+  Filter"/"Execution Participation-Rate Limits" sections, including two real bugs found and fixed
+  via live paper-account testing (a wrong IBKR algo-param tag name, and a real RTH/algo-order
+  incompatibility) and an honestly disclosed limitation (the actual intraday fill behavior was
+  never observed, both live tests ran after market close). Restart-safe by
   construction in `--live` mode (broker-sourced
   holdings, calendar-derived scheduling, persisted local/bind-mounted state, both native Python
   and Docker), plus a non-blocking `MISSED_REBALANCE_DAY` warning if a scheduled rebalance was
@@ -534,6 +547,23 @@ answer whether the strategy actually works.
   exactly this reason. See `docs/RISK_CONSTRAINTS.md`'s "ATR-Based Trailing Stop" section for the
   full incident writeup and what a genuine fix would need (a process-external, persisted registry
   of which config/portfolio owns which ticker, out of scope for the epic that found this).
+- **Execution Participation-Rate Limits (`use_participation_rate_limit`) has two real, honestly
+  disclosed verification gaps, found during Epic 4's own live paper-account testing
+  (2026-08-05), not glossed over**: (1) the actual INTRADAY percentage-of-volume fill behavior
+  (whether IBKR's native `PctVol` algo genuinely paces the fill against real-time volume as
+  configured) was never observed, both live test runs happened after regular trading hours, so
+  the order only confirmed as ACCEPTED and correctly queued for the next session, not as filled
+  under real algo pacing. (2) whether an `algoStrategy`-bearing order composes cleanly with
+  `attach_broker_stop_loss`/`attach_broker_trailing_stop` brackets on the SAME parent order was
+  also not exercised, only a plain, non-bracket order was tested. Two real, confirmed bugs WERE
+  found and fixed getting to this point: a wrong IBKR algo-param tag name (`maxPctVol` instead
+  of the actual documented `pctVol`, rejected by a real submission with IBKR error 443), and a
+  genuine IBKR constraint not anticipated in advance (an algo order combined with
+  `outsideRth=True` is rejected outright, IBKR error 201, "Only RTH orders are allowed for IB
+  algorithmic orders"), both fixed and confirmed accepted by a real paper account afterward, see
+  `docs/RISK_CONSTRAINTS.md`'s "Execution Participation-Rate Limits" section for the full
+  writeup. Until exercised during a live RTH session, treat the actual fill-pacing behavior and
+  bracket composition as unverified, not assumed to work.
 - **`config.example.yaml` previously under-documented 20 of `BacktestConfig`'s 58 fields**, now
   closed, confirmed by enumerating the dataclass directly. The 10 LIVE-relevant ones (`exchange`,
   `correlation_lookback_days`/`correlation_penalty_strength`, `correlation_spike_short_window`/

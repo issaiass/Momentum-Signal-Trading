@@ -4014,6 +4014,261 @@ class TestBidAskSpreadGate:
         assert result["BUY1"]["status"] == "Filled"
 
 
+class TestShouldDropForCostEdgeHurdle:
+    """
+    should_drop_for_cost_edge_hurdle() (Epic 4, "Institutional Risk-Management Features" plan,
+    "Cost-vs-Edge Hurdle Filter"), pure decision logic factored out of place_orders_ibkr() so
+    it's unit-testable without a mocked IBKR connection, same "pure math separated from I/O"
+    precedent compute_spread_pct() already established.
+    """
+
+    def test_signal_score_none_never_drops_regardless_of_cost(self):
+        import momentum_trading.execution.live_signal as ls
+        # Even an enormous spread must not drop the order when there's no edge estimate to
+        # compare it against, "couldn't evaluate the hurdle" is treated the same as "fine."
+        assert ls.should_drop_for_cost_edge_hurdle(0.50, None, 1.0) is False
+
+    def test_cost_comfortably_under_multiplier_times_edge_does_not_drop(self):
+        import momentum_trading.execution.live_signal as ls
+        # round_trip_cost_estimate = 2 * 0.001 = 0.002, multiplier * edge = 1.0 * 0.05 = 0.05
+        assert ls.should_drop_for_cost_edge_hurdle(0.001, 0.05, 1.0) is False
+
+    def test_cost_exceeding_multiplier_times_edge_drops(self):
+        import momentum_trading.execution.live_signal as ls
+        # round_trip_cost_estimate = 2 * 0.05 = 0.10, multiplier * edge = 1.0 * 0.05 = 0.05
+        assert ls.should_drop_for_cost_edge_hurdle(0.05, 0.05, 1.0) is True
+
+    def test_negative_signal_score_uses_absolute_value(self):
+        import momentum_trading.execution.live_signal as ls
+        assert ls.should_drop_for_cost_edge_hurdle(0.05, -0.05, 1.0) is True
+        assert ls.should_drop_for_cost_edge_hurdle(0.001, -0.05, 1.0) is False
+
+    def test_exact_equality_boundary_does_not_drop(self):
+        import momentum_trading.execution.live_signal as ls
+        # round_trip_cost_estimate = 2 * 0.025 = 0.05, multiplier * edge = 1.0 * 0.05 = 0.05,
+        # a strict ">" comparison, consistent with the spread gate's own ">" boundary.
+        assert ls.should_drop_for_cost_edge_hurdle(0.025, 0.05, 1.0) is False
+
+
+class TestCostEdgeHurdleGate:
+    """
+    cost_edge_hurdle_multiplier's pre-trade gate in place_orders_ibkr() (Epic 4, "Institutional
+    Risk-Management Features" plan). Mocks fetch_bid_ask_spread() directly, same pattern as
+    TestBidAskSpreadGate above, whose shared quote fetch this feature now reuses.
+    """
+
+    def test_hurdle_ticker_is_dropped_and_excluded_from_submission(self, monkeypatch, tmp_path):
+        import momentum_trading.execution.live_signal as ls
+        submission_log = []
+        _install_fake_ibkr(monkeypatch, submission_log)
+        monkeypatch.setattr(ls, "fetch_bid_ask_spread",
+                             lambda ticker, port, **k: {"bid": 99.5, "ask": 100.5, "spread_pct": 0.01})
+
+        orders = {"WEAK1": {"action": "BUY", "shares": 5, "signal_score": 0.01}}
+        result = ls.place_orders_ibkr(orders, port=9999, cost_edge_hurdle_multiplier=1.0,
+                                       alerts_log_path=str(tmp_path / "alerts_log.csv"))
+
+        assert submission_log == []
+        assert result == {"WEAK1": {"status": "DROPPED_COST_EXCEEDS_EDGE", "filled": 0.0, "avg_fill_price": 0.0}}
+
+    def test_strong_edge_ticker_submits_as_before(self, monkeypatch, tmp_path):
+        import momentum_trading.execution.live_signal as ls
+        submission_log = []
+        _install_fake_ibkr(monkeypatch, submission_log)
+        monkeypatch.setattr(ls, "fetch_bid_ask_spread",
+                             lambda ticker, port, **k: {"bid": 99.95, "ask": 100.05, "spread_pct": 0.001})
+
+        orders = {"STRONG1": {"action": "BUY", "shares": 5, "signal_score": 0.05}}
+        result = ls.place_orders_ibkr(orders, port=9999, cost_edge_hurdle_multiplier=1.0,
+                                       alerts_log_path=str(tmp_path / "alerts_log.csv"))
+
+        assert submission_log == [("BUY", "STRONG1", 5)]
+        assert result["STRONG1"]["status"] == "Filled"
+
+    def test_missing_signal_score_never_drops(self, monkeypatch, tmp_path):
+        import momentum_trading.execution.live_signal as ls
+        submission_log = []
+        _install_fake_ibkr(monkeypatch, submission_log)
+        monkeypatch.setattr(ls, "fetch_bid_ask_spread",
+                             lambda ticker, port, **k: {"bid": 99.0, "ask": 101.0, "spread_pct": 0.02})
+
+        # Hand-built exit-order dict (e.g. daily_runner.py's stop-loss checks), no signal_score
+        # key at all, same real shape those three call sites actually construct.
+        orders = {"EXIT1": {"action": "SELL", "shares": 5}}
+        result = ls.place_orders_ibkr(orders, port=9999, cost_edge_hurdle_multiplier=1.0,
+                                       alerts_log_path=str(tmp_path / "alerts_log.csv"))
+
+        assert submission_log == [("SELL", "EXIT1", 5)]
+        assert result["EXIT1"]["status"] == "Filled"
+
+    def test_wide_spread_gate_takes_precedence_over_hurdle_check(self, monkeypatch, tmp_path):
+        # A ticker dropped by the absolute spread ceiling never reaches the relative hurdle
+        # check, only one drop reason is ever recorded for a given ticker.
+        import momentum_trading.execution.live_signal as ls
+        submission_log = []
+        _install_fake_ibkr(monkeypatch, submission_log)
+        monkeypatch.setattr(ls, "fetch_bid_ask_spread",
+                             lambda ticker, port, **k: {"bid": 99.0, "ask": 101.0, "spread_pct": 0.02})
+
+        orders = {"WIDE1": {"action": "BUY", "shares": 5, "signal_score": 0.01}}
+        result = ls.place_orders_ibkr(orders, port=9999, max_bid_ask_spread_pct=0.01,
+                                       cost_edge_hurdle_multiplier=1.0,
+                                       alerts_log_path=str(tmp_path / "alerts_log.csv"))
+
+        assert result == {"WIDE1": {"status": "DROPPED_WIDE_SPREAD", "filled": 0.0, "avg_fill_price": 0.0}}
+
+    def test_default_none_never_calls_the_spread_fetch_at_all(self, monkeypatch, tmp_path):
+        # Regression: cost_edge_hurdle_multiplier=None (the default) must be byte-identical to
+        # before this feature existed, zero new IBKR calls when max_bid_ask_spread_pct is also
+        # None, confirming the restructured shared-fetch gate doesn't fetch a quote it didn't
+        # fetch before this feature existed.
+        import momentum_trading.execution.live_signal as ls
+        submission_log = []
+        _install_fake_ibkr(monkeypatch, submission_log)
+        calls = []
+        monkeypatch.setattr(ls, "fetch_bid_ask_spread", lambda ticker, port, **k: calls.append(ticker))
+
+        orders = {"BUY1": {"action": "BUY", "shares": 5, "signal_score": 0.05}}
+        ls.place_orders_ibkr(orders, port=9999, alerts_log_path=str(tmp_path / "alerts_log.csv"))
+
+        assert calls == []
+        assert submission_log == [("BUY", "BUY1", 5)]
+
+
+class TestParticipationRateLimit:
+    """
+    use_participation_rate_limit / max_participation_pct (Epic 4, "Institutional
+    Risk-Management Features" plan, "Execution Participation-Rate Limits"), delegates to IBKR's
+    native PctVol execution algo, set directly on the parent order object
+    (algoStrategy="PctVol", algoParams=[TagValue("pctVol", ...)]). No parentId/transmit
+    bracket linkage involved, this is a plain attribute on a single order. The tag name is
+    "pctVol", confirmed against a real paper-account submission during Epic 4's own live
+    verification, an earlier "maxPctVol" name (matching this project's own field name) was
+    rejected outright by IBKR (error 443, "Unknown algo attribute:maxPctVol").
+    """
+
+    def _install_fake_ibkr_capturing_order(self, monkeypatch, captured):
+        from ibapi.client import EClient
+
+        def fake_connect(self, host, port, clientId):
+            self.nextValidId(1)
+
+        def fake_run(self):
+            pass
+
+        def fake_place_order(self, orderId, contract, order):
+            captured.append({
+                "symbol": contract.symbol, "action": order.action,
+                "algoStrategy": getattr(order, "algoStrategy", ""),
+                "algoParams": getattr(order, "algoParams", []),
+                "totalQuantity": order.totalQuantity,
+            })
+            self.orderStatus(orderId, "Filled", order.totalQuantity, 0, 100.0)
+
+        def fake_disconnect(self):
+            pass
+
+        monkeypatch.setattr(EClient, "connect", fake_connect)
+        monkeypatch.setattr(EClient, "run", fake_run)
+        monkeypatch.setattr(EClient, "placeOrder", fake_place_order)
+        monkeypatch.setattr(EClient, "disconnect", fake_disconnect)
+
+    def test_enabled_sets_pctvol_algo_strategy_and_max_pct_vol_param(self, monkeypatch, tmp_path):
+        import momentum_trading.execution.live_signal as ls
+        from ibapi.tag_value import TagValue
+        captured = []
+        self._install_fake_ibkr_capturing_order(monkeypatch, captured)
+
+        orders = {"BUY1": {"action": "BUY", "shares": 5}}
+        ls.place_orders_ibkr(orders, port=9999, alerts_log_path=str(tmp_path / "alerts_log.csv"),
+                              use_participation_rate_limit=True, max_participation_pct=0.1)
+
+        order = captured[0]
+        assert order["algoStrategy"] == "PctVol"
+        assert len(order["algoParams"]) == 1
+        tag = order["algoParams"][0]
+        assert isinstance(tag, TagValue)
+        assert tag.tag == "pctVol"
+        assert tag.value == "0.1"
+
+    def test_disabled_by_default_leaves_algo_strategy_unset(self, monkeypatch, tmp_path):
+        # Regression: use_participation_rate_limit=False (the default) must be byte-identical
+        # to before this feature existed, no algoStrategy/algoParams set on the order at all.
+        import momentum_trading.execution.live_signal as ls
+        captured = []
+        self._install_fake_ibkr_capturing_order(monkeypatch, captured)
+
+        orders = {"BUY1": {"action": "BUY", "shares": 5}}
+        ls.place_orders_ibkr(orders, port=9999, alerts_log_path=str(tmp_path / "alerts_log.csv"))
+
+        order = captured[0]
+        assert order["algoStrategy"] == ""
+        assert not order["algoParams"]  # ibapi's own Order default is None, not []
+
+    def test_applies_to_every_ticker_in_the_batch(self, monkeypatch, tmp_path):
+        import momentum_trading.execution.live_signal as ls
+        captured = []
+        self._install_fake_ibkr_capturing_order(monkeypatch, captured)
+
+        orders = {
+            "BUY1": {"action": "BUY", "shares": 5},
+            "SELL1": {"action": "SELL", "shares": 3},
+        }
+        ls.place_orders_ibkr(orders, port=9999, alerts_log_path=str(tmp_path / "alerts_log.csv"),
+                              use_participation_rate_limit=True, max_participation_pct=0.25)
+
+        assert len(captured) == 2
+        for order in captured:
+            assert order["algoStrategy"] == "PctVol"
+            assert order["algoParams"][0].value == "0.25"
+
+    def test_combined_with_extended_hours_falls_back_to_rth_only_order(self, monkeypatch, tmp_path, caplog):
+        # Real, confirmed IBKR constraint found during Epic 4's own live paper-account
+        # verification: an algoStrategy-bearing order combined with outsideRth=True is
+        # REJECTED outright (error 201, "Only RTH orders are allowed for IB algorithmic
+        # orders"). When both are configured together, the extended-hours LMT/outsideRth
+        # conversion must be skipped, the order stays a plain RTH-only order (still carrying
+        # the PctVol algo), queuing at the broker until the next session rather than being
+        # rejected.
+        import momentum_trading.execution.live_signal as ls
+        from ibapi.client import EClient
+        captured = []
+
+        def fake_connect(self, host, port, clientId):
+            self.nextValidId(1)
+
+        def fake_run(self):
+            pass
+
+        def fake_place_order(self, orderId, contract, order):
+            captured.append({
+                "orderType": order.orderType, "outsideRth": order.outsideRth,
+                "algoStrategy": getattr(order, "algoStrategy", ""),
+            })
+            self.orderStatus(orderId, "Filled", order.totalQuantity, 0, 100.0)
+
+        def fake_disconnect(self):
+            pass
+
+        monkeypatch.setattr(EClient, "connect", fake_connect)
+        monkeypatch.setattr(EClient, "run", fake_run)
+        monkeypatch.setattr(EClient, "placeOrder", fake_place_order)
+        monkeypatch.setattr(EClient, "disconnect", fake_disconnect)
+
+        orders = {"BUY1": {"action": "BUY", "shares": 5}}
+        with caplog.at_level("WARNING"):
+            ls.place_orders_ibkr(orders, port=9999, expected_prices={"BUY1": 100.0},
+                                  alerts_log_path=str(tmp_path / "alerts_log.csv"),
+                                  allow_extended_hours=True,
+                                  use_participation_rate_limit=True, max_participation_pct=0.1)
+
+        order = captured[0]
+        assert order["orderType"] == "MKT"
+        assert order["outsideRth"] is False
+        assert order["algoStrategy"] == "PctVol"
+        assert any("IBKR rejects algo orders" in r.message for r in caplog.records)
+
+
 class TestExtendedHoursOrders:
     """
     IBKR/exchanges reject plain MKT orders outside regular trading hours (error 201, "Exchange

@@ -1060,6 +1060,17 @@ that tests enforce, don't casually violate these when editing:
   shares). Docker reproduced the identical capped weights and, running after the native position
   already existed, correctly read back real broker state and HELD rather than duplicate-buying,
   an unplanned bonus confirmation of position-aware idempotency working correctly end-to-end.
+  `cost_edge_hurdle_multiplier`/`use_participation_rate_limit`/`max_participation_pct` (Epic 4,
+  "Institutional Risk-Management Features" plan, the FINAL epic of this 4-epic program, closes
+  the full 24-item institutional risk-practice audit) are the two "Execution Quality" fields;
+  `cost_edge_hurdle_multiplier` is gated by plain field-presence (`is not None`), matching
+  `max_bid_ask_spread_pct`'s own exact convention (the SAME real-time-quote-gate family, not
+  `enabled_risk_strategies`, a deliberate revision of this program's own Epic-1-era assumption
+  before the "two gating conventions" precedent had been established by Epics 1-3);
+  `use_participation_rate_limit` is a plain bool, matching `attach_broker_stop_loss`/
+  `attach_broker_trailing_stop`'s own convention. See `execution/live_signal.py`'s own bullet
+  below for both mechanisms' implementation detail and `docs/RISK_CONSTRAINTS.md`'s "Cost-vs-Edge
+  Hurdle Filter"/"Execution Participation-Rate Limits" sections.
 - **`execution/live_signal.py`**, live signal/order generation, IBKR integration (`ibapi`
   `EClient`/`EWrapper`, not a third-party wrapper), multi-portfolio orchestration, FIFO P&L,
   hash-chained audit log. `fetch_ohlcv_for_tickers()` is distinct from `fetch_live_prices()`,
@@ -1191,6 +1202,73 @@ that tests enforce, don't casually violate these when editing:
   spread drops into the EXISTING `dropped_orders` mechanism (`DROPPED_WIDE_SPREAD`, same merge
   pattern as `DROPPED_FRACTIONAL`/`DROPPED_INSUFFICIENT_CASH`), don't just `continue` without
   recording it there.
+  `should_drop_for_cost_edge_hurdle(spread_pct, signal_score, multiplier)` (Epic 4,
+  "Institutional Risk-Management Features" plan, "Cost-vs-Edge Hurdle Filter") is a pure
+  function, same "pure math separated from I/O" precedent `compute_spread_pct()` establishes:
+  `round_trip_cost_estimate = 2 * spread_pct` (pay the spread once entering, once exiting)
+  compared against `multiplier * abs(signal_score)`, a momentum-strength proxy, not a guaranteed
+  forward return, drops (returns `True`) only when the estimated cost exceeds that hurdle.
+  `signal_score is None` (a hand-built exit order from one of `daily_runner.py`'s three
+  auto-exit checks, none of which construct that key today, an existing, pre-Epic-4 boundary
+  this epic deliberately doesn't change) always returns `False`, "can't evaluate" is treated as
+  "fine," never an automatic drop, the same precedent `fetch_bid_ask_spread()`'s own `None`-quote
+  handling already establishes. The pre-existing spread-gate block's quote fetch was restructured
+  to a single `if max_bid_ask_spread_pct is not None or cost_edge_hurdle_multiplier is not None:`
+  guard (one `fetch_bid_ask_spread()` call per ticker regardless of how many of the two checks
+  are enabled, zero new IBKR calls when both stay `None`), then two independent, sequential
+  checks against that one quote: the spread ceiling first (unchanged behavior/log lines when
+  only it is set), the hurdle second (only reached if the spread check didn't already drop the
+  order), `DROPPED_COST_EXCEEDS_EDGE` + a matching `COST_EXCEEDS_EDGE` `log_alert()`, same shape
+  as `DROPPED_WIDE_SPREAD`. Only wired at `run()`'s own call site (matching
+  `max_bid_ask_spread_pct`'s existing real scope, and a real necessity: the three
+  `daily_runner.py` auto-exit paths' hand-built order dicts have no `signal_score` key at all,
+  so the hurdle would always no-op there regardless).
+  `use_participation_rate_limit`/`max_participation_pct` (Epic 4, "Execution Participation-Rate
+  Limits") delegate entirely to IBKR's own native `PctVol` execution algo, set directly on the
+  PARENT `ib_order` (attribute-assignment style, `ib_order.algoStrategy = "PctVol"`,
+  `ib_order.algoParams = [TagValue("pctVol", str(max_participation_pct))]`, right after
+  `ib_order.tif = "DAY"`), not a bracket child, no `parentId`/`transmit` linkage needed, it's an
+  execution-style attribute on the order itself, requiring a new `from ibapi.tag_value import
+  TagValue` lazy import alongside this function's existing `ibapi` imports. Minimal viable
+  parameter set (`pctVol` only); IBKR's own `AvailableAlgoParams.FillPctVolParams()` sample
+  helper also supports optional `startTime`/`endTime`/`noTakeLiq` tags, deliberately not
+  included in this first version. Deliberately NOT local TWAP/multi-run slicing: this app is a
+  stateless once-daily cron job (`daily_runner.py`, `docker-entrypoint.sh`'s
+  `DAILY_RUNNER_CRON`) with no intraday scheduling loop to build real slicing against, IBKR's
+  own algo handles the real-time in-session execution instead, a considered choice, not a
+  limitation stumbled into.
+  **Two real bugs found and fixed via live paper-account testing, run 2026-08-05, neither caught
+  by the mocked-IBKR test suite alone**: (1) the field is named `max_participation_pct`, and the
+  first implementation guessed the IBKR wire-protocol `TagValue` tag should match
+  (`"maxPctVol"`), a real, confirmed wrong guess, rejected outright by a real submission (`IBKR
+  error 443: Unknown algo attribute:maxPctVol`); IBKR's actual documented tag is `pctVol`, fixed
+  by changing only the `TagValue`'s tag string, the project's own field name is unchanged. (2)
+  after fixing (1), a second real submission (with `allow_extended_hours` also set, the test ran
+  after market close) was again rejected (`IBKR error 201: Only RTH orders are allowed for IB
+  algorithmic orders`), a genuine IBKR constraint not anticipated in the epic's own design: an
+  `algoStrategy`-bearing order cannot combine with `outsideRth=True`. Fixed: the extended-hours
+  LMT/`outsideRth` conversion block in `place_orders_ibkr()` is now skipped entirely whenever
+  `use_participation_rate_limit` is set, falling through to a plain RTH-only `MKT` order (still
+  carrying the `PctVol` algo), which correctly queues at the broker until the next session opens,
+  the same "no reference price" fallback shape this function already had. After both fixes, a
+  real resubmission (native AND Docker, port 7497) was accepted by IBKR with no error
+  (informational code `399`, the same pre-existing documented after-hours queuing behavior any
+  RTH-only order gets). **Disclosed limitation, not glossed over**: both live tests ran after
+  regular trading hours, so the actual intraday percentage-of-volume fill behavior, and
+  composition with `attach_broker_stop_loss`/`attach_broker_trailing_stop` brackets on the same
+  parent order, were never observed, only that submission itself succeeds; both remain open,
+  honestly disclosed verification gaps for future work. See `docs/RISK_CONSTRAINTS.md`'s
+  "Cost-vs-Edge Hurdle Filter"/"Execution Participation-Rate Limits" sections for the full
+  writeup, including the Cost-vs-Edge Hurdle's own real finding (this same paper account has no
+  real-time market-data subscription, so the DROP path itself was exercised only by the mocked
+  test suite, not this live run, the same pre-existing operational dependency
+  `max_bid_ask_spread_pct` already documented).
+  **Full pytest suite, run 2026-08-05**: 1055 passed (up from 1032 pre-Epic-4, +23 new tests),
+  zero regressions, native and inside a Docker image rebuilt with this epic's code (confirmed via
+  container-side grep that the `pctVol` fix landed, plus a matching dry-run smoke test producing
+  byte-identical output to the native run). This closes the full 24-item institutional
+  risk-management audit (`docs/RISK_CONSTRAINTS.md`'s "Institutional risk-practice audit"
+  table), the final epic of this 4-epic program; no further epics are planned.
   `run()`'s picks-selection call was rerouted through `core/strategy_signals.py`'s
   `resolve_strategy_scores()`/`resolve_strategy_picks()` (a LAZY, function-local import inside
   `run()`'s body, breaking an otherwise-circular import since `core/strategy_signals.py` itself

@@ -750,6 +750,215 @@ class TestScopeOverlappingHoldings:
         assert orders["XLF"]["action"] != "SELL"
 
 
+class TestTickerOwnershipRegistry:
+    """
+    Epic 5 ("Cross-Config Ticker Safety & Portfolio Snapshot Accuracy Fixes" plan), Story 5.1:
+    the cross-config-file counterpart to TestScopeOverlappingHoldings above. check_ticker_
+    overlap()/scope_overlapping_holdings() only ever see ONE process's in-memory `portfolios`
+    dict from one loaded config.yaml; this registry closes the real, confirmed incident where a
+    DIFFERENT config file sharing a ticker with the main config caused a real paper-account
+    destructive sell (Epic 2's own verification, a throwaway NVDA test config).
+    """
+
+    def test_write_then_read_round_trip(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(daily_runner, "data_dir", lambda: tmp_path)
+        daily_runner.update_ticker_ownership_registry("C:/a/config.yaml", "portA", ["SPY", "QQQ"])
+        registry = daily_runner.read_ticker_ownership_registry()
+        assert set(registry.keys()) == {"SPY", "QQQ"}
+        assert "C:/a/config.yaml||portA" in registry["SPY"]
+        assert "C:/a/config.yaml||portA" in registry["QQQ"]
+
+    def test_self_cleaning_drops_tickers_no_longer_configured(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(daily_runner, "data_dir", lambda: tmp_path)
+        daily_runner.update_ticker_ownership_registry("C:/a/config.yaml", "portA", ["SPY", "QQQ"])
+        registry = daily_runner.update_ticker_ownership_registry("C:/a/config.yaml", "portA", ["SPY"])
+        assert "SPY" in registry
+        assert "QQQ" not in registry
+
+    def test_self_cleaning_does_not_touch_other_owners_claims(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(daily_runner, "data_dir", lambda: tmp_path)
+        daily_runner.update_ticker_ownership_registry("C:/a/config.yaml", "portA", ["SPY"])
+        daily_runner.update_ticker_ownership_registry("C:/b/config.yaml", "portB", ["SPY"])
+        # portA drops SPY entirely; portB's own claim on SPY must survive untouched.
+        registry = daily_runner.update_ticker_ownership_registry("C:/a/config.yaml", "portA", [])
+        assert "SPY" in registry
+        assert "C:/b/config.yaml||portB" in registry["SPY"]
+        assert "C:/a/config.yaml||portA" not in registry["SPY"]
+
+    def test_stale_entries_are_pruned(self, tmp_path, monkeypatch):
+        import json as _json
+        from datetime import datetime, timedelta
+        monkeypatch.setattr(daily_runner, "data_dir", lambda: tmp_path)
+        # Seed the registry directly with a stale (31-day-old) claim from a different owner.
+        path = tmp_path / "ticker_ownership_registry.json"
+        stale_ts = (datetime.now() - timedelta(days=31)).isoformat()
+        path.write_text(_json.dumps({"OLD": {"C:/gone/config.yaml||portGone": stale_ts}}))
+        # Any write (even an unrelated one) prunes stale entries older than 30 days.
+        registry = daily_runner.update_ticker_ownership_registry("C:/a/config.yaml", "portA", ["SPY"])
+        assert "OLD" not in registry
+
+    def test_write_is_atomic_no_tmp_file_left_behind(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(daily_runner, "data_dir", lambda: tmp_path)
+        daily_runner.update_ticker_ownership_registry("C:/a/config.yaml", "portA", ["SPY"])
+        assert not (tmp_path / "ticker_ownership_registry.json.tmp").exists()
+        assert (tmp_path / "ticker_ownership_registry.json").exists()
+
+    def test_missing_registry_file_reads_as_empty_dict_not_none(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(daily_runner, "data_dir", lambda: tmp_path)
+        registry = daily_runner.read_ticker_ownership_registry()
+        assert registry == {}
+
+    def test_corrupt_registry_read_retries_then_returns_none_and_fires_alert(self, tmp_path, monkeypatch, caplog):
+        monkeypatch.setattr(daily_runner, "data_dir", lambda: tmp_path)
+        path = tmp_path / "ticker_ownership_registry.json"
+        path.write_text("{not valid json")
+        alerts_calls = []
+        monkeypatch.setattr(daily_runner, "log_alert",
+                             lambda *a, **k: alerts_calls.append((a, k)))
+        with caplog.at_level("WARNING"):
+            registry = daily_runner.read_ticker_ownership_registry()
+        assert registry is None
+        assert len(alerts_calls) == 1
+        assert alerts_calls[0][0][1] == "TICKER_OWNERSHIP_REGISTRY_UNREADABLE"
+
+    def test_corrupt_registry_write_self_heals(self, tmp_path, monkeypatch):
+        # Unlike the read-only path, a WRITE is a repair opportunity: a corrupt file is treated
+        # as an empty baseline and overwritten cleanly, not propagated as a None sentinel.
+        monkeypatch.setattr(daily_runner, "data_dir", lambda: tmp_path)
+        path = tmp_path / "ticker_ownership_registry.json"
+        path.write_text("{not valid json")
+        registry = daily_runner.update_ticker_ownership_registry("C:/a/config.yaml", "portA", ["SPY"])
+        assert registry == {"SPY": {"C:/a/config.yaml||portA": registry["SPY"]["C:/a/config.yaml||portA"]}}
+
+
+class TestDetectCrossConfigTickerOverlap:
+    """
+    Pure detection logic: same {ticker: [claim labels]} shape check_ticker_overlap()'s existing
+    same-file overlap map returns, so it can be merged directly into that dict before calling
+    scope_overlapping_holdings(), reusing its existing capping logic unchanged.
+    """
+
+    def test_no_overlap_when_only_self_claims_ticker(self):
+        registry = {"SPY": {"C:/a/config.yaml||portA": "2026-01-01T00:00:00"}}
+        overlap = daily_runner.detect_cross_config_ticker_overlap(
+            registry, ["SPY"], "C:/a/config.yaml", "portA",
+        )
+        assert overlap == {}
+
+    def test_overlap_detected_when_a_different_config_claims_the_same_ticker(self):
+        registry = {"SPY": {"C:/b/config.yaml||portB": "2026-01-01T00:00:00"}}
+        overlap = daily_runner.detect_cross_config_ticker_overlap(
+            registry, ["SPY"], "C:/a/config.yaml", "portA",
+        )
+        assert overlap == {"SPY": ["C:/b/config.yaml||portB"]}
+
+    def test_ticker_not_in_own_list_is_never_checked(self):
+        registry = {"SPY": {"C:/b/config.yaml||portB": "2026-01-01T00:00:00"}}
+        overlap = daily_runner.detect_cross_config_ticker_overlap(
+            registry, ["QQQ"], "C:/a/config.yaml", "portA",
+        )
+        assert overlap == {}
+
+    def test_none_registry_conservatively_flags_every_own_ticker(self):
+        # Design Decision 3: registry unavailable -> assume every configured ticker could be
+        # shared, favor safety over availability, the same "unrecognized -> untouched" precedent
+        # _classify_orphaned_tickers() already establishes.
+        overlap = daily_runner.detect_cross_config_ticker_overlap(
+            None, ["SPY", "QQQ"], "C:/a/config.yaml", "portA",
+        )
+        assert set(overlap.keys()) == {"SPY", "QQQ"}
+
+
+class TestCrossConfigOverlapIntegration:
+    """
+    Reproduces the real 2026-08-05-class incident's shape SAFELY (no real broker, no real
+    portfolios): two DIFFERENT config identities both configuring the same ticker. Before this
+    fix, config B's own scope_overlapping_holdings() call would never have known config A even
+    existed (check_ticker_overlap() alone only sees ONE process's in-memory portfolios dict).
+    """
+
+    def _write_log(self, tmp_path, rows, name="log.csv"):
+        path = tmp_path / name
+        with open(path, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["timestamp", "ticker", "action", "shares", "price", "reason", "dry_run"])
+            w.writerows(rows)
+        return str(path)
+
+    def test_cross_file_claim_caps_a_configs_view_of_a_shared_ticker(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(daily_runner, "data_dir", lambda: tmp_path)
+        # Config A (e.g. the real config.yaml's portfolio1) claims and holds C.
+        daily_runner.update_ticker_ownership_registry("C:/config.yaml", "portfolio1", ["C"])
+
+        # Config B (a different file, e.g. a throwaway test config) also configures C, and is
+        # run --live SECOND. It has never bought C itself (empty trade log).
+        log_path = self._write_log(tmp_path, [])
+        registry = daily_runner.read_ticker_ownership_registry()
+        cross_file_overlap = daily_runner.detect_cross_config_ticker_overlap(
+            registry, ["C"], "C:/test_config.yaml", "portfolio_b",
+        )
+        assert "C" in cross_file_overlap  # the cross-file hit is correctly detected
+
+        same_file_overlap = {}  # single-portfolio config B, nothing to detect within-file
+        iter_overlap = {**same_file_overlap, **cross_file_overlap}
+
+        # The REAL broker position (belongs to config A's portfolio1, e.g. 66 shares).
+        broker_current_positions = {"C": {"shares": 66.0, "avg_entry_price": 50.0}}
+        scoped, capped = daily_runner.scope_overlapping_holdings(
+            broker_current_positions, ["C"], iter_overlap, log_path, "portfolio_b",
+        )
+        # Config B's own trade log has zero history for C, so its view is correctly capped to
+        # 0, preventing exactly the destructive full-liquidation sell the real incident caused.
+        assert scoped["C"]["shares"] == pytest.approx(0.0)
+        assert capped == ["C"]
+
+    def test_same_file_and_cross_file_overlap_do_not_interfere(self, tmp_path, monkeypatch):
+        # A ticker overlapping WITHIN one config file must still be capped exactly as before,
+        # unaffected by an unrelated cross-file registry entry for a DIFFERENT ticker.
+        monkeypatch.setattr(daily_runner, "data_dir", lambda: tmp_path)
+        daily_runner.update_ticker_ownership_registry("C:/other.yaml", "other_port", ["ZZZ"])
+        registry = daily_runner.read_ticker_ownership_registry()
+        cross_file_overlap = daily_runner.detect_cross_config_ticker_overlap(
+            registry, ["XLF", "ZZZ"], "C:/config.yaml", "portfolio1",
+        )
+        assert set(cross_file_overlap.keys()) == {"ZZZ"}
+
+        same_file_overlap = {"XLF": ["portfolio1", "portfolio2"]}
+        iter_overlap = {**same_file_overlap, **cross_file_overlap}
+
+        log_path = self._write_log(tmp_path, [])
+        current_positions = {
+            "XLF": {"shares": 10.0, "avg_entry_price": 56.0},
+            "ZZZ": {"shares": 5.0, "avg_entry_price": 20.0},
+        }
+        scoped, capped = daily_runner.scope_overlapping_holdings(
+            current_positions, ["XLF", "ZZZ"], iter_overlap, log_path, "portfolio1",
+        )
+        assert set(capped) == {"XLF", "ZZZ"}
+
+    def test_iter_overlap_merge_does_not_mutate_the_shared_same_file_overlap_dict(self):
+        # Design Decision 4's found bug: `overlap = {**overlap, **cross_file_overlap}` would
+        # rebind the loop-hoisted `overlap` name itself, leaking one portfolio's cross-file
+        # entries into a LATER portfolio's iteration (a Python for-loop doesn't scope). The
+        # fix uses a FRESH local name (`iter_overlap`) each iteration; this pins that the
+        # ORIGINAL same-file `overlap` dict is never mutated by the merge.
+        overlap = {"XLF": ["portfolio1", "portfolio2"]}
+        original_overlap_id = id(overlap)
+        original_overlap_copy = dict(overlap)
+
+        cross_file_overlap_a = {"AAA": ["C:/a.yaml||porta"]}
+        iter_overlap_a = {**overlap, **cross_file_overlap_a}
+        assert iter_overlap_a != overlap
+        assert id(overlap) == original_overlap_id
+        assert overlap == original_overlap_copy  # untouched by the first iteration's merge
+
+        cross_file_overlap_b = {"BBB": ["C:/b.yaml||portb"]}
+        iter_overlap_b = {**overlap, **cross_file_overlap_b}
+        # portfolio B's own iter_overlap must NOT contain portfolio A's cross-file-only entry.
+        assert "AAA" not in iter_overlap_b
+        assert overlap == original_overlap_copy  # still untouched after the second iteration
+
+
 class TestAlertFallback:
     """
     If SMTP isn't configured, an alert must still be VISIBLE (as an ERROR log

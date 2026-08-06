@@ -1338,6 +1338,7 @@ def log_signal_rankings(full_signal_universe: dict, orders: dict, dry_run: bool,
 def write_portfolio_snapshot(
     name: str, current_positions: dict, latest_prices: dict, total_value: float, cash: float,
     benchmark_ticker: str | None = None, snapshot_dir: str = str(data_dir()),
+    scoped_tickers: set[str] | None = None,
 ) -> str:
     """
     Writes a single summary row capturing "where things stand today", distinct
@@ -1359,6 +1360,21 @@ def write_portfolio_snapshot(
     latest_prices : dict {ticker: float}
     total_value, cash : float
     benchmark_ticker : str, optional, e.g. cfg.regime_benchmark ("SPY")
+    scoped_tickers : set[str], optional (Epic 5, "Cross-Config Ticker Safety & Portfolio
+        Snapshot Accuracy Fixes" plan, Story 5.2). None (default) is byte-identical to this
+        function's behavior before this param existed: every ticker in `current_positions` with
+        a usable price contributes to `positions_value`/`unrealized_pnl`/`position_details`, an
+        implicit, price-availability-only scoping that DOUBLE-COUNTS a ticker legitimately
+        shared between two portfolios (the documented TICKER_OVERLAP scenario,
+        check_ticker_overlap()), since `current_positions` here can be the broker's WHOLE,
+        unfiltered account. When provided, a ticker not in `scoped_tickers` is skipped entirely,
+        the SAME EXPLICIT membership check `daily_runner.py`'s `_compute_scoped_positions_value()`
+        already established for the separate `TOTAL_VALUE_DRIFT` warning
+        (`set(tickers) | set(confirmed_orphaned)`, that function's own caller passes the
+        identical union here too), so this function's own `positions_value` now matches that
+        one for the same run. `n_positions`/`position_details` are built from the SAME loop, so
+        they're fixed as an intentional side effect too, not just `positions_value`/
+        `unrealized_pnl`.
 
     Returns
     -------
@@ -1372,6 +1388,8 @@ def write_portfolio_snapshot(
     unrealized_pnl = 0.0
     position_details = []
     for ticker, pos in current_positions.items():
+        if scoped_tickers is not None and ticker not in scoped_tickers:
+            continue
         shares = pos.get("shares", 0)
         entry = pos.get("avg_entry_price")
         price = latest_prices.get(ticker)

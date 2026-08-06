@@ -529,24 +529,39 @@ answer whether the strategy actually works.
   `OVERLAPPING_TICKER_SCOPED` alert fires specifically when the cap actually activates on a
   given run.
 - **A real, confirmed cross-CONFIG-FILE variant of the same destructive-sell class, found during
-  Epic 2's own live paper-account verification (2026-08-05), NOT fixed, still open**: the fix
-  above (`scope_overlapping_holdings()`) only protects against ticker overlap BETWEEN PORTFOLIOS
-  WITHIN ONE LOADED `config.yaml`, confirmed by reading `check_ticker_overlap()` directly, it
-  inspects only the currently-loaded file's own `portfolios:` dict. It has no way to know about a
-  ticker configured in a DIFFERENT config file/process that has also traded the same real IBKR
-  account. Confirmed directly, not theoretical: a throwaway `--config <test>.yaml` used to verify
-  the new ATR-Based Trailing Stop feature (a single-ticker test portfolio for `NVDA`, a ticker
-  also configured in this project's own real `config.yaml`'s `portfolio1`) saw the REAL,
-  whole-account `NVDA` position (66 shares, from real `portfolio1` activity) as entirely its own
-  via `get_ibkr_positions()`'s whole-account result, and its own small target weight drove a real
-  (paper account, no financial loss) full-liquidation SELL of all 66 shares. Confirmed harmless
-  in this specific instance only because it was a paper account. **No code fix exists yet**: the
-  practical mitigation is procedural, never point `--config` at a file whose tickers overlap any
-  OTHER config file/portfolio trading the same real account, this project's own throwaway
-  verification configs are now built ticker-disjoint from `config.yaml`'s real portfolios for
-  exactly this reason. See `docs/RISK_CONSTRAINTS.md`'s "ATR-Based Trailing Stop" section for the
-  full incident writeup and what a genuine fix would need (a process-external, persisted registry
-  of which config/portfolio owns which ticker, out of scope for the epic that found this).
+  Epic 2's own live paper-account verification (2026-08-05), FIXED in Epic 5 ("Cross-Config
+  Ticker Safety & Portfolio Snapshot Accuracy Fixes" plan, 2026-08-05)**: the same-file fix above
+  (`scope_overlapping_holdings()`) only ever protected against ticker overlap BETWEEN PORTFOLIOS
+  WITHIN ONE LOADED `config.yaml`, confirmed by reading `check_ticker_overlap()` directly, it only
+  inspects the currently-loaded file's own `portfolios:` dict, with no way to know about a ticker
+  configured in a DIFFERENT config file/process trading the same real IBKR account. Confirmed
+  directly, not theoretical: a throwaway `--config <test>.yaml` used to verify the ATR-Based
+  Trailing Stop feature (a single-ticker test portfolio for `NVDA`, a ticker also configured in
+  this project's own real `config.yaml`'s `portfolio1`) saw the REAL, whole-account `NVDA`
+  position (66 shares, from real `portfolio1` activity) as entirely its own via
+  `get_ibkr_positions()`'s whole-account result, and its own small target weight drove a real
+  (paper account, no financial loss) full-liquidation SELL of all 66 shares. **Fixed**: a
+  persisted, cross-process `data/ticker_ownership_registry.json` registry (`daily_runner.py`'s
+  `update_ticker_ownership_registry()`/`detect_cross_config_ticker_overlap()`), guarded by the
+  existing `acquire_log_lock()` primitive, written atomically, read failures fail SAFE
+  (conservative capping, not silent-empty). See `docs/RISK_CONSTRAINTS.md`'s "Cross-Config-File
+  Ticker Ownership Registry" section for the full mechanism and its own honestly-disclosed
+  residual risk: this closes the documented stale/infrequently-run-config incident class above,
+  it does NOT close a true simultaneous-execution race between two config processes launched
+  within the same few seconds, that remains a real, stated, open scope boundary, not a claimed
+  complete fix.
+- **`positions_value`/`unrealized_pnl`/`cash` in the portfolio snapshot CSV (and the email
+  report's "Cash"/"Unrealized P&L" rows) double-counted a ticker legitimately shared between two
+  portfolios (the TICKER_OVERLAP scenario), a real, confirmed bug distinct from the destructive-
+  sell class above, purely a reporting-accuracy issue with ZERO trading-safety blast radius
+  (confirmed: no circuit breaker, drawdown calc, or order sizing reads `positions_value`, and
+  Total Return/CAGR/Sharpe/Sortino/Max Drawdown are all built from `portfolio_period_return`,
+  derived independently from `total_value`). **Fixed in Epic 5**: `write_portfolio_snapshot()`
+  gained an explicit `scoped_tickers` param, and `daily_runner.py`'s own snapshot block now
+  reuses the already-existing `_compute_scoped_positions_value()` (previously used only for the
+  `TOTAL_VALUE_DRIFT` warning), so both computations agree for the same run. See
+  `docs/RISK_CONSTRAINTS.md`'s "Cross-Config-File Ticker Ownership Registry" section context and
+  `CLAUDE.md`'s `execution/live_signal.py` bullet for the full writeup.
 - **Execution Participation-Rate Limits (`use_participation_rate_limit`) has two real, honestly
   disclosed verification gaps, found during Epic 4's own live paper-account testing
   (2026-08-05), not glossed over**: (1) the actual INTRADAY percentage-of-volume fill behavior

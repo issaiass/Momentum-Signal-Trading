@@ -1705,6 +1705,37 @@ that tests enforce, don't casually violate these when editing:
   trailing-stop block (see that file's own bullet for the shared design rationale); this
   function's own bullet lives under `daily_runner.py` below, alongside its two siblings
   `check_and_handle_stop_losses()`/`check_and_handle_time_stops()`.
+  `write_portfolio_snapshot()` gained an optional `scoped_tickers: set[str] | None = None` param
+  (Epic 5, "Cross-Config Ticker Safety & Portfolio Snapshot Accuracy Fixes" plan, Story 5.2),
+  `None` (default) byte-identical to this function's behavior before this param existed. Closes a
+  real, confirmed double-counting bug found while auditing this codebase for remaining risk-
+  management gaps: this function's own per-ticker loop (building `positions_value`/
+  `unrealized_pnl`/`position_details`) only ever checked `price is None or shares <= 0`, no
+  EXPLICIT ticker-membership check, so a ticker legitimately shared between two portfolios (the
+  documented `TICKER_OVERLAP` scenario) got double-counted into BOTH portfolios' own snapshot CSV
+  whenever `current_positions` was the broker's whole-account, unfiltered view. Confirmed via
+  exploration to have ZERO trading-safety blast radius before fixing it: no circuit breaker,
+  drawdown calculation, or order-sizing code reads `positions_value`, and none of
+  `since_inception_performance()`/`compare_to_benchmark()`/`daily_window_comparison()`/
+  `monthly_window_comparison()` (`core/functions_quant_extensions.py`) read it either, they're
+  all built from `portfolio_period_return`, itself derived independently from `total_value`. The
+  ONLY consumers of the inflated numbers were the CSV's own `positions_value`/`unrealized_pnl`
+  columns, the email report's "Cash"/"Unrealized P&L" rows (`interfaces/notifications.py`), and
+  the `STATUS` email command's raw snapshot dump, purely display/reporting, never a trading
+  decision. When `scoped_tickers` is provided, the existing loop additionally skips any ticker
+  not in that set, alongside its existing price/shares guard; since `n_positions`/
+  `position_details` are built from the SAME loop, they're fixed as an intentional, positive
+  side effect too, not just `positions_value`/`unrealized_pnl`. `daily_runner.py`'s own snapshot
+  block now passes `scoped_tickers=set(tickers) | set(confirmed_orphaned)`, the EXACT formula
+  `_compute_scoped_positions_value()` (`daily_runner.py`, previously used only for the
+  `TOTAL_VALUE_DRIFT` warning) already uses internally, and that same function now backs this
+  block's own local `positions_value`/`cash_estimate` computation too, replacing the old unscoped
+  `sum(p["shares"] * latest_prices.get(t, 0.0) for t, p in current_positions.items())`, so the
+  CSV's `positions_value` column and the snapshot block's `cash_estimate` are computed
+  identically for the same run, previously two subtly different implicit-scoping formulas. See
+  `docs/RISK_CONSTRAINTS.md`'s "Cross-Config-File Ticker Ownership Registry" section (this fix's
+  sibling in the same epic) and `daily_runner.py`'s own bullet above for the
+  `_compute_scoped_positions_value()` reuse.
 - **`risk/circuit_breaker.py`**, extracted from `daily_runner.py` with alerting
   dependency-injected (`alert_fn` param) specifically so `risk/` has zero import dependency on
   `interfaces/`, enforced by an AST-based test
@@ -1888,13 +1919,16 @@ that tests enforce, don't casually violate these when editing:
   cross-portfolio-sell risk this classification exists to prevent.
   `_compute_scoped_positions_value()` backs the `TOTAL_VALUE_DRIFT` WARNING (fixed/non-null
   `total_value` portfolios, `--live` only, `cfg.total_value_drift_warning_pct`, default `0.10`):
-  an EXPLICIT `set(tickers) | set(confirmed_orphaned)` intersection, deliberately NOT reusing
-  the pre-existing `positions_value`/`write_portfolio_snapshot()` computation, which was found
-  (during this work, not previously known) to double-count a ticker legitimately shared between
-  two portfolios under the documented `TICKER OVERLAP` warning, since it only scopes implicitly
-  via `latest_prices` price-availability, not an explicit ticker-membership check. That
-  pre-existing double-counting bug itself is NOT fixed here, out of scope, flag it before
-  touching `positions_value` or `write_portfolio_snapshot()` again. Only the anomalous-high side
+  an EXPLICIT `set(tickers) | set(confirmed_orphaned)` intersection, originally deliberately NOT
+  reused for the pre-existing `positions_value`/`write_portfolio_snapshot()` computation, which
+  was found (during this work, not previously known) to double-count a ticker legitimately shared
+  between two portfolios under the documented `TICKER OVERLAP` warning, since it only scopes
+  implicitly via `latest_prices` price-availability, not an explicit ticker-membership check.
+  **FIXED, Epic 5** ("Cross-Config Ticker Safety & Portfolio Snapshot Accuracy Fixes" plan): this
+  function is now REUSED directly for the per-portfolio loop's own `positions_value`/
+  `cash_estimate` computation, and `write_portfolio_snapshot()`'s call site passes the identical
+  `set(tickers) | set(confirmed_orphaned)` union via its new `scoped_tickers` param, see
+  `execution/live_signal.py`'s own bullet for the full mechanism. Only the anomalous-high side
   is checked (real positions exceeding the whole configured capital base), real per-portfolio
   cash can't be isolated on a shared IBKR account, so no attempt is made to reconstruct a full
   "total value," only the position side.
@@ -2200,16 +2234,113 @@ that tests enforce, don't casually violate these when editing:
   path (informational `error 399`, order correctly queued for next session, not a crash) and the
   `allow_extended_hours` real-fill path were exercised for real.
   **A real, confirmed cross-CONFIG-FILE ticker-overlap incident was found during this
-  verification, NOT fixed, still open**: `scope_overlapping_holdings()` only protects against
-  ticker overlap BETWEEN PORTFOLIOS WITHIN ONE LOADED `config.yaml` (confirmed by reading
-  `check_ticker_overlap()`, it inspects only the currently-loaded file's own portfolios), not
-  overlap between the currently-loaded config and ANY OTHER config file that has traded the same
-  real account. A throwaway single-ticker test config sharing a ticker (`NVDA`) with this
-  project's own real `portfolio1` saw the REAL whole-account position and generated a real
-  (paper, no financial loss) full-liquidation SELL of it. See `docs/RISK_CONSTRAINTS.md`'s "ATR-
-  Based Trailing Stop" section and `README.md`'s Known Gaps for the full incident writeup; the
-  practical mitigation until a real fix exists is procedural (never point `--config` at a file
-  whose tickers overlap another config trading the same account).
+  verification**: `scope_overlapping_holdings()` only protects against ticker overlap BETWEEN
+  PORTFOLIOS WITHIN ONE LOADED `config.yaml` (confirmed by reading `check_ticker_overlap()`, it
+  inspects only the currently-loaded file's own portfolios), not overlap between the
+  currently-loaded config and ANY OTHER config file that has traded the same real account. A
+  throwaway single-ticker test config sharing a ticker (`NVDA`) with this project's own real
+  `portfolio1` saw the REAL whole-account position and generated a real (paper, no financial
+  loss) full-liquidation SELL of it. **FIXED, Epic 5** ("Cross-Config Ticker Safety & Portfolio
+  Snapshot Accuracy Fixes" plan), see that epic's own bullet below for the full mechanism.
+  **Epic 5, "Cross-Config Ticker Safety & Portfolio Snapshot Accuracy Fixes"**: closes this
+  gap plus a second, independently-found, adjacent bug, both surfaced by a fresh audit fork
+  confirming the prior 4-epic institutional risk-management program's 24-item audit was fully
+  closed (6 stale "Planned" table-status labels in `docs/RISK_CONSTRAINTS.md` were also found and
+  fixed as part of confirming this, real work already shipped in Epics 1/2, just never relabeled
+  "Implemented"). `resolve_config_identity(config_path: str) -> str` (`core/paths.py`, pure)
+  canonicalizes `--config`'s raw CLI string (`str(Path(config_path).resolve())`), so
+  `config.yaml`/`./config.yaml`/an absolute path to the same file all key identically, closing a
+  real gap confirmed by exploration: `args.config` was never canonicalized anywhere before this.
+  A single shared JSON registry, `data_dir() / "ticker_ownership_registry.json"`, shape
+  `{ticker: {"<config_identity>||<portfolio>": "<ISO timestamp>"}}` (one file, not one-per-ticker,
+  avoids proliferation across potentially 100+ tickers/many deployments).
+  `update_ticker_ownership_registry(config_identity, portfolio, tickers)` (`daily_runner.py`) is
+  the write half, guarded by the EXISTING `acquire_log_lock()`/`release_log_lock()` primitive
+  (`core/audit_log.py`, the exact `acquire -> try/finally -> release` shape
+  `append_hash_chained_row()` already uses, reused verbatim, no new locking primitive invented),
+  written ATOMICALLY (temp file + `os.replace()`), unlike this project's bare-`write_text()`
+  idiom used for lower-stakes flag files (`peak_equity_*.txt`, `last_config_snapshot_*.json`): a
+  reader here must never see a torn file. For the calling `(config_identity, portfolio)` key,
+  removes its own stale entries for tickers no longer configured (self-cleaning, no explicit
+  deregistration step needed), upserts current ones with a fresh timestamp, and prunes ANY entry
+  (any owner) older than a fixed 30-day window, preventing an abandoned throwaway test config's
+  claim from leaking in this file forever. Called on EVERY invocation (dry-run AND `--live`),
+  early in the per-portfolio loop right after that portfolio's own `tickers` is resolved,
+  confirmed via design review this correctly excludes `--check-commands-only` (returns before the
+  per-portfolio loop even starts) and `TRIGGER_REPORT` (handled inside
+  `check_and_apply_email_commands()`, also outside the loop) without needing an extra guard.
+  `read_ticker_ownership_registry()` deliberately does NOT use this codebase's usual defensive
+  `try/except (JSONDecodeError, OSError): default = {}` idiom (used for `trailing_stop_hwm_*.json`
+  and similar low-stakes files): silently defaulting to an EMPTY registry on a read failure is
+  exactly the moment this mechanism's own safety net would disappear. Retries once (cheap
+  insurance against a genuinely torn read, though the atomic write above makes that near-
+  impossible from this project's own code), and on a second failure returns `None` (a sentinel,
+  distinguishable from a genuinely-empty `{}`), logging a new
+  `TICKER_OWNERSHIP_REGISTRY_UNREADABLE` `WARNING` alert.
+  `detect_cross_config_ticker_overlap(registry, tickers, config_identity, portfolio) ->
+  dict[str, list[str]]` (pure) returns the SAME `{ticker: [claim labels]}` shape
+  `check_ticker_overlap()`'s existing same-file overlap map already uses, so it merges directly
+  into that dict just before `scope_overlapping_holdings()` is called, that function's own
+  internals are COMPLETELY UNCHANGED, it only ever tests `ticker in overlap` to decide whether to
+  cap, feeding it a widened dict applies the exact same cap-to-own-FIFO-shares logic to a
+  cross-file hit too, zero duplicated capping logic. `registry is None` (the read-failure case)
+  triggers a CONSERVATIVE fallback: every ticker in this portfolio's own `tickers` is treated as
+  if it has an unknown cross-file claim, so the whole portfolio's view gets defensively capped for
+  that one run, the same "favor safety over availability" precedent
+  `_classify_orphaned_tickers()`'s "unrecognized -> untouched" and the whole-book
+  negative-momentum cash filter already establish elsewhere in this codebase. Wired into the
+  `--live` branch right after `get_ibkr_positions()`: `cross_file_overlap` is kept as ITS OWN
+  local variable (not merged away) so alert attribution can tell a cross-file hit apart from a
+  same-file one AFTER `scope_overlapping_holdings()` returns (`capped_tickers` alone can't
+  distinguish the two once merged), firing a new `CROSS_CONFIG_TICKER_OVERLAP_SCOPED` `WARNING`
+  for cross-file hits, keeping the pre-existing `OVERLAPPING_TICKER_SCOPED` unchanged for
+  same-file ones (a ticker can trigger both). The merge uses a FRESH local name each iteration
+  (`iter_overlap = {**overlap, **cross_file_overlap}`), a real design-review finding fixed before
+  it shipped: naively rebinding the loop-hoisted `overlap` variable itself
+  (`overlap = {**overlap, ...}`) would leak one portfolio's cross-file entries into a LATER
+  portfolio's iteration, since a Python `for` loop doesn't scope; pinned by a dedicated regression
+  test. **Explicit, honestly-disclosed residual risk, not a claimed complete fix**: this closes
+  the documented incident class (a stale/infrequently-run config's claim not being visible to
+  another process AT READ TIME), it does NOT close a true simultaneous-execution race, nothing
+  holds a lock across "read registry -> place broker orders," the same category of
+  disclosed-not-solved race `acquire_log_lock()`'s own docstring already discloses for its own,
+  narrower scope. See `docs/RISK_CONSTRAINTS.md`'s "Cross-Config-File Ticker Ownership Registry"
+  section.
+  **The second, independently-found bug this epic fixes**: `positions_value`/`unrealized_pnl`/
+  `cash` (feeding the portfolio snapshot CSV and the email report's "Cash"/"Unrealized P&L" rows)
+  double-counted a ticker legitimately shared between two portfolios (the pre-existing
+  `TICKER_OVERLAP` scenario), confirmed via exploration to have ZERO trading-safety blast radius
+  (no circuit breaker/drawdown calc/order sizing reads `positions_value`, and every performance
+  report metric is built from `portfolio_period_return`, derived independently from
+  `total_value`), purely a reporting-accuracy issue. See `execution/live_signal.py`'s own bullet
+  below for `write_portfolio_snapshot()`'s fix.
+  **Epic 5 real verification, run 2026-08-05**: full pytest suite 1077 passed (up from 1055
+  pre-Epic-5, +22 new tests), zero regressions. Dry-run smoke test: two throwaway configs
+  (ticker-disjoint from `config.yaml`'s real portfolios), `epic5_a`/`epic5_b`, both configuring
+  `C` (Citigroup), plus a same-file 2-portfolio config, `epic5_sf1`/`epic5_sf2`, both configuring
+  `KO` (Coca-Cola), confirmed the registry correctly records both configs' claims
+  (`data/ticker_ownership_registry.json`) with no crash. Live paper-account test (port 7497,
+  native AND inside a Docker container rebuilt with this epic's code): both configs ran `--live`
+  successfully against the real account, the registry persisted real claims from BOTH live
+  invocations, and `detect_cross_config_ticker_overlap()` (confirmed directly, both natively and
+  inside the container) correctly identified config B's claim on `C` as overlapping config A's,
+  including correctly cross-referencing entries written from a DIFFERENT environment (a real,
+  unplanned bonus confirmation: `data/` is bind-mounted between host and container, so the SAME
+  registry file correctly accumulated and served claims from native AND Docker runs
+  interchangeably, `docker-entrypoint.sh`'s existing bind-mount configuration, not something this
+  epic had to add). **Honestly disclosed limitation, not glossed over**: both live test windows
+  fell entirely outside RTH and the pre-market/after-hours window (confirmed via IBKR's own
+  informational error 399, "will not be placed until the next session"), so neither config's BUY
+  order actually filled this session, meaning the "prevents a destructive SELL against a REAL,
+  NON-ZERO shared broker position" outcome could not be observed with a live fill; the mocked/
+  synthetic integration tests (`TestCrossConfigOverlapIntegration`) are what actually prove that
+  specific outcome, this live run instead confirms every OTHER real piece of the mechanism
+  (registration, persistence, cross-environment sharing, detection) executes correctly against a
+  real IBKR connection. The same-file `epic5_sf1`/`epic5_sf2` config's snapshot CSVs
+  (`portfolio_snapshot_epic5_sf1.csv`/`_epic5_sf2.csv`) also wrote successfully with the new
+  `scoped_tickers` param with no crash, correctly showing `positions_value=0.00` (no fill yet, so
+  nothing to double-count this session, same disclosed limitation), the actual double-counting
+  fix itself is proven by `TestPortfolioSnapshot`'s synthetic unit tests, not this live run.
 
 **Config flow**: `config.yaml` (gitignored; copy from `config.example.yaml`) →
 `daily_runner.load_config()` builds one `BacktestConfig` per portfolio from

@@ -19,8 +19,9 @@ import json
 import logging
 import os
 import sys
+import time
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from pathlib import Path
 
@@ -44,8 +45,9 @@ from .core.smtp_auth import authenticate as authenticate_smtp, smtp_ready, conne
 from .core.audit_log import (
     log_alert, read_recent_alerts, ALERTS_LOG_PATH,
     compute_retention_window_days, rotate_hash_chained_log, rotate_plain_log,
+    acquire_log_lock, release_log_lock,
 )
-from .core.paths import data_dir, logs_dir
+from .core.paths import data_dir, logs_dir, resolve_config_identity
 from .core.technical_indicators import compute_latest_indicators, atr
 from .core.fundamentals import get_cached_or_fetch_fundamentals
 from .core.macro_data import get_cached_or_fetch_macro_indicators
@@ -234,12 +236,16 @@ def _compute_scoped_positions_value(current_positions: dict, latest_prices: dict
     """
     Real market value of just THIS portfolio's own positions (its configured tickers plus any
     confirmed_orphaned ones, see _classify_orphaned_tickers()), an EXPLICIT set intersection,
-    not the pre-existing positions_value/write_portfolio_snapshot() computation's implicit
-    (price-availability-only) scoping, which double-counts a ticker legitimately shared
+    not the OLD positions_value/write_portfolio_snapshot() computation's implicit
+    (price-availability-only) scoping, which double-counted a ticker legitimately shared
     between two portfolios under the documented TICKER OVERLAP scenario
-    (check_ticker_overlap()). Used only for the total_value drift warning, deliberately not
-    reused for the pre-existing positions_value/snapshot computation, that's a separate,
-    out-of-scope fix.
+    (check_ticker_overlap()). Originally used only for the TOTAL_VALUE_DRIFT warning below;
+    Epic 5 ("Cross-Config Ticker Safety & Portfolio Snapshot Accuracy Fixes" plan, Story 5.2)
+    closed that separate double-counting gap too, reusing this SAME function for the
+    per-portfolio loop's own positions_value/cash_estimate computation, and threading the
+    identical set(tickers) | set(confirmed_orphaned) union into write_portfolio_snapshot()'s
+    new scoped_tickers param so the CSV's own positions_value column matches this value exactly
+    for the same run.
     """
     scoped = set(tickers) | set(confirmed_orphaned)
     return sum(
@@ -295,6 +301,172 @@ def scope_overlapping_holdings(
             scoped[t] = {"shares": own_shares, "avg_entry_price": own["avg_entry_price"]}
             capped.append(t)
     return scoped, capped
+
+
+def _ticker_ownership_registry_path() -> Path:
+    return data_dir() / "ticker_ownership_registry.json"
+
+
+def _read_ticker_ownership_registry_unlocked(path: Path) -> dict | None:
+    """
+    A missing file is a normal, empty-registry state (returns {}); a file that exists but fails
+    to parse is a genuinely corrupt/torn state, distinguished via a None return, see
+    read_ticker_ownership_registry()'s own docstring for why that distinction matters on the
+    read path. No lock held here, callers hold acquire_log_lock() themselves when this needs to
+    be part of a read-modify-write critical section (update_ticker_ownership_registry()).
+    """
+    if not path.is_file():
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def read_ticker_ownership_registry() -> dict | None:
+    """
+    Epic 5 ("Cross-Config Ticker Safety & Portfolio Snapshot Accuracy Fixes" plan), Story 5.1.
+    Deliberately does NOT use this codebase's usual defensive `try/except (JSONDecodeError,
+    OSError): default = {}` idiom (used for low-stakes files like trailing_stop_hwm_*.json):
+    silently defaulting to an EMPTY registry on a read failure is exactly the moment this
+    mechanism's safety net would disappear, the opposite of the "fail safe" precedent every
+    other safety check in this file follows (_classify_orphaned_tickers()'s "unrecognized ->
+    untouched", the whole-book negative-momentum cash filter). Retries once (cheap insurance
+    against a genuinely torn read, though update_ticker_ownership_registry()'s atomic
+    temp-file + os.replace() write makes that near-impossible from this project's own code), and
+    on a second failure returns None (a sentinel, distinguishable from a genuinely-empty {}),
+    logging a TICKER_OWNERSHIP_REGISTRY_UNREADABLE WARNING. Callers (detect_cross_config_
+    ticker_overlap()) treat a None registry CONSERVATIVELY, not permissively, see that
+    function's own docstring.
+    """
+    path = _ticker_ownership_registry_path()
+    result = _read_ticker_ownership_registry_unlocked(path)
+    if result is not None:
+        return result
+    time.sleep(0.1)
+    result = _read_ticker_ownership_registry_unlocked(path)
+    if result is not None:
+        return result
+    logger.warning(
+        "Ticker ownership registry at %s could not be read (corrupt or unreadable after "
+        "retry), cross-config-file ticker overlap detection will conservatively assume every "
+        "configured ticker could be shared this run.", path,
+    )
+    log_alert(
+        "ALL", "TICKER_OWNERSHIP_REGISTRY_UNREADABLE", "WARNING",
+        f"Ticker ownership registry at {path} could not be read after retry, conservatively "
+        f"assuming every configured ticker could be shared this run.",
+        log_path=ALERTS_LOG_PATH,
+    )
+    return None
+
+
+_TICKER_OWNERSHIP_STALE_AFTER = timedelta(days=30)
+
+
+def update_ticker_ownership_registry(config_identity: str, portfolio: str,
+                                      tickers: list[str]) -> dict:
+    """
+    Epic 5, Story 5.1: the write half of the cross-config-file ticker ownership registry, the
+    mechanism closing the real, confirmed incident where a throwaway `--config test.yaml` with
+    an overlapping ticker caused a real paper-account destructive sell against config.yaml's own
+    real portfolio (check_ticker_overlap() only ever sees ONE process's in-memory `portfolios`
+    dict, it has no way to know a DIFFERENT config file also trades the same ticker on the same
+    real IBKR account).
+
+    Called on EVERY invocation (dry-run AND --live, see the per-portfolio loop's own call site),
+    early, right after this portfolio's own `tickers` is resolved: keeping the registry accurate
+    doesn't need a real broker connection, and a slightly-stale claim erring toward "still treat
+    as shared" is the safe failure direction, not a dangerous one.
+
+    Guarded by acquire_log_lock()/release_log_lock() on the registry's own path (same
+    acquire -> try/finally -> release shape append_hash_chained_row() already uses, reused
+    verbatim, no new locking primitive invented), so two processes racing to update the registry
+    serialize instead of one silently clobbering the other's claims. Written ATOMICALLY (temp
+    file + os.replace()), unlike this project's bare-write_text() idiom used for lower-stakes
+    flag files (peak_equity_*.txt, last_config_snapshot_*.json): a reader here must never see a
+    torn file.
+
+    For this (config_identity, portfolio) key: removes its own stale entries for tickers no
+    longer in `tickers` (self-cleaning as configs evolve, no explicit deregistration step
+    needed), upserts entries for every ticker that IS in `tickers` with a fresh timestamp. Also
+    prunes ANY entry (any owner) older than a fixed 30-day window, so an abandoned throwaway test
+    config's claim doesn't leak in this file forever. Returns the updated registry dict.
+
+    NOTE, explicit residual-risk disclosure (see docs/RISK_CONSTRAINTS.md's "Cross-Config-File
+    Ticker Ownership Registry" section for the full writeup): this closes the documented
+    incident class (a stale/infrequently-run config's claim not being visible to another process
+    at read time), it does NOT close a true simultaneous-execution race, nothing holds a lock
+    across "read registry -> place broker orders", the same category of disclosed-not-solved
+    race acquire_log_lock()'s own docstring already discloses for its own, narrower scope.
+    """
+    path = _ticker_ownership_registry_path()
+    lock_path = acquire_log_lock(str(path))
+    try:
+        registry = _read_ticker_ownership_registry_unlocked(path)
+        if registry is None:
+            # A corrupt registry on the WRITE path self-heals: a write is inherently a repair
+            # opportunity, unlike the read-only detection path, which must propagate the
+            # failure rather than silently paper over it, see read_ticker_ownership_registry().
+            registry = {}
+
+        my_key = f"{config_identity}||{portfolio}"
+        now = datetime.now()
+        stale_cutoff = now - _TICKER_OWNERSHIP_STALE_AFTER
+
+        updated: dict[str, dict[str, str]] = {}
+        for ticker, claims in registry.items():
+            kept_claims = {}
+            for key, ts in claims.items():
+                if key == my_key:
+                    continue  # dropped here, re-added fresh below only if still claimed
+                try:
+                    claim_time = datetime.fromisoformat(ts)
+                except ValueError:
+                    continue  # malformed timestamp, drop defensively rather than crash
+                if claim_time >= stale_cutoff:
+                    kept_claims[key] = ts
+            if kept_claims:
+                updated[ticker] = kept_claims
+
+        now_iso = now.isoformat()
+        for ticker in tickers:
+            updated.setdefault(ticker, {})[my_key] = now_iso
+
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        tmp_path.write_text(json.dumps(updated, indent=2, sort_keys=True))
+        os.replace(tmp_path, path)
+        return updated
+    finally:
+        release_log_lock(lock_path)
+
+
+def detect_cross_config_ticker_overlap(registry: dict | None, tickers: list[str],
+                                        config_identity: str, portfolio: str) -> dict[str, list[str]]:
+    """
+    Epic 5, Story 5.1: pure detection, same {ticker: [claim labels]} shape
+    check_ticker_overlap()'s existing same-file overlap map already returns, so it can be merged
+    directly into that dict just before calling scope_overlapping_holdings(), reusing that
+    function's EXISTING cap-to-own-FIFO-shares logic unchanged for a cross-file hit too, no
+    duplicated capping logic.
+
+    registry is None (read_ticker_ownership_registry() could not read it reliably this run):
+    CONSERVATIVE fallback, every ticker in `tickers` is treated as if it has an unknown
+    cross-file claim, so scope_overlapping_holdings() defensively caps this portfolio's ENTIRE
+    view of the broker's real positions at its own FIFO-derived shares for this one run, "favor
+    safety over availability", the same precedent _classify_orphaned_tickers()'s "unrecognized
+    -> untouched" and the whole-book negative-momentum cash filter already establish elsewhere.
+    """
+    if registry is None:
+        return {t: ["registry unavailable, assuming shared"] for t in tickers}
+
+    my_key = f"{config_identity}||{portfolio}"
+    overlap: dict[str, list[str]] = {}
+    for t in tickers:
+        others = [key for key in registry.get(t, {}) if key != my_key]
+        if others:
+            overlap[t] = others
+    return overlap
 
 
 # --------------------------------------------------------------------------- #
@@ -1481,6 +1653,13 @@ def main():
     #     flag, never actually prevent, see that function's own docstring for the real
     #     2026-07-16 incident this fixes. ---
     overlap = check_ticker_overlap(portfolios) if len(portfolios) > 1 else {}
+
+    # --- Epic 5's cross-config-file ticker ownership registry (Story 5.1): `config_identity`
+    #     canonicalizes THIS invocation's --config path (resolve_config_identity(), core/paths.py)
+    #     so config.yaml vs ./config.yaml vs an absolute path to the same file all key
+    #     identically in the shared registry, computed ONCE here, reused by every portfolio's
+    #     own registration call inside the loop below. ---
+    config_identity = resolve_config_identity(args.config)
     if overlap:
         overlap_desc = "; ".join(f"{t}: {names}" for t, names in overlap.items())
         logger.warning("TICKER OVERLAP across portfolios (destructive cross-portfolio "
@@ -1612,6 +1791,18 @@ def main():
             tickers = spec["tickers"]
             trade_log_path = str(logs_dir() / f"live_trades_log_{name}.csv")
             signal_rankings_log_path = str(logs_dir() / f"signal_rankings_log_{name}.csv")
+
+            # --- Epic 5, Story 5.1: register THIS portfolio's own ticker claims in the shared
+            #     cross-config-file registry, every invocation (dry-run AND --live, see
+            #     update_ticker_ownership_registry()'s own docstring for why: keeping the
+            #     registry accurate doesn't need a real broker connection, and a slightly-stale
+            #     claim erring toward "still treat as shared" is the safe failure direction).
+            #     Non-fatal: a registry write failure must never abort an otherwise-normal run. ---
+            try:
+                update_ticker_ownership_registry(config_identity, name, tickers)
+            except Exception as e:
+                logger.warning("[%s] Ticker ownership registry update failed (non-fatal, "
+                                "continuing): %s", name, e)
 
             # --- Time-based log retention (opt-in, cfg.enable_log_retention), this portfolio's
             #     OWN trade/signal-rankings/snapshot logs only, see
@@ -1854,6 +2045,22 @@ def main():
             #     from resolved_total_values, resolved once above the loop. ---
             if args.live:
                 current_positions = with_retry(get_ibkr_positions, 3, 2.0, args.port)
+                # Epic 5, Story 5.1: cross-config-file overlap detection, right after
+                # get_ibkr_positions(), before scope_overlapping_holdings(). cross_file_overlap
+                # is kept as its OWN local variable (not folded away) so the alert-attribution
+                # step below can tell a cross-file hit apart from a same-file one afterward;
+                # iter_overlap is a FRESH local each iteration (never `overlap = {**overlap,
+                # ...}`, which would rebind the loop-hoisted `overlap` itself and leak this
+                # portfolio's cross-file entries into a LATER portfolio's iteration, since a
+                # Python for-loop doesn't scope). scope_overlapping_holdings()'s own internals
+                # are completely unchanged, it only ever tests `ticker in overlap` to decide
+                # whether to cap, feeding it a widened dict is enough for the exact same
+                # cap-to-own-FIFO-shares logic to apply to a cross-file hit too.
+                registry = read_ticker_ownership_registry()
+                cross_file_overlap = detect_cross_config_ticker_overlap(
+                    registry, tickers, config_identity, name,
+                )
+                iter_overlap = {**overlap, **cross_file_overlap}
                 # scope_overlapping_holdings() MUST run immediately here, before
                 # current_holdings is built or used by anything below (orphaned-ticker
                 # classification, run()/generate_orders(), stop-loss checks, snapshot writing),
@@ -1861,20 +2068,40 @@ def main():
                 # numbers, closing the real 2026-07-16 cross-portfolio-sell incident this fixes.
                 # Dry-run/backtest never query a shared real account, nothing to scope there.
                 current_positions, capped_tickers = scope_overlapping_holdings(
-                    current_positions, tickers, overlap, trade_log_path, name,
+                    current_positions, tickers, iter_overlap, trade_log_path, name,
                 )
-                if capped_tickers:
-                    capped_desc = ", ".join(capped_tickers)
+                cross_file_capped = [t for t in capped_tickers if t in cross_file_overlap]
+                same_file_capped = [t for t in capped_tickers if t in overlap]
+                if same_file_capped:
+                    capped_desc = ", ".join(same_file_capped)
                     logger.warning(
                         "[%s] OVERLAPPING_TICKER_SCOPED: %s shared with a sibling portfolio "
                         "(%s), this portfolio's own view capped at its own trade log's real "
                         "shares, preventing a sell sized off the sibling's shares.",
-                        name, capped_desc, "; ".join(f"{t}: {overlap[t]}" for t in capped_tickers),
+                        name, capped_desc,
+                        "; ".join(f"{t}: {overlap[t]}" for t in same_file_capped),
                     )
                     log_alert(
                         name, "OVERLAPPING_TICKER_SCOPED", "WARNING",
                         f"{capped_desc} shared with a sibling portfolio, this portfolio's view "
                         f"capped at its own trade log's real shares this run.",
+                        log_path=ALERTS_LOG_PATH,
+                    )
+                if cross_file_capped:
+                    capped_desc = ", ".join(cross_file_capped)
+                    logger.warning(
+                        "[%s] CROSS_CONFIG_TICKER_OVERLAP_SCOPED: %s also claimed by a "
+                        "DIFFERENT config file/process on this real IBKR account (%s), this "
+                        "portfolio's own view capped at its own trade log's real shares, "
+                        "preventing a sell sized off shares this config doesn't own.",
+                        name, capped_desc,
+                        "; ".join(f"{t}: {cross_file_overlap[t]}" for t in cross_file_capped),
+                    )
+                    log_alert(
+                        name, "CROSS_CONFIG_TICKER_OVERLAP_SCOPED", "WARNING",
+                        f"{capped_desc} also claimed by a different config file/process on "
+                        f"this real IBKR account, this portfolio's view capped at its own "
+                        f"trade log's real shares this run.",
                         log_path=ALERTS_LOG_PATH,
                     )
             elif cfg.persist_dry_run_state:
@@ -2069,13 +2296,23 @@ def main():
             #     Also stores the benchmark price so period returns are computed
             #     automatically on the NEXT run by comparing to this row. ---
             try:
-                positions_value = sum(
-                    p["shares"] * latest_prices.get(t, 0.0) for t, p in current_positions.items()
+                # Epic 5, Story 5.2: reuses the ALREADY-EXISTING _compute_scoped_positions_value()
+                # (previously used only for the TOTAL_VALUE_DRIFT warning below) instead of an
+                # unscoped sum over ALL of current_positions, which double-counted a ticker
+                # legitimately shared between two portfolios (the documented TICKER_OVERLAP
+                # scenario) into every sharing portfolio's own cash_estimate. scoped_tickers
+                # passed to write_portfolio_snapshot() below uses the SAME set(tickers) |
+                # set(confirmed_orphaned) union, so the CSV's own positions_value column is now
+                # computed identically to this local value, previously two subtly different
+                # implicit-scoping formulas.
+                own_tickers = set(tickers) | set(confirmed_orphaned)
+                positions_value = _compute_scoped_positions_value(
+                    current_positions, latest_prices, tickers, confirmed_orphaned,
                 )
                 cash_estimate = max(total_value - positions_value, 0.0)
                 write_portfolio_snapshot(
                     name, current_positions, latest_prices, total_value, cash_estimate,
-                    benchmark_ticker=cfg.regime_benchmark,
+                    benchmark_ticker=cfg.regime_benchmark, scoped_tickers=own_tickers,
                 )
             except Exception as e:
                 logger.warning("[%s] Portfolio snapshot skipped due to error (non-fatal): %s", name, e)

@@ -53,21 +53,21 @@ lands (not written speculatively in advance).
 | # | Practice | Status |
 |---|---|---|
 | 1 | Volatility Targeting / Scaling | **Implemented (pre-existing)**, see "Volatility Scaling (Portfolio-Level)" above |
-| 2 | ATR-Based Trailing Stops | **Planned, Epic 2** — the existing `use_trailing_stop`/`trailing_stop_pct` trail is percentage-based; `core/technical_indicators.py`'s `atr()` exists but was, before this audit, wired into nothing but the email report |
+| 2 | ATR-Based Trailing Stops | **Implemented (Epic 2)** — `use_atr_trailing_stop`/`atr_trailing_stop_multiplier`, a volatility-adaptive trailing distance alongside the pre-existing percentage-based `use_trailing_stop`, see "ATR-Based Trailing Stop" below |
 | 3 | Cross-Sectional Beta Neutralization | **Not Applicable** — requires a short leg to neutralize net beta against; this system is strictly long-only |
 | 4 | Sector and Industry Neutralization | **Not Applicable (today)** — true benchmark-relative neutralization needs a real constituent-weights feed (e.g. actual S&P 500 sector weights) this project doesn't integrate; the existing `max_sector_weight`/`ticker_sectors` hard cap (row 20 below) is the practical substitute this system ships |
-| 5 | Equal Risk Contribution (Risk Parity) | **Planned, Epic 1** — a new `sizing_method: equal_risk_contribution` value, see "Equal Risk Contribution (ERC) Sizing" below |
-| 6 | Value-at-Risk (VaR) Budgeting | **Planned, Epic 1** — `core/functions_quant_extensions.py`'s `historical_var_cvar()` existed, fully coded, but before this audit was wired into nothing (its only 2 callers in the whole repo were `tests/test_governance.py`), see "VaR/CVaR Budget (Active Pre-Trade Constraint)" below |
-| 7 | Expected Shortfall (Conditional VaR) Optimization | **Planned, Epic 1** — same underlying function/gap as row 6, one combined feature (VaR and CVaR are reported and budgeted together, not two separate mechanisms) |
+| 5 | Equal Risk Contribution (Risk Parity) | **Implemented (Epic 1)** — a new `sizing_method: equal_risk_contribution` value, see "Equal Risk Contribution (ERC) Sizing" below |
+| 6 | Value-at-Risk (VaR) Budgeting | **Implemented (Epic 1)** — `core/functions_quant_extensions.py`'s `historical_var_cvar()` existed, fully coded, but before this audit was wired into nothing (its only 2 callers in the whole repo were `tests/test_governance.py`), see "VaR/CVaR Budget (Active Pre-Trade Constraint)" below |
+| 7 | Expected Shortfall (Conditional VaR) Optimization | **Implemented (Epic 1)** — same underlying function/gap as row 6, one combined feature (VaR and CVaR are reported and budgeted together, not two separate mechanisms) |
 | 8 | Maximum Drawdown (MDD) Control | **Implemented (pre-existing)**, per-portfolio + account-wide circuit breakers, see "Drawdown Circuit Breaker" above |
 | 9 | Dynamic Correlation Risk Overlay | **Implemented (pre-existing)**, `use_correlation_penalty`/`use_correlation_spike_regime`, see "Correlation Monitor" above |
-| 10 | Liquidity-Adjusted Position Sizing | **Planned, Epic 1** — the existing `use_liquidity_filter` is a binary in/out rank filter and `max_pct_of_adv`/`check_capacity()` is advisory-only (runs after order sizing, never mutates a size); this adds a genuinely continuous, ADV-scaled, active sizing path, see "Liquidity-Adjusted Position Sizing (Active)" below |
+| 10 | Liquidity-Adjusted Position Sizing | **Implemented (Epic 1)** — the existing `use_liquidity_filter` is a binary in/out rank filter and `max_pct_of_adv`/`check_capacity()` is advisory-only (runs after order sizing, never mutates a size); this adds a genuinely continuous, ADV-scaled, active sizing path, see "Liquidity-Adjusted Position Sizing (Active)" below |
 | 11 | Factor Risk Exposure Caps | **Implemented (Epic 3)** — a manually-declared factor-loadings cap (no vendor factor-return data source exists in this project, same honest caveat `ticker_sectors` already carries), see "Factor Risk Exposure Caps" below |
 | 12 | Trailing Drawdown High-Water-Mark Limits | **Implemented (pre-existing)** — the circuit breaker's peak-equity tracking (`risk/circuit_breaker.py`'s `_peak_equity_path()`) already measures drawdown from a running high-water mark, portfolio-level and account-wide |
 | 13 | Bid-Ask Spread and Transaction Cost Hurdle Filters | **Implemented (Epic 4)** — `max_bid_ask_spread_pct` (row in "Liquidity/Slippage Monitor" above) remains the shipped absolute spread ceiling; `cost_edge_hurdle_multiplier` adds the relative cost-vs-expected-edge hurdle, see "Cost-vs-Edge Hurdle Filter" below |
 | 14 | Cross-Asset Hedging with Liquid Proxies | **Not Applicable** — no derivatives/short capability exists to hedge with; this system is long-only |
 | 15 | Margin Utilization and Leverage Caps | **Not Applicable** — this system is unlevered and cash-only by design, no margin usage exists to monitor |
-| 16 | Shrinkage Estimator Covariance Matrix Regularization | **Planned, Epic 1** — the existing correlation-penalty/spike-detection math uses raw `pandas.DataFrame.corr()`, no regularization; a Ledoit-Wolf-style shrinkage estimator is added as a shared utility, see "Shrinkage Covariance Estimator" below |
+| 16 | Shrinkage Estimator Covariance Matrix Regularization | **Implemented (Epic 1)** — the existing correlation-penalty/spike-detection math uses raw `pandas.DataFrame.corr()`, no regularization; a Ledoit-Wolf-style shrinkage estimator is added as a shared utility, see "Shrinkage Covariance Estimator" below |
 | 17 | Turnover and Rebalancing Frequency Constraints | **Implemented (pre-existing)**, `max_turnover_pct`, see "Turnover Limit" above |
 | 18 | Stress Testing and Historical Scenario Analysis | **Implemented (pre-existing)**, `core/functions_quant_extensions.py`'s `scenario_shock()` plus the real 2008/2020/2022 crash-replay notebook (Epic 13, see `README.md`'s Known Gaps) |
 | 19 | Counterparty Credit Risk Limits | **Not Applicable** — single broker (IBKR), no OTC/multi-counterparty exposure exists to limit |
@@ -755,14 +755,70 @@ account historically, since there is no cross-invocation, cross-file registry of
 last touched this ticker." Confirmed harmless here only because it was a paper account and the
 position was later understood to be intentionally cleared by the account owner; the SAME
 mechanism would be genuinely dangerous against a real-money account if a throwaway/test config
-file ever shared a ticker with a real portfolio's own config. **Practical mitigation until a real
-fix exists**: never point `--config` at a file containing a ticker also configured in any other
-config file/portfolio trading the same real IBKR account; this project's own throwaway
-verification configs for Epic 1/Epic 2 were built with this rule in mind after this incident
-(deliberately ticker-disjoint from `config.yaml`'s real portfolios). A genuine fix (e.g. a
-process-external, persisted "which config/portfolio owns this ticker" registry, or extending
-`scope_overlapping_holdings()` to consult more than just the currently-loaded file) is out of
-scope for this epic and not yet built.
+file ever shared a ticker with a real portfolio's own config.
+
+**FIXED, Epic 5 ("Cross-Config Ticker Safety & Portfolio Snapshot Accuracy Fixes" plan)**: a
+persisted, cross-process ticker ownership registry now closes this gap, see "Cross-Config-File
+Ticker Ownership Registry" below for the full mechanism and its own honestly-disclosed residual
+risk (this fix does NOT close a true simultaneous-execution race, only the documented
+stale/infrequently-run-config incident class above).
+
+## Cross-Config-File Ticker Ownership Registry [New, Epic 5, LIVE-ONLY, always-on]
+
+Closes the incident documented above, in "ATR-Based Trailing Stop": `scope_overlapping_holdings()`
+already prevents a destructive sell against a ticker shared between two portfolios WITHIN one
+loaded `config.yaml`; this extends the same protection across SEPARATE config files/processes
+sharing one real IBKR account, no config field, always active, matching
+`scope_overlapping_holdings()`'s own always-on scope.
+
+A single shared JSON file, `data/ticker_ownership_registry.json`, `{ticker: {"<config
+path>||<portfolio>": "<timestamp>"}}`, keyed by a canonicalized config-path identity
+(`resolve_config_identity()`, `core/paths.py`, so `config.yaml`/`./config.yaml`/an absolute path
+to the same file all key identically). `daily_runner.py`'s per-portfolio loop registers this
+portfolio's own current `tickers:` list into the registry on EVERY invocation (dry-run AND
+`--live`, self-cleaning as configs evolve, no explicit deregistration step), then, in `--live`
+mode only, right after `get_ibkr_positions()`, checks the registry for any OTHER
+config-path/portfolio combination also claiming one of this portfolio's own tickers. A hit is
+merged into the SAME `overlap` dict `scope_overlapping_holdings()` already consumes for the
+same-file case, so that function's existing cap-to-own-FIFO-shares logic applies unchanged,
+`scope_overlapping_holdings()` itself was NOT modified. A `CROSS_CONFIG_TICKER_OVERLAP_SCOPED`
+`WARNING` alert (`log_alert()`) fires specifically when a cross-file cap activates, distinct
+from the pre-existing same-file `OVERLAPPING_TICKER_SCOPED` alert (a ticker can trigger both).
+
+Writes are guarded by the EXISTING `acquire_log_lock()`/`release_log_lock()` primitive
+(`core/audit_log.py`, the same mutual-exclusion sentinel `append_hash_chained_row()` already
+uses) and written atomically (temp file + `os.replace()`), so a concurrent reader never sees a
+torn file. Reads FAIL SAFE, not silent-empty: a read that fails to parse after one retry returns
+a `None` sentinel (distinguishable from a genuinely-empty registry) and fires a
+`TICKER_OWNERSHIP_REGISTRY_UNREADABLE` `WARNING`; the caller's fallback for `None` is
+CONSERVATIVE, treating every ticker this portfolio currently configures as if it has an unknown
+cross-file claim, defensively capping the whole portfolio's view for that one run rather than
+silently disabling the protection, the same "favor safety over availability" precedent
+`_classify_orphaned_tickers()`'s "unrecognized -> untouched" already establishes elsewhere.
+Entries older than 30 days are pruned on every write, preventing an abandoned throwaway test
+config's claim from leaking in this file forever.
+
+**Explicit, honestly-disclosed residual risk, not a claimed complete fix**: this design protects
+against the ALREADY-DOCUMENTED incident class (a stale/infrequently-run config's claim not being
+visible to another process at read time, exactly the shape of the real NVDA incident above). It
+does NOT close a true simultaneous-execution race, nothing holds a lock across "read registry ->
+place broker orders", the same category of disclosed-not-solved race `acquire_log_lock()`'s own
+docstring already discloses for its own, narrower scope. Two config processes launched within the
+same few seconds could still both proceed before either write is visible to the other.
+
+**Real verification, run 2026-08-05**: two throwaway configs (ticker-disjoint from `config.yaml`'s
+real portfolios) both configuring the same ticker were run `--live` against a real paper account,
+both natively and inside a rebuilt Docker container. The registry correctly persisted real claims
+from both live invocations, and correctly cross-referenced claims written from a DIFFERENT
+environment (`data/` is bind-mounted between host and container, confirmed the same registry file
+serves native and Docker runs interchangeably). `detect_cross_config_ticker_overlap()` correctly
+identified the cross-file claim in both environments. Honestly disclosed: both live test windows
+fell entirely outside RTH and the pre-market/after-hours window, so neither order filled this
+session, meaning the actual "prevents a destructive SELL against a real, non-zero shared position"
+outcome was proven only by the mocked/synthetic integration test suite
+(`TestCrossConfigOverlapIntegration`), not this live run, which instead confirms every other real
+piece of the mechanism (registration, persistence, cross-environment sharing, detection) against a
+real broker connection.
 
 ## Per-Ticker Stop-Loss Override
 

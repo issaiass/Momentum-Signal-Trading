@@ -50,6 +50,18 @@ def config_path(filename: str = "config.yaml") -> Path:
     return PROJECT_ROOT / filename
 
 
+def resolve_config_identity(config_path: str) -> str:
+    """
+    Canonical string identity for a --config path, so "config.yaml",
+    "./config.yaml", and an absolute path to the same file all key
+    identically (used by the cross-config-file ticker ownership registry,
+    daily_runner.py's update_ticker_ownership_registry()). Pure, no I/O
+    beyond the filesystem resolution itself, does not require the file to
+    exist.
+    """
+    return str(Path(config_path).resolve())
+
+
 def logs_dir() -> Path:
     d = PROJECT_ROOT / "logs"
     d.mkdir(exist_ok=True)

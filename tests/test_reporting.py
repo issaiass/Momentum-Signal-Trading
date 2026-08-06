@@ -55,6 +55,63 @@ class TestPortfolioSnapshot:
         monkeypatch.chdir(tmp_path)
         assert get_latest_snapshot("nonexistent", snapshot_dir=str(tmp_path)) is None
 
+    def test_scoped_tickers_none_is_byte_identical_regression(self, tmp_path, monkeypatch):
+        # Epic 5, Story 5.2: scoped_tickers=None (the default) must be byte-identical to this
+        # function's behavior before this param existed.
+        monkeypatch.chdir(tmp_path)
+        current_positions = {
+            "XLK": {"shares": 5, "avg_entry_price": 200.0},
+            "XLE": {"shares": 3, "avg_entry_price": 80.0},
+        }
+        latest_prices = {"XLK": 220.0, "XLE": 90.0}
+        write_portfolio_snapshot("p1", current_positions, latest_prices, total_value=2000.0,
+                                  cash=500.0, snapshot_dir=str(tmp_path))
+        latest = get_latest_snapshot("p1", snapshot_dir=str(tmp_path))
+        assert latest["positions_value"] == pytest.approx(5 * 220.0 + 3 * 90.0)
+        assert latest["n_positions"] == 2
+
+    def test_scoped_tickers_excludes_unscoped_ticker_from_all_three_outputs(self, tmp_path, monkeypatch):
+        # Epic 5, Story 5.2: the core fix for the double-counting bug. A ticker legitimately
+        # shared with a sibling portfolio (present in current_positions, e.g. the broker's
+        # whole-account view) but NOT in this portfolio's own scoped_tickers must be excluded
+        # from positions_value, unrealized_pnl, n_positions, AND position_details.
+        monkeypatch.chdir(tmp_path)
+        current_positions = {
+            "XLK": {"shares": 5, "avg_entry_price": 200.0},   # this portfolio's own
+            "XLE": {"shares": 3, "avg_entry_price": 80.0},    # a SIBLING portfolio's shares
+        }
+        latest_prices = {"XLK": 220.0, "XLE": 90.0}
+        write_portfolio_snapshot("p1", current_positions, latest_prices, total_value=1100.0,
+                                  cash=0.0, snapshot_dir=str(tmp_path), scoped_tickers={"XLK"})
+        latest = get_latest_snapshot("p1", snapshot_dir=str(tmp_path))
+        assert latest["positions_value"] == pytest.approx(5 * 220.0)
+        assert latest["unrealized_pnl"] == pytest.approx(5 * (220.0 - 200.0))
+        assert latest["n_positions"] == 1
+        assert "XLE" not in latest["positions_detail"]
+        assert "XLK" in latest["positions_detail"]
+
+    def test_scoped_positions_value_matches_compute_scoped_positions_value(self, tmp_path, monkeypatch):
+        # Epic 5, Story 5.2: daily_runner.py's own local positions_value/cash_estimate
+        # computation (call site A, _compute_scoped_positions_value()) and this function's own
+        # CSV positions_value column (call site B, scoped_tickers) must now be computed
+        # identically for the same run, previously two subtly different implicit-scoping
+        # formulas. Reuses the exact TICKER_OVERLAP shared-ticker shape
+        # TestComputeScopedPositionsValue::test_no_double_counting... already exercises.
+        import momentum_trading.daily_runner as daily_runner
+        monkeypatch.chdir(tmp_path)
+        current_positions = {"XLF": {"shares": 10.0, "avg_entry_price": 56.0}}
+        latest_prices = {"XLF": 50.0}
+        tickers, confirmed_orphaned = ["XLF"], []
+        scoped_tickers = set(tickers) | set(confirmed_orphaned)
+
+        expected = daily_runner._compute_scoped_positions_value(
+            current_positions, latest_prices, tickers, confirmed_orphaned,
+        )
+        write_portfolio_snapshot("p1", current_positions, latest_prices, total_value=1000.0,
+                                  cash=0.0, snapshot_dir=str(tmp_path), scoped_tickers=scoped_tickers)
+        latest = get_latest_snapshot("p1", snapshot_dir=str(tmp_path))
+        assert latest["positions_value"] == pytest.approx(expected)
+
 
 class TestSignalContextInOrders:
     """
